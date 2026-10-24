@@ -14,6 +14,7 @@
 
 #include "CharonMath.mqh"
 #include "CharonPyramid.mqh"
+#include "CharonBridge.mqh"
 
 //+------------------------------------------------------------------+
 //| Harness                                                          |
@@ -313,6 +314,101 @@ void TestArmGating(void)
   }
 
 //+------------------------------------------------------------------+
+//| Bridge: the command vocabulary is a security boundary            |
+//|                                                                  |
+//|  These assert what the bridge REFUSES. A verb that opens or sizes |
+//|  an order must never be accepted, so the negative cases here are  |
+//|  the important ones.                                              |
+//+------------------------------------------------------------------+
+void TestBridgeVerbs(void)
+  {
+   //--- the four permitted verbs
+   Check(CCharonBridge::VerbAllowed("arm"), "bridge: arm is permitted");
+   Check(CCharonBridge::VerbAllowed("disarm"), "bridge: disarm is permitted");
+   Check(CCharonBridge::VerbAllowed("trail_mode"), "bridge: trail_mode is permitted");
+   Check(CCharonBridge::VerbAllowed("ping"), "bridge: ping is permitted");
+
+   //--- nothing that could express a trade
+   Check(!CCharonBridge::VerbAllowed("open"), "bridge: open is refused");
+   Check(!CCharonBridge::VerbAllowed("close"), "bridge: close is refused");
+   Check(!CCharonBridge::VerbAllowed("modify"), "bridge: modify is refused");
+   Check(!CCharonBridge::VerbAllowed("buy"), "bridge: buy is refused");
+   Check(!CCharonBridge::VerbAllowed("sell"), "bridge: sell is refused");
+   Check(!CCharonBridge::VerbAllowed("size"), "bridge: size is refused");
+   Check(!CCharonBridge::VerbAllowed(""), "bridge: empty verb is refused");
+   Check(!CCharonBridge::VerbAllowed("ARM"), "bridge: verbs are case-sensitive");
+
+   //--- trail modes cover exactly the five declared values
+   Check(CCharonBridge::TrailModeValid(0), "bridge: trail OFF is valid");
+   Check(CCharonBridge::TrailModeValid(4), "bridge: trail RR_LOCK is valid");
+   Check(!CCharonBridge::TrailModeValid(-1), "bridge: trail -1 is refused");
+   Check(!CCharonBridge::TrailModeValid(5), "bridge: trail 5 is refused");
+  }
+
+//+------------------------------------------------------------------+
+//| Bridge: JSON helpers                                             |
+//|                                                                  |
+//|  The snapshot is built by string concatenation, so escaping must  |
+//|  be exact or a broker comment could corrupt the document.         |
+//+------------------------------------------------------------------+
+void TestBridgeJson(void)
+  {
+   Check(CCharonBridge::JsonEscape("plain") == "plain", "json: plain text untouched");
+   Check(CCharonBridge::JsonEscape("a\"b") == "a\\\"b", "json: quote escaped");
+   Check(CCharonBridge::JsonEscape("a\\b") == "a\\\\b", "json: backslash escaped");
+   Check(CCharonBridge::JsonEscape("a\nb") == "a\\nb", "json: newline escaped");
+   Check(CCharonBridge::JsonEscape("") == "", "json: empty string stays empty");
+
+   //--- non-ASCII must be escaped: the EA writes ANSI, Python reads UTF-8,
+   //--- and those only agree on ASCII. A euro sign would otherwise corrupt.
+   //--- MQL5 has no \uXXXX literal escape, so build the chars numerically.
+   string accent = ShortToString((ushort)233);      // e-acute
+   string euro   = ShortToString((ushort)8364);     // euro sign
+   string ctl    = ShortToString((ushort)31);       // unit separator
+   Check(CCharonBridge::JsonEscape(accent) == "\\u00e9", "json: accented byte escaped");
+   Check(CCharonBridge::JsonEscape(euro) == "\\u20ac", "json: euro sign escaped");
+   Check(CCharonBridge::JsonEscape("~") == "~", "json: last printable ASCII stays raw");
+   Check(CCharonBridge::JsonEscape(ctl) == "\\u001f", "json: control byte escaped");
+
+   //--- a round trip through the same reader the commands use
+   string encoded = "{\"verb\":\"arm\",\"id\":\"abc\"}";
+   string verb = "";
+   Check(CCharonBridge::ReadJsonString(encoded, "verb", verb), "json: verb field found");
+   Check(verb == "arm", "json: verb parsed", StringFormat("got '%s'", verb));
+
+   string missing = "";
+   Check(!CCharonBridge::ReadJsonString(encoded, "nope", missing),
+         "json: absent field reports false");
+
+   double issued = 0.0;
+   string withNum = "{\"issued\":1760000000}";
+   Check(CCharonBridge::ReadJsonNumber(withNum, "issued", issued),
+         "json: number field found");
+   Check(Near(issued, 1760000000.0, 0.5), "json: number parsed",
+         StringFormat("got %.1f", issued));
+
+   double absent = -1.0;
+   Check(!CCharonBridge::ReadJsonNumber(encoded, "issued", absent),
+         "json: absent number reports false");
+   Check(Near(absent, 0.0), "json: absent number yields 0.0");
+
+   //--- a string value must never be read as a number
+   double wrong = -1.0;
+   Check(!CCharonBridge::ReadJsonNumber(encoded, "verb", wrong),
+         "json: quoted value is not a number");
+
+   //--- an escaped quote inside a value must not end the string early
+   string tricky = "{\"id\":\"a\\\"b\",\"verb\":\"ping\"}";
+   string id = "";
+   Check(CCharonBridge::ReadJsonString(tricky, "id", id), "json: escaped quote parsed");
+   Check(id == "a\"b", "json: escaped quote preserved", StringFormat("got '%s'", id));
+
+   string verb2 = "";
+   Check(CCharonBridge::ReadJsonString(tricky, "verb", verb2), "json: field after escape found");
+   Check(verb2 == "ping", "json: parsing survives an embedded escape");
+  }
+
+//+------------------------------------------------------------------+
 //| Script entry point                                               |
 //+------------------------------------------------------------------+
 void OnStart(void)
@@ -330,6 +426,8 @@ void OnStart(void)
    TestPyramidModel();
    TestRrLadder();
    TestArmGating();
+   TestBridgeVerbs();
+   TestBridgeJson();
 
    PrintFormat("==================================================");
    PrintFormat("passed: %d   failed: %d", g_pass, g_fail);

@@ -24,7 +24,7 @@
 //| _tools/bump_version.py rewrites this literal and every other     |
 //| version string in the repository in one pass.                    |
 //+------------------------------------------------------------------+
-#define CHARON_VERSION        "1.0.2"
+#define CHARON_VERSION        "1.0.3"
 #define CHARON_NAME           "Charon"
 #define CHARON_REPO           "https://github.com/vickygujjar17/Charon-.git"
 
@@ -156,6 +156,7 @@ input int             InpMagic              = 20261024;   // Magic used by Charo
 input bool            InpVerbose            = true;       // Verbose console logging
 input bool            InpShowDashboard      = true;       // Draw the on-chart status panel
 input bool            InpPersistState       = true;       // Persist per-ticket state across restarts
+input bool            InpBridgeEnable       = false;      // Publish state for the optional Python bridge
 
 input group "===== [1] RISK MODEL ====="
 input ENUM_CHARON_LOT_MODE InpLotMode       = CHARON_LOT_RISK_PCT; // Sizing model

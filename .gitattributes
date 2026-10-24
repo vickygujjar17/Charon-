@@ -9,3 +9,12 @@
 *.py    text eol=lf
 *.md    text eol=lf
 VERSION text eol=lf
+
+# Bridge frontend and config: LF keeps the committed Tailwind build and the
+# files the bridge_check gate scans identical after a fresh clone.
+*.html  text eol=lf
+*.css   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.txt   text eol=lf
+

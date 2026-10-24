@@ -20,6 +20,7 @@
 #include "CharonTrail.mqh"
 #include "CharonPyramid.mqh"
 #include "CharonState.mqh"
+#include "CharonBridge.mqh"
 
 //--- one adoption pass can never scan more than this
 #define CHARON_SCAN_LIMIT 512
@@ -35,6 +36,7 @@ private:
    CCharonTrail      m_trail;
    CCharonPyramid    m_pyramid;
    CCharonState      m_state;
+   CCharonBridge     m_bridge;
    SCharonExecOpts   m_opts;
    SCharonBasket     m_basket;
    string            m_symbol;
@@ -50,6 +52,11 @@ private:
    void              MaybePyramid(void);
    void              MoveBasketToBreakeven(void);
    void              DrawDashboard(void);
+
+   //--- optional file bridge (never required for trading)
+   void              ServiceBridge(void);
+   bool              ApplyBridgeCommand(const SCharonBridgeCommand &cmd);
+   void              PublishBridge(void);
 
    //--- helpers
    bool              WantsTicket(const ulong magic) const;
@@ -172,6 +179,7 @@ bool CCharonEngine::Init(void)
    m_trail.Init(&m_risk);
    m_pyramid.Init(&m_risk, m_opts);
    m_state.Clear();
+   m_bridge.Init(InpBridgeEnable ? m_symbol : "");
 
    m_ready = true;
 
@@ -180,7 +188,7 @@ bool CCharonEngine::Init(void)
                m_risk.VolStep(), InpAtrPeriod,
                (m_risk.AtrReady() ? "ready" : "warming up"));
    PrintFormat("%s scope: strict SL | trailing (%s) | RR targets | risk sizing | pyramid %s",
-               CHARON_NAME, EnumToString(InpTrailMode),
+               CHARON_NAME, EnumToString(m_trail.Mode()),
                (InpPyramidEnable ? "enabled" : "disabled"));
    return true;
   }
@@ -190,6 +198,25 @@ bool CCharonEngine::Init(void)
 //+------------------------------------------------------------------+
 void CCharonEngine::Deinit(void)
   {
+   //--- tell the dashboard the EA is going away, so it can show "offline"
+   //--- instead of rendering the last snapshot as if the EA were still live
+   if(m_bridge.Enabled())
+     {
+      SCharonBridgeSnapshot snap;
+      ZeroMemory(snap);
+      snap.ready      = false;
+      snap.symbol     = m_symbol;
+      snap.serverTime = TimeCurrent();
+      snap.digits     = (m_risk.Digits() > 0 ? m_risk.Digits() : 5);
+      snap.currency   = AccountInfoString(ACCOUNT_CURRENCY);
+      snap.balance    = AccountInfoDouble(ACCOUNT_BALANCE);
+      snap.equity     = AccountInfoDouble(ACCOUNT_EQUITY);
+      snap.trailMode  = (int)m_trail.Mode();
+      snap.trailText  = EnumToString(m_trail.Mode());
+      SCharonBridgeLeg none[];
+      m_bridge.Publish(snap, none, 0);
+     }
+
    //--- flush every row before releasing the ATR handle
    m_state.FlushAll();
    m_risk.Deinit();
@@ -522,7 +549,7 @@ void CCharonEngine::ManageLadders(const int index)
      }
 
    //--- 4b) trailing engine (strictly improving moves only)
-   if(InpTrailMode == CHARON_TRAIL_OFF)
+   if(m_trail.Mode() == CHARON_TRAIL_OFF)
       return;
 
    double trailStop = 0.0;
@@ -873,7 +900,7 @@ void CCharonEngine::DrawDashboard(void)
                         InpStrictStopBufferPts);
    text += StringFormat("RR target   : %s\n", tpText);
    text += StringFormat("Sizing      : %s  |  cap %.2f%%\n", sizing, InpMaxRiskPct);
-   text += StringFormat("Trailing    : %s\n", EnumToString(InpTrailMode));
+   text += StringFormat("Trailing    : %s\n", EnumToString(m_trail.Mode()));
    string pyrTrig = (InpPyramidTrigger == CHARON_PYR_MANUAL ? "MANUAL" : "AUTO");
    if(InpPyramidTrigger == CHARON_PYR_MANUAL)
      {
@@ -1021,6 +1048,12 @@ void CCharonEngine::OnTimerWork(void)
       ManageRow(i);
    m_state.Compact();
    BuildBasket();
+
+   //--- the bridge is serviced on the timer only, never inside the tick
+   //--- pipeline: the dashboard is a convenience and must never sit between
+   //--- a tick and a stop modification.
+   ServiceBridge();
+
    DrawDashboard();
    m_busy = false;
   }
@@ -1052,6 +1085,243 @@ void CCharonEngine::OnKey(const long key)
                (InpPyramidArmTimeoutSec > 0
                 ? StringFormat("%ds", InpPyramidArmTimeoutSec) : "never"));
    DrawDashboard();
+  }
+
+//+------------------------------------------------------------------+
+//| Drain the command inbox, then publish a fresh snapshot           |
+//|                                                                  |
+//|  Order matters. Commands are applied first so the state the       |
+//|  dashboard receives on this tick already reflects them; otherwise |
+//|  the panel would show "ARMED" a full second after the click.      |
+//|  Both halves are cheap: Poll() reads at most one small file,      |
+//|  Publish() writes one small file.                                 |
+//+------------------------------------------------------------------+
+void CCharonEngine::ServiceBridge(void)
+  {
+   if(!m_bridge.Enabled())
+      return;
+
+   //--- a bounded drain so a flood of files can never delay a tick
+   for(int guard = 0; guard < 8; guard++)
+     {
+      SCharonBridgeCommand cmd;
+      if(!m_bridge.Poll(cmd))
+         break;                      // inbox empty, or the file was refused
+      ApplyBridgeCommand(cmd);
+     }
+
+   PublishBridge();
+  }
+
+//+------------------------------------------------------------------+
+//| Translate one validated command into existing engine state        |
+//|                                                                  |
+//|  Every branch calls a method that already existed before the      |
+//|  bridge did, so the bridge adds a remote input device and no new   |
+//|  capability. Nothing here can reach CharonTrade.mqh.              |
+//+------------------------------------------------------------------+
+bool CCharonEngine::ApplyBridgeCommand(const SCharonBridgeCommand &cmd)
+  {
+   if(!cmd.valid)
+      return false;
+
+   if(cmd.verb == CHARON_BRIDGE_V_ARM)
+     {
+      //--- identical rules to OnKey(): an arm only means anything when the
+      //--- trigger is MANUAL. Reporting the refusal keeps the log honest
+      //--- instead of silently pretending the arm took effect.
+      if(InpPyramidTrigger != CHARON_PYR_MANUAL)
+        {
+         PrintFormat("%s bridge: arm ignored - pyramid trigger is AUTO", CHARON_NAME);
+         return false;
+        }
+      if(!InpPyramidEnable)
+        {
+         PrintFormat("%s bridge: arm ignored - pyramiding is disabled", CHARON_NAME);
+         return false;
+        }
+      if(!m_basket.valid)
+        {
+         PrintFormat("%s bridge: arm ignored - no basket on %s", CHARON_NAME, m_symbol);
+         return false;
+        }
+      m_pyramid.Arm();
+      PrintFormat("%s bridge: pyramid trigger armed via dashboard (expires in %s)",
+                  CHARON_NAME,
+                  (InpPyramidArmTimeoutSec > 0
+                   ? StringFormat("%ds", InpPyramidArmTimeoutSec) : "never"));
+      return true;
+     }
+
+   if(cmd.verb == CHARON_BRIDGE_V_DISARM)
+     {
+      m_pyramid.ClearArm();
+      PrintFormat("%s bridge: pyramid trigger disarmed via dashboard", CHARON_NAME);
+      return true;
+     }
+
+   if(cmd.verb == CHARON_BRIDGE_V_TRAILMODE)
+     {
+      int mode = (int)StringToInteger(cmd.arg);
+      if(!CCharonBridge::TrailModeValid(mode))
+         return false;
+      m_trail.SetMode((ENUM_CHARON_TRAIL_MODE)mode);
+      PrintFormat("%s bridge: trailing mode -> %s", CHARON_NAME,
+                  EnumToString(m_trail.Mode()));
+      return true;
+     }
+
+   if(cmd.verb == CHARON_BRIDGE_V_PING)
+      return true;                    // liveness probe, no state change
+
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Assemble and publish the snapshot the dashboard renders          |
+//|                                                                  |
+//|  This is a projection of state that already exists - no risk      |
+//|  figure, RR rung or tier trigger is recomputed here. The ladder    |
+//|  strings come straight from RrLadderText(), so the panel and the   |
+//|  chart can never drift apart.                                      |
+//+------------------------------------------------------------------+
+void CCharonEngine::PublishBridge(void)
+  {
+   SCharonBridgeSnapshot snap;
+   ZeroMemory(snap);
+
+   snap.ready      = m_ready;
+   snap.symbol     = m_symbol;
+   snap.serverTime = TimeCurrent();
+   snap.dashboardOn = InpShowDashboard;
+   snap.persistOn   = InpPersistState;
+
+   snap.digits   = m_risk.Digits();
+   snap.currency = AccountInfoString(ACCOUNT_CURRENCY);
+   snap.balance  = AccountInfoDouble(ACCOUNT_BALANCE);
+   snap.equity   = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   //--- basket: copied, never re-derived
+   snap.basketValid    = m_basket.valid;
+   snap.basketMixed    = m_basket.mixed;
+   snap.basketDir      = m_basket.dir;
+   snap.basketLegs     = m_basket.legs;
+   snap.basketLot      = m_basket.lot;
+   snap.basketAvgEntry = m_basket.avgEntry;
+   snap.basketOpenPL   = m_basket.openPL;
+   snap.basketRiskMoney = m_basket.riskMoney;
+   snap.basketRiskPct   = m_basket.riskPct;
+   snap.basketBest      = m_basket.bestPrice;
+
+   if(m_basket.valid && !m_basket.mixed)
+      snap.basketLadder = RrLadderText(m_basket.avgEntry, BasketRefRisk(),
+                                       ChIsLong(m_basket.dir));
+
+   //--- risk model in force, worded exactly as the chart panel words it
+   string slUnit = StringFormat("%.0f points", InpSlPoints);
+   if(InpSlUnit == CHARON_SL_ATR)
+      slUnit = StringFormat("ATR x%.2f", InpSlAtrMult);
+   else if(InpSlUnit == CHARON_SL_PRICE_PCT)
+      slUnit = StringFormat("%.2f%% of price", InpSlPricePct);
+   snap.slText = slUnit;
+
+   string tpText = "no target";
+   if(InpTpUnit == CHARON_TP_RR)
+      tpText = StringFormat("%.2fR", InpTpRR);
+   else if(InpTpUnit == CHARON_TP_POINTS)
+      tpText = StringFormat("%.0f points", InpTpPoints);
+   snap.tpText = tpText;
+
+   string sizing = StringFormat("%.2f lots", InpFixedLots);
+   if(InpLotMode == CHARON_LOT_RISK_PCT)
+      sizing = StringFormat("%.2f%% of %s", InpRiskPct,
+                            (InpUseEquity ? "equity" : "balance"));
+   else if(InpLotMode == CHARON_LOT_FIXED_MONEY)
+      sizing = StringFormat("%.2f %s", InpRiskMoney,
+                            AccountInfoString(ACCOUNT_CURRENCY));
+   snap.sizingText = sizing;
+   snap.maxRiskPct = InpMaxRiskPct;
+
+   //--- trailing / pyramid
+   snap.trailMode = (int)m_trail.Mode();
+   snap.trailText = EnumToString(m_trail.Mode());
+   snap.pyramidEnabled   = InpPyramidEnable;
+   snap.pyramidMaxLegs   = ChClampI(InpPyramidMaxLegs, 1, CHARON_MAX_TIERS);
+   snap.pyramidMaxRiskPct = InpPyramidMaxRiskPct;
+   snap.pyramidTrigger   = (InpPyramidTrigger == CHARON_PYR_MANUAL ? 1 : 0);
+   snap.pyramidArmKey    = InpPyramidArmKey;
+   snap.pyramidArmed     = false;
+   snap.pyramidSecsLeft  = -1;
+
+   if(InpPyramidTrigger == CHARON_PYR_MANUAL && m_pyramid.IsArmed())
+     {
+      bool live = ChArmIsLive(true, m_pyramid.ArmedAt(), TimeCurrent(),
+                              InpPyramidArmTimeoutSec);
+      snap.pyramidArmed = live;
+      if(live && InpPyramidArmTimeoutSec > 0)
+        {
+         long left = (long)InpPyramidArmTimeoutSec
+                     - (long)(TimeCurrent() - m_pyramid.ArmedAt());
+         snap.pyramidSecsLeft = (left > 0 ? left : 0);
+        }
+     }
+
+   //--- next tier + progress, mirroring MaybePyramid()'s arithmetic
+   int highestTier = 1;
+   for(int t = 0; t < m_state.Count(); t++)
+     {
+      SCharonPosState r;
+      if(m_state.Get(t, r) && r.tier > highestTier)
+         highestTier = r.tier;
+     }
+   snap.nextTier = highestTier + 1;
+
+   double refRisk = BasketRefRisk();
+   if(m_basket.valid && !m_basket.mixed && refRisk > 0.0)
+     {
+      bool isLong = ChIsLong(m_basket.dir);
+      snap.progressRR = ChProgressRR(m_basket.avgEntry, refRisk,
+                                     (isLong ? m_risk.Bid() : m_risk.Ask()), isLong);
+     }
+
+   //--- legs
+   SCharonBridgeLeg legs[];
+   ArrayResize(legs, CHARON_BRIDGE_MAX_LEGS);
+   int n = 0;
+   for(int i = 0; i < m_state.Count() && n < CHARON_BRIDGE_MAX_LEGS; i++)
+     {
+      SCharonPosState row;
+      if(!m_state.Get(i, row))
+         continue;
+      if(!PositionSelectByTicket(row.ticket))
+         continue;
+
+      bool isLong = ChIsLong(row.type);
+      double px   = (isLong ? m_risk.Bid() : m_risk.Ask());
+      double liveSl = PositionGetDouble(POSITION_SL);
+
+      legs[n].ticket      = row.ticket;
+      legs[n].type        = row.type;
+      legs[n].tier        = row.tier;
+      legs[n].entry       = row.entry;
+      legs[n].lot         = row.lot;
+      legs[n].currentSL   = liveSl;
+      legs[n].riskPrice   = row.riskPrice;
+      legs[n].hwm         = row.hwm;
+      legs[n].progressRR  = ChProgressRR(row.entry, row.riskPrice, px, isLong);
+      legs[n].trailActive = row.trailActive;
+      legs[n].beDone      = row.beDone;
+      legs[n].halfRiskDone = row.halfRiskDone;
+      legs[n].ladder      = "";
+      //--- per-leg ladder, projected from that leg's own entry and own R so a
+      //--- tier's targets never inherit the primary's geometry
+      if(row.riskPrice > 0.0 && row.entry > 0.0)
+         legs[n].ladder = RrLadderText(row.entry, row.riskPrice, isLong);
+      n++;
+     }
+   snap.legCount = n;
+
+   m_bridge.Publish(snap, legs, n);
   }
 
 //+------------------------------------------------------------------+

@@ -63,10 +63,30 @@ Charon/
   CharonTrail.mqh         trailing engine, 4 modes, high-water mark
   CharonPyramid.mqh       tier ladder, gates, scale-in execution
   CharonState.mqh         per-ticket table, persistence, basket rows
+  CharonBridge.mqh        optional file bridge to the Python dashboard (no order verbs)
   CharonEngine.mqh        orchestration, basket view, dashboard
   CharonSelfTest.mq5      unit tests for the pure math (never trades)
+  bridge/
+    main.py               FastAPI app: snapshot in, dashboard + 3 buttons out
+    charon_bridge/
+      version.py          BRIDGE_VERSION, rewritten by bump_version.py
+      paths.py            locates Common\Files\Charon, sanitises symbol names
+      schema.py           the wire contract; the verb whitelist lives here
+      state.py            reads the snapshot, decides live / stale / offline
+      commands.py         atomic command writes, FIFO names, audit trail
+      logs.py             ring buffer behind the SSE log tail
+      mt5_adapter.py      optional read-only terminal diagnostic
+    static/
+      index.html          the dashboard
+      app.js              renders it; never recomputes a price
+      tailwind.css        PREBUILT — no CDN, works offline
+    tests/                72 pytest tests
+    requirements.txt
+    requirements-dev.txt
+    .env.example
   _tools/
     build_check.ps1       staged MetaEditor compile gate (0 errors / 0 warnings)
+    bridge_check.ps1      Python gate: ruff, pytest, invariant assertions
     bump_version.py       keeps every version string in lockstep
   README.md
   CHANGELOG.md
@@ -81,8 +101,13 @@ Dependency direction is one-way and acyclic:
 CharonMath -> CharonRisk -> CharonTrade -> CharonStops -> CharonTrail
                                               \-> CharonPyramid
                                      CharonState (leaf, broker reads only)
+                                    CharonBridge (leaf, file I/O only)
                                                         \-> CharonEngine -> Charon.mq5
 ```
+
+`CharonBridge` is a leaf: it depends on nothing but `CharonDefines` and `CharonMath`, so
+it can never reach an order function even by accident. `CharonEngine` feeds it a
+snapshot and hands it validated commands to apply.
 
 ---
 
@@ -298,6 +323,72 @@ Nothing moves a stop or opens a trade until you enable it.
 
 ---
 
+## The dashboard (optional)
+
+Charon ships a local web panel. It is **off by default** and the EA is fully functional
+without it — enable `InpBridgeEnable` on the chart when you want it.
+
+```powershell
+cd bridge
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8787
+# open http://127.0.0.1:8787
+```
+
+### Why files instead of an HTTP server in the EA
+
+MQL5 has no `SocketListen` or `SocketAccept`, and an EA cannot be called into from
+outside the terminal. A shared directory is the only channel both sides can reach
+without shipping a bridge DLL. `FILE_COMMON` (`%APPDATA%\MetaQuotes\Terminal\Common\
+Files\Charon\`) is shared by every terminal on the machine and needs no `WebRequest`
+URL allow-listing, so there is no security setting to weaken.
+
+```
+state_<SYMBOL>.json          EA writes once per timer tick, Python reads
+commands\*.json              Python writes, EA consumes
+commands\processed\*.json    EA renames each consumed file here (ok_* / rejected_*)
+```
+
+Both directions write a temp file and rename it into place, so neither side can ever
+read a half-written document. Each command is retired **before** it is applied, so a
+crash cannot replay it; a command stamped more than 60s away from the EA's clock is
+refused outright.
+
+### What the dashboard can and cannot do
+
+| Can | Cannot |
+|---|---|
+| Show basket, legs, live stop, R progress | Place, close, size or modify an order |
+| Render the EA's RR ladder verbatim | Compute a rung price itself |
+| Arm / disarm the MANUAL pyramid trigger | Override any risk gate |
+| Select the trailing mode | Move a stop directly |
+| Tail the bridge log | Substitute for the Experts log |
+
+The command vocabulary is four verbs — `arm`, `disarm`, `trail_mode`, `ping` — and both
+sides whitelist it independently, so neither can widen the set alone. There is no verb
+that can express an order. `POST /api/trade` exists purely to answer **`405`** with the
+reason, so someone who assumes otherwise gets a straight answer.
+
+Arming from the browser is the same call the `A` hotkey makes, and every other gate —
+max legs, cooldown, spread, basket risk — still applies. An arm can never force an
+exposure add the risk model would reject.
+
+### Honesty about staleness
+
+The panel polls once a second. Past **5 seconds** of snapshot age the header turns amber
+and a sticky banner reads *STALE DATA — do not act on these numbers*; past **30 seconds**
+it turns red and reports the EA offline. A missing ladder field renders as *not reported*
+rather than a plausible-looking price. Python never recomputes a risk figure: it has no
+tick data, and a number that looks authoritative but disagrees with the chart is worse
+than no number.
+
+The stylesheet is precompiled and vendored (`static/tailwind.css`), so the panel renders
+correctly with no network access. The server binds `127.0.0.1` only; set `CHARON_TOKEN`
+to require `X-Charon-Token` on the `/api/*` routes if other local processes are a concern.
+
+---
+
 ## Building and testing
 
 Charon is validated by a staged compile gate. It never compiles against your live
@@ -307,25 +398,46 @@ terminal headers and never deploys anything — the `.ex5` lands in `%TEMP%`.
 # 0 errors / 0 warnings required, and every header must come from the staging tree
 powershell -NoProfile -ExecutionPolicy Bypass -File _tools\build_check.ps1
 
-# version strings must agree everywhere
+# version strings must agree everywhere (EA, #property, VERSION, bridge)
 python _tools\bump_version.py --check
+
+# Python bridge: ruff + pytest + the no-order-path invariants
+powershell -NoProfile -ExecutionPolicy Bypass -File _tools\bridge_check.ps1
 ```
 
 The gate compiles **both** `Charon.mq5` and `CharonSelfTest.mq5`, and fails if any
 `#include` resolved outside the staging tree — so a green result means *this commit*
 compiled, not some stale deployed copy.
 
+`bridge_check.ps1` is deliberately offline: it never installs a package or downloads a
+wheel. Besides linting and running the tests, it asserts three things that are easy to
+break by accident — that no bridge module calls an MT5 order function, that
+`POST /api/trade` still refuses with `405`, and that the dashboard stylesheet is
+vendored rather than pulled from a CDN.
+
 ### Unit tests
 
 `CharonSelfTest.mq5` asserts the pure arithmetic: money conversion, lot rounding (always
 down), stop geometry for all three SL units, R projection and progress, the improvement
-gate, HWM tracking, clamps, the pyramid tier model, the RR ladder projection, and manual
-arm expiry. It performs no trades and needs no market data. Run it on any chart and read
-the log:
+gate, HWM tracking, clamps, the pyramid tier model, the RR ladder projection, manual arm
+expiry, and the bridge's command vocabulary and JSON helpers. It performs no trades and
+needs no market data. Run it on any chart and read the log:
 
 ```
-SELFTEST RESULT: PASS (98/98)
+SELFTEST RESULT: PASS (135/135)
 ```
+
+The bridge's 72 Python tests run offline:
+
+```powershell
+cd bridge
+.\.venv\Scripts\python.exe -m pytest tests -q
+```
+
+`test_ladder.py` pins the invariant that a missing ladder surfaces as `null` rather than
+a recomputed price. `test_live_server.py` starts a real uvicorn process and speaks HTTP
+to it, because static mounting and the vendored stylesheet are exactly the things
+in-process tests cannot see.
 
 ---
 
@@ -333,7 +445,9 @@ SELFTEST RESULT: PASS (98/98)
 
 `CHARON_VERSION` in `CharonDefines.mqh` is the single source of truth for the release
 string. `#property version` must use MetaEditor's numeric `xxx.yyy` form, which mirrors it
-(`1.0.0 → 1.00`, `1.2.3 → 1.02`).
+(`1.0.0 → 1.00`, `1.2.3 → 1.02`). `BRIDGE_VERSION` in `bridge/charon_bridge/version.py`
+carries the same release string, so the EA and the panel can never claim different
+versions — `bump_version.py --check` fails if the four disagree.
 
 Every change bumps the version, and every commit subject starts with it:
 
@@ -360,6 +474,14 @@ Use `_tools/bump_version.py` rather than editing version literals by hand.
   scale out.
 - **Not a strategy-tester EA.** Because entries are human, there is nothing for the tester
   to drive. Validate on a demo account.
+- **The EA runs standalone.** The Python dashboard is optional. With
+  `InpBridgeEnable = false` nothing writes to `Common\Files` and every trading feature
+  above works identically.
+- **One bridge per terminal.** Snapshot names are per symbol, so several charts can run
+  at once, but two bridge processes pointed at the same terminal would race on the
+  command inbox.
+- **The dashboard log is not the trading record.** It is a bridge-side transcript; the
+  terminal's Experts log remains authoritative for what the EA decided and why.
 
 ---
 

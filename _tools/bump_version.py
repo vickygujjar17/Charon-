@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """bump_version.py -- keep every Charon version string in lockstep.
 
-Charon's release identifier lives in exactly two shapes:
+Charon's release identifier lives in exactly three shapes:
 
   1. `#define CHARON_VERSION        "1.0.0"`  in CharonDefines.mqh
      -- the human-facing release string.
   2. `#property version   "1.00"`             in every .mq5/.mqh
      -- MetaEditor requires the numeric xxx.yyy form; it always mirrors
         CHARON_VERSION (1.0.0 -> 1.00, 1.2.3 -> 1.02).
+  3. `BRIDGE_VERSION = "1.0.0"`               in bridge/charon_bridge/version.py
+     -- the Python bridge ships with the EA, so the two must never
+        disagree about which release is installed.
 
 Usage
     python _tools/bump_version.py --check           # verify only (CI gate)
@@ -27,6 +30,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 VERSION_DEF = re.compile(r'(#define\s+CHARON_VERSION\s+")([^"]+)(")')
 VERSION_PROP = re.compile(r'(#property\s+version\s+)"([^"]+)"')
 SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+# --- the Python bridge carries the same release number
+BRIDGE_VERSION_PY = REPO_ROOT / "bridge" / "charon_bridge" / "version.py"
+BRIDGE_VERSION_DEF = re.compile(r'(BRIDGE_VERSION\s*=\s*")([^"]+)(")')
 
 
 def property_form(version: str) -> str:
@@ -114,10 +121,29 @@ def main(argv: list[str] | None = None) -> int:
             if not args.check and not args.dry_run:
                 vfile.write_text(target + "\n", encoding="utf-8", newline="\n")
 
+    # --- the Python bridge must ship the same release number
+    bridge_files = 0
+    if BRIDGE_VERSION_PY.is_file():
+        bridge_files = 1
+        text = read(BRIDGE_VERSION_PY)
+        original = text
+        for hit in BRIDGE_VERSION_DEF.finditer(original):
+            if hit.group(2) != target:
+                problems.append(
+                    f"bridge/charon_bridge/version.py: BRIDGE_VERSION "
+                    f"\"{hit.group(2)}\" != \"{target}\"")
+        text = BRIDGE_VERSION_DEF.sub(lambda m: m.group(1) + target + m.group(3), text)
+        if text != original:
+            changes.append("bridge/charon_bridge/version.py")
+            if not args.check and not args.dry_run:
+                BRIDGE_VERSION_PY.write_text(text, encoding="utf-8", newline="\n")
+    else:
+        problems.append("bridge/charon_bridge/version.py: missing")
+
     print(f"current CHARON_VERSION : {current}")
     print(f"target  CHARON_VERSION : {target}")
     print(f"#property version form : {expected_prop}")
-    print(f"files scanned          : {len(source_files())}")
+    print(f"files scanned          : {len(source_files())} MQL5 + {bridge_files} bridge")
 
     if args.check:
         if problems:

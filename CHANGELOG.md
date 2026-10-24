@@ -7,7 +7,81 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
-## [1.0.2] - 2026-10-24
+## [1.0.3] - 2026-10-24
+
+An optional dashboard, built on a file bridge rather than an HTTP one. The EA is
+unchanged in what it decides: it still owns every order, stop and size. Everything
+new here is a window and a very small number of switches.
+
+### Added
+
+- **`CharonBridge.mqh`** — optional, off by default (`InpBridgeEnable = false`).
+  Writes a JSON snapshot to `Common\Files\Charon\state_<SYMBOL>.json` once per timer
+  tick and drains `commands\*.json`, one command per tick. Both directions rename a
+  temp file into place, so neither side can read a half-written document.
+- **Consume-once command handling.** A command is renamed into
+  `commands\processed\` as `ok_*` or `rejected_*` *before* it is applied, so a crash
+  between read and apply cannot replay it. Nothing is deleted — the directory is an
+  audit trail of what the EA accepted and refused, and why.
+- **Anti-replay window.** A command stamped more than 60s in the past or future is
+  refused. `CHARON_BRIDGE_SCHEMA` must match on both sides.
+- **Mutable trailing mode.** `CCharonTrail` gained `m_mode` / `SetMode()` / `Mode()`,
+  seeded from `InpTrailMode` at `Init()`. The eight previous direct reads of the input
+  now read the live mode, which is what lets the dashboard change it. Default
+  behaviour is byte-for-byte unchanged.
+- **`bridge/` — a FastAPI service** (`charon_bridge` package): snapshot reader with
+  staleness verdicts, command writer, ring-buffer log, and an optional read-only
+  MetaTrader5 diagnostic adapter.
+- **Endpoints.** `GET /api/health`, `/api/status`, `/api/positions`, `/api/terminal`,
+  `/api/logs` (JSON or SSE), `/api/commands`; `POST /api/pyramid/arm`,
+  `/api/pyramid/disarm`, `/api/trail`.
+- **`POST /api/trade` always returns `405`** with the reason. It exists so that
+  someone assuming the bridge can trade gets a straight answer instead of a 404.
+- **Tailwind dashboard** at `/`, with the stylesheet **precompiled and vendored**
+  (`static/tailwind.css`, 12 KB) — no CDN, so the panel renders identically offline.
+  A sticky banner turns amber past 5s of snapshot age and red past 30s.
+- **`_tools/bridge_check.ps1`** — offline Python gate: ruff, pytest, and explicit
+  assertions that no bridge module references an MT5 order function, that
+  `/api/trade` still refuses, and that the CSS is vendored rather than linked.
+- **72 Python tests**, including `test_ladder.py` (a missing ladder must surface as
+  `null`, never as a recomputed price) and a live-server suite that starts uvicorn
+  and speaks HTTP to it.
+
+### Changed
+
+- `_tools/bump_version.py` now also rewrites `BRIDGE_VERSION` in
+  `bridge/charon_bridge/version.py` and fails `--check` when the three version
+  strings disagree.
+- Self-test assertions: 98 → 135 (18 command-vocabulary, 19 JSON helper incl. non-ASCII
+  escaping). The bridge self-tests assert what is **refused**: `open`, `close`, `modify`,
+  `buy`, `sell`, `size` and `ARM` are all rejected.
+- `build_check.ps1` compiles 10 headers (was 9) at 0 errors / 0 warnings.
+
+### Design notes
+
+- **Files, not sockets.** MQL5 has no `SocketListen`/`SocketAccept`, and an EA cannot
+  be called into. A shared directory is the only channel both sides can use without
+  a bridge DLL, and `FILE_COMMON` needs no `WebRequest` allow-listing.
+- **The verb list is the security boundary.** `arm`, `disarm`, `trail_mode`, `ping`.
+  Both sides whitelist independently, so neither can widen the set alone. There is no
+  verb that can express an order.
+- **The ladder is never recomputed.** Python and the browser render the EA's
+  `RrLadderText()` string verbatim, so a rung on the dashboard cannot disagree with
+  the rung on the chart.
+- **Loopback by default**, optional `X-Charon-Token` when `CHARON_TOKEN` is set.
+  `/api/health` and `/api/logs` stay open so a supervisor or an `EventSource` can
+  reach them.
+
+### Limitations
+
+- The bridge is **optional**: the EA runs standalone, and every trading feature above
+  works with `InpBridgeEnable = false`.
+- The dashboard's log is a bridge-side transcript. The terminal's Experts log remains
+  the authoritative trading record.
+- One bridge process per terminal is assumed; per-symbol snapshot names prevent two
+  charts clobbering each other, but two bridges would race on the command inbox.
+
+
 
 Two additions on top of 1.0.1: a manual trigger for the pyramid ladder, and an RR ladder
 readout on the panel. Everything that 1.0.1 already did — risk sizing, strict stops, RR

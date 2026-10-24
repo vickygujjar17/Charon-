@@ -15,6 +15,12 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.ruff_cache/
+.env
+
+# --- Node (Tailwind is built once; only the output is committed) ------------
+bridge/node_modules/
+bridge/package-lock.json
 
 # --- Editors / OS -----------------------------------------------------------
 .vscode/

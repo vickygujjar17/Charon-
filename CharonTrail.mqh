@@ -22,10 +22,17 @@ class CCharonTrail
   {
 private:
    CCharonRisk      *m_risk;
+   ENUM_CHARON_TRAIL_MODE m_mode;   // live mode; seeds from InpTrailMode at Init()
 
 public:
                      CCharonTrail(void);
    void              Init(CCharonRisk *risk);
+
+   //--- the active mode is state, not a constant: the dashboard may change it
+   //--- between ticks. Init() seeds it from the InpTrailMode input, so an
+   //--- untouched chart behaves exactly as before.
+   void              SetMode(const ENUM_CHARON_TRAIL_MODE mode);
+   ENUM_CHARON_TRAIL_MODE Mode(void) const { return m_mode; }
 
    //--- true once the activation threshold has been reached
    bool              IsActivated(const double entry, const double riskPrice,
@@ -49,12 +56,23 @@ public:
 CCharonTrail::CCharonTrail(void)
   {
    m_risk = NULL;
+   m_mode = InpTrailMode;           // seed now so a bare instance is sane
   }
 
 //+------------------------------------------------------------------+
 void CCharonTrail::Init(CCharonRisk *risk)
   {
    m_risk = risk;
+   m_mode = InpTrailMode;           // the input is the default, never a lock
+  }
+
+//+------------------------------------------------------------------+
+void CCharonTrail::SetMode(const ENUM_CHARON_TRAIL_MODE mode)
+  {
+   //--- reject anything outside the declared enum rather than trusting it
+   if(mode < CHARON_TRAIL_OFF || mode > CHARON_TRAIL_RR_LOCK)
+      return;
+   m_mode = mode;
   }
 
 //+------------------------------------------------------------------+
@@ -65,7 +83,7 @@ void CCharonTrail::Init(CCharonRisk *risk)
 bool CCharonTrail::IsActivated(const double entry, const double riskPrice,
                                const double hwm, const bool isLong) const
   {
-   if(InpTrailMode == CHARON_TRAIL_OFF || m_risk == NULL)
+   if(m_mode == CHARON_TRAIL_OFF || m_risk == NULL)
       return false;
    if(!MathIsValidNumber(hwm) || hwm <= 0.0)
       return false;
@@ -100,7 +118,7 @@ double CCharonTrail::Distance(void)
    if(m_risk == NULL)
       return 0.0;
 
-   switch(InpTrailMode)
+   switch(m_mode)
      {
       case CHARON_TRAIL_POINTS:
          return ChPriceFromPoints(InpTrailPoints, m_risk.Point());
@@ -130,7 +148,7 @@ double CCharonTrail::Candidate(const double entry, const double riskPrice,
 
    double candidate = 0.0;
 
-   switch(InpTrailMode)
+   switch(m_mode)
      {
       case CHARON_TRAIL_POINTS:
       case CHARON_TRAIL_ATR:
@@ -139,7 +157,7 @@ double CCharonTrail::Candidate(const double entry, const double riskPrice,
          if(dist <= 0.0)
             return 0.0;
          candidate = (isLong ? hwm - dist : hwm + dist);
-         label = (InpTrailMode == CHARON_TRAIL_ATR
+         label = (m_mode == CHARON_TRAIL_ATR
                   ? StringFormat("ATR trail %.2fx", InpTrailAtrMult)
                   : StringFormat("points trail %.0f", InpTrailPoints));
          break;
@@ -194,7 +212,7 @@ bool CCharonTrail::NextStop(const double entry, const double riskPrice,
   {
    stopOut = 0.0;
    label   = "";
-   if(m_risk == NULL || InpTrailMode == CHARON_TRAIL_OFF)
+   if(m_risk == NULL || m_mode == CHARON_TRAIL_OFF)
       return false;
    if(!IsActivated(entry, riskPrice, hwm, isLong))
       return false;

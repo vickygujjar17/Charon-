@@ -1,0 +1,5 @@
+# --- Charon bridge runtime dependencies.
+# --- Pinned to the versions verified to resolve on Python 3.14 (cp314
+# --- wheels available for every one of these).
+fastapi==0.162.0
+uvicorn[standard]==0.54.0

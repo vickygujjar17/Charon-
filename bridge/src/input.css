@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* --- A handful of component classes, so index.html stays readable and
+   --- the Tailwind build still sees every utility it must emit. */
+@layer components {
+  .card {
+    @apply rounded-lg border border-ink-700 bg-ink-850 p-4;
+  }
+  .card-tight {
+    @apply rounded-lg border border-ink-700 bg-ink-850 px-3 py-2;
+  }
+  .label {
+    @apply text-[10px] font-semibold uppercase tracking-[0.14em] text-shade-400;
+  }
+  .value {
+    @apply font-mono text-sm text-shade-100;
+  }
+  .value-lg {
+    @apply font-mono text-xl font-semibold text-shade-100;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1
+           text-[11px] font-semibold uppercase tracking-wider;
+  }
+  .btn {
+    @apply rounded-md border px-3 py-1.5 text-xs font-semibold
+           transition-colors disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply btn border-accent/40 bg-accent/15 text-accent hover:bg-accent/25;
+  }
+  .btn-ghost {
+    @apply btn border-ink-600 bg-ink-800 text-shade-300 hover:bg-ink-700;
+  }
+  .btn-danger {
+    @apply btn border-offline/40 bg-offline/10 text-offline hover:bg-offline/20;
+  }
+  .rung {
+    @apply flex items-center justify-between rounded border border-ink-700
+           bg-ink-900 px-2.5 py-1.5 text-xs;
+  }
+}

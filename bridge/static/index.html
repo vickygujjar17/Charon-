@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Charon</title>
+<!-- Vendored stylesheet: no CDN, no network, no flash of unstyled risk. -->
+<link rel="stylesheet" href="/static/tailwind.css" />
+</head>
+<body class="min-h-screen bg-ink-950 text-shade-200 antialiased">
+
+<!-- ================= STALE / OFFLINE BANNER ================= -->
+<!-- Deliberately the first thing in the body: a banner you have to scroll
+     to find is a banner that will not stop anyone. -->
+<div id="banner" class="hidden sticky top-0 z-50 border-b px-4 py-2 text-center text-sm font-semibold"></div>
+
+<main class="mx-auto max-w-6xl px-4 py-5">
+
+  <!-- ================= HEADER ================= -->
+  <header class="mb-5 flex flex-wrap items-end justify-between gap-3">
+    <div>
+      <div class="flex items-baseline gap-3">
+        <h1 class="text-2xl font-bold tracking-tight text-shade-100">Charon</h1>
+        <span id="symbolLabel" class="font-mono text-sm text-shade-400">—</span>
+        <span id="eaVersion" class="text-[11px] text-shade-400"></span>
+      </div>
+      <p class="mt-0.5 text-xs text-shade-400">
+        Read-only view. The EA owns every order, stop and size.
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <span id="statusPill" class="pill bg-ink-700 text-shade-300">connecting</span>
+      <span id="ageLabel" class="font-mono text-[11px] text-shade-400"></span>
+    </div>
+  </header>
+
+  <!-- ================= ACCOUNT ================= -->
+  <section class="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+    <div class="card-tight">
+      <div class="label">Equity</div>
+      <div id="equity" class="value-lg">—</div>
+    </div>
+    <div class="card-tight">
+      <div class="label">Balance</div>
+      <div id="balance" class="value-lg">—</div>
+    </div>
+    <div class="card-tight">
+      <div class="label">Open P/L</div>
+      <div id="openPl" class="value-lg">—</div>
+    </div>
+    <div class="card-tight">
+      <div class="label">Basket risk</div>
+      <div id="riskPct" class="value-lg">—</div>
+      <div id="riskMoney" class="mt-0.5 font-mono text-[11px] text-shade-400"></div>
+    </div>
+  </section>
+  <div class="grid gap-4 lg:grid-cols-3">
+
+    <!-- ================= BASKET + LADDER ================= -->
+    <section class="card lg:col-span-2">
+      <div class="mb-3 flex items-center justify-between">
+        <h2 class="label">Basket</h2>
+        <span id="basketDir" class="pill bg-ink-700 text-shade-300">—</span>
+      </div>
+
+      <div class="mb-4 grid grid-cols-3 gap-3">
+        <div>
+          <div class="label">Legs</div>
+          <div id="basketLegs" class="value">—</div>
+        </div>
+        <div>
+          <div class="label">Avg entry</div>
+          <div id="basketAvg" class="value">—</div>
+        </div>
+        <div>
+          <div class="label">Volume</div>
+          <div id="basketLot" class="value">—</div>
+        </div>
+      </div>
+
+      <div class="mb-2 flex items-center justify-between">
+        <h3 class="label">RR ladder</h3>
+        <!-- Provenance matters: these rungs are the EA's own numbers. -->
+        <span class="text-[10px] text-shade-400">from the EA, unmodified</span>
+      </div>
+      <div id="ladder" class="space-y-1.5">
+        <div class="text-xs text-shade-400">No basket yet.</div>
+      </div>
+    </section>
+
+    <!-- ================= ARM + TRAIL ================= -->
+    <section class="space-y-4">
+      <div class="card">
+        <div class="mb-3 flex items-center justify-between">
+          <h2 class="label">Pyramid trigger</h2>
+          <span id="pyramidTrigger" class="text-[11px] font-semibold text-shade-400">—</span>
+        </div>
+
+        <div id="armPanel" class="mb-3 rounded-md border border-ink-700 bg-ink-900 p-3">
+          <div class="flex items-center justify-between">
+            <span id="armState" class="text-sm font-semibold text-shade-300">disarmed</span>
+            <span id="armCountdown" class="font-mono text-lg font-bold text-shade-300"></span>
+          </div>
+          <div class="mt-1 text-[11px] text-shade-400" id="armHint">
+            Arming authorises one scale-in. Risk gates still apply.
+          </div>
+        </div>
+
+        <div class="flex gap-2">
+          <button id="armBtn" class="btn-primary flex-1">Arm next tier</button>
+          <button id="disarmBtn" class="btn-ghost">Disarm</button>
+        </div>
+        <div class="mt-2 text-[11px] text-shade-400" id="armMsg"></div>
+      </div>
+
+      <div class="card">
+        <h2 class="label mb-3">Trailing mode</h2>
+        <select id="trailSelect"
+                class="w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
+                       font-mono text-xs text-shade-100 focus:border-accent focus:outline-none">
+          <option value="0">OFF</option>
+          <option value="1">POINTS</option>
+          <option value="2">ATR</option>
+          <option value="3">HWM_PERCENT</option>
+          <option value="4">RR_LOCK</option>
+        </select>
+        <div class="mt-2 text-[11px] text-shade-400">
+          Changes how stops trail. Cannot open or size a position.
+        </div>
+        <div class="mt-2 text-[11px] text-shade-400" id="trailMsg"></div>
+      </div>
+    </section>
+  </div>
+
+
+
+  <!-- ================= LEGS ================= -->
+  <section class="card mt-4">
+    <h2 class="label mb-3">Legs</h2>
+    <div class="overflow-x-auto">
+      <table class="w-full text-left text-xs">
+        <thead class="text-[10px] uppercase tracking-wider text-shade-400">
+          <tr class="border-b border-ink-700">
+            <th class="py-2 pr-3">Ticket</th>
+            <th class="py-2 pr-3">Side</th>
+            <th class="py-2 pr-3">Tier</th>
+            <th class="py-2 pr-3">Entry</th>
+            <th class="py-2 pr-3">Vol</th>
+            <th class="py-2 pr-3">Stop</th>
+            <th class="py-2 pr-3">1R</th>
+            <th class="py-2 pr-3">Progress</th>
+            <th class="py-2 pr-3">Flags</th>
+            <th class="py-2">Ladder</th>
+          </tr>
+        </thead>
+        <tbody id="legRows" class="font-mono text-shade-200"></tbody>
+      </table>
+    </div>
+    <div id="noLegs" class="py-3 text-xs text-shade-400">
+      No managed positions. Open a trade in the terminal — Charon adopts it and arms the stop.
+    </div>
+  </section>
+
+  <!-- ================= LOG ================= -->
+  <section class="card mt-4">
+    <div class="mb-2 flex items-center justify-between">
+      <h2 class="label">Bridge log</h2>
+      <span class="text-[10px] text-shade-400">
+        bridge-side transcript — the EA's Experts log remains the trading record
+      </span>
+    </div>
+    <div id="logBox"
+         class="h-48 overflow-y-auto rounded border border-ink-700 bg-ink-950 p-2
+                font-mono text-[11px] leading-relaxed"></div>
+  </section>
+
+  <footer class="mt-5 pb-6 text-center text-[10px] text-shade-400">
+    Charon bridge <span id="bridgeVersion">—</span> · schema <span id="schemaVersion">—</span>
+    · orders are originated only by CharonTrade.mqh
+  </footer>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
