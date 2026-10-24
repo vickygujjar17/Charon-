@@ -7,7 +7,77 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
-## [1.0.3] - 2026-10-24
+## [1.0.4] - 2026-10-24
+
+A repair release. The dashboard shipped in v1.0.3 was structurally dead: it loaded,
+it parsed, and it never spoke to the bridge. Nothing about the EA's trading logic
+changed, and no MQL5 behaviour was touched.
+
+### Fixed
+
+- **The dashboard never polled `/api/status`.** A truncating edit in v1.0.3 left
+  `renderLadder()` unclosed, so every subsequent function — including the `boot()`
+  call — was nested inside it. The file was valid JavaScript, so `node --check`
+  passed and the page appeared to load, but no request was ever made: the panel sat
+  at *connecting* with empty cells. `static/app.js` has been rewritten, and the
+  functions are now siblings at top level as they were always meant to be.
+- **The v1.0.3 gate could not see this.** `node --check` proves a file *parses*, not
+  that it *runs*, and the live-server test only grepped for the string
+  `"renderLadder"`. Both passed on a dead page. `test_client_script.py` now checks
+  structure: braces balance to zero, every `function` is declared at top level,
+  nothing follows the final `boot()`, and every `$("id")` exists in `index.html`.
+  Two meta-tests feed a deliberately broken sample through the same analyzer, so the
+  gate cannot be refactored into a no-op.
+- **`bump_version.py --check` missed two release literals.** `bridge/package.json`
+  and the README's `Current release:` line were never verified. v1.0.3 shipped with
+  the README still claiming v1.0.2; the check now catches that, and both are bumped
+  automatically.
+- **The log tail repeated itself on every reconnect.** `/api/logs` sent no SSE
+  `id:`, so `EventSource` had nothing to resume from and replayed the last 50 lines
+  each time the connection hiccuped. Frames now carry `id:`, `Last-Event-ID` is
+  honoured, a `retry: 3000` hint bounds the backoff, and the client de-duplicates on
+  `seq` as well.
+
+### Added
+
+- **`tests/test_integration.py` — a real loopback integration suite.** A real uvicorn
+  process against a real `Common\Files` tree: `POST /api/pyramid/arm` → a file in
+  `commands/` → drained and retired as `ok_*` → `GET /api/commands` reporting the
+  verdict. It also covers FIFO ordering, `trail_mode` actually changing the EA's
+  mode, backdated/future-dated/wrong-symbol rejection, a poison command failing to
+  block the inbox, the staleness ladder live → stale → offline → live, and SSE
+  resume. 15 tests.
+- **`tests/fake_ea.py` — a stand-in for the EA.** There is no MetaTrader terminal in
+  CI, so this impersonates `CCharonBridge` faithfully: case-insensitive FIFO
+  `NextPending()`, the verb whitelist, `CHARON_BRIDGE_SCHEMA` matching, the ±60s
+  anti-replay window, invalid files retired rather than left blocking, and
+  retire-before-apply. **This is a substitution, and it is disclosed as one**: the
+  bridge process, the HTTP surface and every byte on the filesystem are real, but the
+  EA half of the conversation is simulated. A terminal-absent machine cannot prove
+  otherwise.
+- **Latency indicator.** The header shows the round trip for `/api/status`, amber
+  past 750 ms. The poll now has a 4 s deadline, so a hung socket reports an error
+  instead of leaving the last payload looking current, and overlapping polls are
+  suppressed.
+- **`lastGood` is now real.** It was previously assigned and never read. Past the
+  stale threshold the panels dim, the banner carries the time of the last valid
+  snapshot, and the header shows it persistently — so a frozen screen cannot pass for
+  a live one.
+- **Leg rows are keyed by ticket.** The table updates in place instead of being
+  rebuilt every second, which stops text selection being destroyed and numbers
+  flickering while a position is being watched.
+- **`test_client_script.py`** — 15 tests covering the client's structure and its
+  actual execution (13 structural checks plus 2 that prove the analyzer can fail).
+
+### Changed
+
+- Python tests: 72 → 102.
+- `README.md` — test counts, the new suites, and why they exist.
+- The MQL5 `#property version` values are unchanged at `"1.00"`, which is the correct
+  MetaEditor form for 1.0.4 (`X.Y.Z` → `X.YY`). Self-tests remain **135/135**; no
+  MQL5 source was modified apart from the version literals.
+
+
 
 An optional dashboard, built on a file bridge rather than an HTTP one. The EA is
 unchanged in what it decides: it still owns every order, stop and size. Everything

@@ -35,6 +35,16 @@ SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 BRIDGE_VERSION_PY = REPO_ROOT / "bridge" / "charon_bridge" / "version.py"
 BRIDGE_VERSION_DEF = re.compile(r'(BRIDGE_VERSION\s*=\s*")([^"]+)(")')
 
+# --- the dashboard package.json carries the release number too, so a bump
+# --- cannot leave the UI claiming a different version than the bridge
+PACKAGE_JSON = REPO_ROOT / "bridge" / "package.json"
+PACKAGE_VERSION = re.compile(r'("version"\s*:\s*")([^"]+)(")')
+
+# --- the README states the current release on its front page. v1.0.3 shipped
+# --- with it still reading v1.0.2, which is the drift this check prevents.
+README = REPO_ROOT / "README.md"
+README_RELEASE = re.compile(r'(Current release:\s*\*\*v)([^*]+)(\*\*)')
+
 
 def property_form(version: str) -> str:
     """MetaEditor needs xxx.yyy -- map 1.2.3 to 1.02."""
@@ -139,6 +149,38 @@ def main(argv: list[str] | None = None) -> int:
                 BRIDGE_VERSION_PY.write_text(text, encoding="utf-8", newline="\n")
     else:
         problems.append("bridge/charon_bridge/version.py: missing")
+
+    # --- the dashboard package.json must match as well
+    if PACKAGE_JSON.is_file():
+        text = read(PACKAGE_JSON)
+        original = text
+        for hit in PACKAGE_VERSION.finditer(original):
+            if hit.group(2) != target:
+                problems.append(
+                    f"bridge/package.json: version \"{hit.group(2)}\" != \"{target}\"")
+        text = PACKAGE_VERSION.sub(lambda m: m.group(1) + target + m.group(3), text)
+        if text != original:
+            changes.append("bridge/package.json")
+            if not args.check and not args.dry_run:
+                PACKAGE_JSON.write_text(text, encoding="utf-8", newline="\n")
+    else:
+        problems.append("bridge/package.json: missing")
+
+    # --- the README's "Current release" line is part of the release surface
+    if README.is_file():
+        text = read(README)
+        original = text
+        for hit in README_RELEASE.finditer(original):
+            if hit.group(2) != target:
+                problems.append(
+                    f"README.md: Current release \"v{hit.group(2)}\" != \"v{target}\"")
+        text = README_RELEASE.sub(lambda m: m.group(1) + target + m.group(3), text)
+        if text != original:
+            changes.append("README.md (Current release)")
+            if not args.check and not args.dry_run:
+                README.write_text(text, encoding="utf-8", newline="\n")
+    else:
+        problems.append("README.md: missing")
 
     print(f"current CHARON_VERSION : {current}")
     print(f"target  CHARON_VERSION : {target}")

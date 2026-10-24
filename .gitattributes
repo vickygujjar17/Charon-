@@ -17,4 +17,3 @@ VERSION text eol=lf
 *.js    text eol=lf
 *.json  text eol=lf
 *.txt   text eol=lf
-

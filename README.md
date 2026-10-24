@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.0.2**
+Current release: **v1.0.4**
 
 ---
 
@@ -80,7 +80,9 @@ Charon/
       index.html          the dashboard
       app.js              renders it; never recomputes a price
       tailwind.css        PREBUILT — no CDN, works offline
-    tests/                72 pytest tests
+    tests/                102 pytest tests
+      fake_ea.py          stand-in EA: drains the inbox like CCharonBridge
+      client_harness.js   executes app.js in node and checks it polls
     requirements.txt
     requirements-dev.txt
     .env.example
@@ -427,7 +429,7 @@ needs no market data. Run it on any chart and read the log:
 SELFTEST RESULT: PASS (135/135)
 ```
 
-The bridge's 72 Python tests run offline:
+The bridge's 102 Python tests run offline:
 
 ```powershell
 cd bridge
@@ -438,6 +440,33 @@ cd bridge
 a recomputed price. `test_live_server.py` starts a real uvicorn process and speaks HTTP
 to it, because static mounting and the vendored stylesheet are exactly the things
 in-process tests cannot see.
+
+Two of these suites exist because of a regression that shipped in v1.0.3.
+
+`test_client_script.py` checks the *shape* of `static/app.js`, not its syntax. A
+truncating edit had left one function unclosed, so the remaining functions and the
+`boot()` call were nested inside it: the file parsed, the page loaded, and no request
+was ever made to `/api/status`. `node --check` passed the whole time, because
+parseability is not execution. The suite now asserts that braces balance to zero, that
+every `function` is declared at top level, that nothing follows the final `boot()`, and
+that every `$("id")` exists in `index.html`.
+
+Shape alone is still not proof, so `tests/client_harness.js` goes further: it executes
+`app.js` in a real node VM against a DOM stub and requires that the client actually
+requests `/api/status`, writes the equity, colours the pill, builds the leg row and
+renders both ladder rungs. Run against the v1.0.3 file it reports every one of those as
+missing, which is exactly what the operator saw. A second test points the same harness
+at a deliberately inert page and requires it to fail, so the check cannot become a
+rubber stamp.
+
+`test_integration.py` closes the loop the unit tests cannot: a real uvicorn process, a
+real `Common\Files` tree, `POST /api/pyramid/arm` → a file in `commands/` → drained,
+retired as `ok_*` → `GET /api/commands` reporting the verdict. It also drives the
+staleness ladder live → stale → offline and proves SSE `Last-Event-ID` resumes without
+replaying lines. There is no MetaTrader terminal in CI, so `tests/fake_ea.py`
+impersonates `CCharonBridge` — FIFO ordering, the verb whitelist, the ±60s anti-replay
+window, retire-before-apply. The bridge, the HTTP surface and every byte crossing the
+filesystem are real; only the EA is a stand-in.
 
 ---
 

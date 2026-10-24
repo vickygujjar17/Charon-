@@ -290,13 +290,20 @@ def list_commands(limit: int = Query(default=20, ge=1, le=200)) -> dict[str, Any
 #| Logs (SSE)                                                       |
 #+------------------------------------------------------------------+
 @app.get("/api/logs")
-async def logs(stream: bool = Query(default=False)) -> Any:
+async def logs(
+    stream: bool = Query(default=False),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> Any:
     """Bridge-side transcript.
 
     ``?stream=true`` returns server-sent events; the plain form returns
     the buffer so the page can render something before the stream opens.
     Deliberately unauthenticated: it carries only bridge messages, and an
     ``EventSource`` cannot send custom headers.
+
+    Every frame carries an ``id:``, and ``Last-Event-ID`` is honoured on
+    reconnect. Without both, ``EventSource`` replays the whole tail after
+    every hiccup and the operator watches the same fifty lines pile up.
     """
     if not stream:
         return {
@@ -304,17 +311,45 @@ async def logs(stream: bool = Query(default=False)) -> Any:
             "latest_seq": LOG.latest_seq,
         }
 
+    def frame(entry: Any) -> str:
+        return f"id: {entry.seq}\ndata: {json.dumps(entry.as_dict())}\n\n"
+
+    # --- 3s is long enough to ride out a reload and short enough that a
+    # --- dropped stream recovers while the operator is still looking at it
+    reconnect_ms = 3000
+
+    def resume_point() -> int:
+        """Where to start when the browser says how far it got."""
+        if not last_event_id:
+            return 0
+        try:
+            return max(0, int(last_event_id.strip()))
+        except (AttributeError, ValueError):
+            # --- a malformed id is treated as "no id": replay the tail
+            # --- rather than guessing and silently dropping history
+            return 0
+
     async def events():
-        cursor = 0
-        # --- replay what already happened so a late subscriber is not blind
-        for entry in LOG.tail(50):
-            cursor = max(cursor, entry.seq)
-            yield f"data: {json.dumps(entry.as_dict())}\n\n"
+        yield f"retry: {reconnect_ms}\n\n"
+
+        cursor = resume_point()
+        if cursor:
+            # --- resuming: send only what the client has not seen
+            for entry in LOG.since(cursor):
+                cursor = max(cursor, entry.seq)
+                yield frame(entry)
+        else:
+            # --- first connect: replay what already happened so a late
+            # --- subscriber is not blind
+            for entry in LOG.tail(50):
+                cursor = max(cursor, entry.seq)
+                yield frame(entry)
+
         while True:
             await asyncio.sleep(0.5)
             for entry in LOG.since(cursor):
                 cursor = max(cursor, entry.seq)
-                yield f"data: {json.dumps(entry.as_dict())}\n\n"
+                yield frame(entry)
             yield ": keep-alive\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")

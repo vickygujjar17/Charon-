@@ -1,18 +1,31 @@
 // Charon dashboard client.
 //
-// Two rules this file follows without exception:
+// Three rules this file follows without exception:
 //
 //   1. It never computes a price, a risk figure or an R multiple. Every
 //      number comes from /api/status, which comes from the EA.
 //   2. It never pretends to be current. If the snapshot is stale or the
 //      bridge is down, the banner says so and the values go dim.
+//   3. It never reaches for an element that does not exist. Every id used
+//      below is in index.html, and test_client_script.py proves it.
 
 const REFRESH_MS = 1000;
 
+// --- a poll that has not answered in this long counts as a failure, so a
+// --- hung socket cannot leave the panel looking live forever.
+const FETCH_TIMEOUT_MS = 4000;
+
+// --- below this the poll interval is honoured exactly; above it the badge
+// --- turns amber and says so.
+const SLOW_FETCH_MS = 750;
+
+// --- how many rendered log lines to keep before trimming the DOM
+const LOG_MAX_LINES = 300;
+
 const $ = (id) => document.getElementById(id);
 
-let lastGood = null;      // last successful payload, for dimming
 let eventSource = null;
+let lastLogSeq = 0;        // highest seq rendered, so replays never duplicate
 
 //+------------------------------------------------------------------+
 //| Formatting helpers                                               |
@@ -47,6 +60,10 @@ function ageText(seconds) {
   return Math.round(seconds / 60) + "m ago";
 }
 
+function clockText(at) {
+  if (!at) return "—";
+  return new Date(at * 1000).toLocaleTimeString();
+}
 //+------------------------------------------------------------------+
 //| Ladder rendering                                                 |
 //|                                                                  |
@@ -91,9 +108,15 @@ function renderLadder(container, text) {
 
     row.append(level, px);
     container.append(row);
+  }
+}
 
 //+------------------------------------------------------------------+
-//| Status pill / banner                                             |
+//| Status pill / banner / dimming                                   |
+//|                                                                  |
+//| lastGood is written on every successful poll and read on every    |
+//| failure, so the panel can say *when* it last told the truth        |
+//| instead of only that it is currently lying.                       |
 //+------------------------------------------------------------------+
 const STATUS_STYLE = {
   live: "bg-live/15 text-live",
@@ -103,6 +126,54 @@ const STATUS_STYLE = {
   error: "bg-offline/15 text-offline",
 };
 
+let lastGoodAt = 0;   // epoch seconds of the last good payload
+
+// --- the panels dim together, so a stale screen cannot look live in the
+// --- corner while the numbers still read as current.
+const DIMMABLE_SELECTOR = "main > header, main > section, main .card";
+let dimmed = false;
+
+function setDimmed(on) {
+  if (on === dimmed) return;
+  dimmed = on;
+  for (const node of document.querySelectorAll(DIMMABLE_SELECTOR)) {
+    node.classList.toggle("opacity-60", on);
+  }
+}
+
+function hideBanner() {
+  const banner = $("banner");
+  banner.textContent = "";
+  banner.classList.add("hidden");
+}
+
+// --- every class is a complete literal: the Tailwind build scans this file
+// --- as text, so a `"text-" + kind` concatenation would never be emitted.
+const BANNER_STYLE = {
+  stale:
+    "sticky top-0 z-50 border-b border-stale/40 bg-stale/15 px-4 py-2 " +
+    "text-center text-sm font-semibold text-stale",
+  offline:
+    "sticky top-0 z-50 border-b border-offline/40 bg-offline/15 px-4 py-2 " +
+    "text-center text-sm font-semibold text-offline",
+};
+
+function showBanner(kind, message) {
+  const banner = $("banner");
+  banner.className = BANNER_STYLE[kind] || BANNER_STYLE.offline;
+  banner.textContent = message;
+  banner.classList.remove("hidden");
+}
+
+function setLastGood(at) {
+  lastGoodAt = at;
+  const label = $("lastGoodLabel");
+  label.textContent = at ? "last good " + clockText(at) : "";
+  label.title = at
+    ? "The bridge last delivered a valid snapshot at this time."
+    : "No valid snapshot since the page opened.";
+}
+
 function setStatus(status, ageSeconds, detail) {
   const pill = $("statusPill");
   pill.className = "pill " + (STATUS_STYLE[status] || STATUS_STYLE.error);
@@ -110,33 +181,58 @@ function setStatus(status, ageSeconds, detail) {
 
   $("ageLabel").textContent = ageText(ageSeconds);
 
-  const banner = $("banner");
+  const since = lastGoodAt
+    ? " Last good snapshot " + clockText(lastGoodAt) + "."
+    : " No valid snapshot since the page opened.";
+
   if (status === "stale") {
-    banner.className =
-      "sticky top-0 z-50 border-b border-stale/40 bg-stale/15 px-4 py-2 " +
-      "text-center text-sm font-semibold text-stale";
-    banner.textContent =
+    showBanner("stale",
       "STALE DATA — the last EA snapshot is " + ageText(ageSeconds) +
-      ". Do not act on these numbers.";
-    banner.classList.remove("hidden");
+      ". Do not act on these numbers." + since);
+    setDimmed(true);
   } else if (status === "offline") {
-    banner.className =
-      "sticky top-0 z-50 border-b border-offline/40 bg-offline/15 px-4 py-2 " +
-      "text-center text-sm font-semibold text-offline";
-    banner.textContent =
+    showBanner("offline",
       "EA OFFLINE — no snapshot for " + ageText(ageSeconds) +
-      ". The chart is not being described by this view.";
-    banner.classList.remove("hidden");
+      ". The chart is not being described by this view." + since);
+    setDimmed(true);
   } else if (status === "error") {
-    banner.className =
-      "sticky top-0 z-50 border-b border-offline/40 bg-offline/15 px-4 py-2 " +
-      "text-center text-sm font-semibold text-offline";
-    banner.textContent = detail || "BRIDGE ERROR — cannot reach /api/status.";
-    banner.classList.remove("hidden");
+    showBanner("offline", (detail || "BRIDGE ERROR — cannot reach /api/status.") + since);
+    setDimmed(true);
   } else {
+    hideBanner();
+    setDimmed(false);
+  }
+}
+
+//+------------------------------------------------------------------+
+//| Latency badge                                                    |
+//|                                                                  |
+//| The poll is the panel's only source of truth, so its round trip   |
+//| is shown rather than hidden. A bridge that answers in 1.8s is     |
+//| telling you something about loopback that you want to know.       |
+//+------------------------------------------------------------------+
+function setLatency(ms) {
+  const label = $("latencyLabel");
+  const rounded = Math.round(ms);
+  label.textContent = rounded + " ms";
+  label.title = "Round trip for GET /api/status. Poll interval " + REFRESH_MS + " ms.";
+  label.className =
+    "font-mono text-[11px] " + (rounded > SLOW_FETCH_MS ? "text-stale" : "text-shade-400");
+}
+
+function setLatencyFailed() {
+  const label = $("latencyLabel");
+  label.textContent = "—";
+  label.title = "The last GET /api/status did not complete.";
+  label.className = "font-mono text-[11px] text-offline";
+}
 
 //+------------------------------------------------------------------+
 //| Render one payload                                               |
+//|                                                                  |
+//| Nothing here is recomputed: every figure is copied from the       |
+//| snapshot the EA published. The only arithmetic is presentation    |
+//| (toFixed, toLocaleString).                                        |
 //+------------------------------------------------------------------+
 function render(payload) {
   const snap = payload.snapshot;
@@ -176,10 +272,9 @@ function render(payload) {
 
   // --- pyramid
   const pyr = snap.pyramid;
-  $("pyramidTrigger").textContent = pyr.trigger;
-
   const armState = $("armState");
   const countdown = $("armCountdown");
+
   if (pyr.armed) {
     armState.textContent = "ARMED";
     armState.className = "text-sm font-semibold text-live";
@@ -190,10 +285,14 @@ function render(payload) {
     armState.textContent = pyr.enabled ? "disarmed" : "pyramiding off";
     armState.className = "text-sm font-semibold text-shade-400";
     countdown.textContent = "";
+    countdown.className = "font-mono text-lg font-bold text-shade-300";
   }
 
   const canArm = pyr.enabled && pyr.trigger === "MANUAL" && snap.basket.valid;
   $("armBtn").disabled = !canArm;
+  $("armBtn").title = canArm
+    ? "Queue one arm for the EA. The EA still enforces every risk gate."
+    : "Arming is unavailable in the current state.";
   $("armHint").textContent = !pyr.enabled
     ? "Pyramiding is disabled on this chart."
     : pyr.trigger !== "MANUAL"
@@ -202,105 +301,226 @@ function render(payload) {
         ? "No basket to scale into yet."
         : "Arming authorises one scale-in. Risk gates still apply.";
 
-  // --- trail selector reflects the EA, but does not fight the user
+  // --- trail selector reflects the EA, but does not fight the user: while
+  // --- the select has focus, a refresh must not yank the value back
+  const select = $("trailSelect");
+  if (document.activeElement !== select) {
+    select.value = String(snap.trail.mode);
+  }
+  select.disabled = !snap.trail.mutable;
+  $("trailMsg").textContent = snap.trail.mutable
+    ? ""
+    : "The EA reports this mode as not mutable on this chart.";
+
+  renderLegs(snap.legs, digits);
+  $("noLegs").classList.toggle("hidden", snap.legs.length > 0);
+}
+
+
+//+------------------------------------------------------------------+
+//| Legs table                                                       |
+//|                                                                  |
+//| Rows are keyed by ticket and updated in place. Rebuilding the     |
+//| table every second would throw away text selection and make the   |
+//| numbers flicker while a position is being watched.                |
+//+------------------------------------------------------------------+
+function legRow(leg) {
+  const tr = document.createElement("tr");
+  tr.className = "border-b border-ink-800";
+  tr.dataset.ticket = String(leg.ticket);
+
+  // --- ticket, side, tier, entry, vol, stop, 1R, progress, flags
+  for (let index = 0; index < 9; index += 1) {
+    const td = document.createElement("td");
+    td.className = "py-2 pr-3";
+    td.dataset.cell = String(index);
+    tr.append(td);
+  }
+
+  // --- the ladder cell keeps its own small stack of rungs
+  const tdLadder = document.createElement("td");
+  tdLadder.className = "py-2";
+  const box = document.createElement("div");
+  box.className = "space-y-1";
+  box.dataset.role = "leg-ladder";
+  renderLadder(box, null);
+  tdLadder.append(box);
+  tr.append(tdLadder);
+
+  return tr;
+}
+
+function fillLegRow(tr, leg, digits) {
+  const flags = [
+    leg.trail_active ? "trail" : null,
+    leg.be_done ? "BE" : null,
+    leg.half_risk_done ? "½R" : null,
+  ].filter(Boolean).join(" ") || "—";
+
+  const cells = [
+    { text: "#" + leg.ticket, cls: "text-shade-300" },
+    { text: leg.side, cls: leg.side === "BUY" ? "text-live" : "text-offline" },
+    { text: "T" + leg.tier, cls: "" },
+    { text: price(leg.entry, digits), cls: "" },
+    { text: leg.lot === null ? "—" : Number(leg.lot).toFixed(2), cls: "" },
+    // --- a zero stop is not a tight stop, it is an unprotected leg
+    { text: price(leg.sl, digits), cls: leg.sl > 0 ? "" : "text-offline" },
+    { text: price(leg.risk_price, digits), cls: "text-shade-400" },
+    { text: rr(leg.progress_rr), cls: leg.progress_rr > 0 ? "text-live" : "text-shade-300" },
+    { text: flags, cls: "text-shade-400" },
+  ];
+
+  const tdNodes = tr.querySelectorAll("td[data-cell]");
+  for (let index = 0; index < cells.length; index += 1) {
+    const td = tdNodes[index];
+    if (!td) continue;
+    td.className = "py-2 pr-3 " + cells[index].cls;
+    td.textContent = cells[index].text;
+  }
+
+  const box = tr.querySelector('div[data-role="leg-ladder"]');
+  if (box) renderLadder(box, leg.ladder);
+}
 
 function renderLegs(legs, digits) {
   const tbody = $("legRows");
-  tbody.replaceChildren();
+  const existing = new Map();
+  for (const tr of tbody.children) {
+    existing.set(tr.dataset.ticket, tr);
+  }
 
+  // --- walk the payload in the EA's order; append moves an existing node,
+  // --- so the DOM ends up in exactly the EA's sequence
   for (const leg of legs) {
-    const tr = document.createElement("tr");
-    tr.className = "border-b border-ink-800";
-
-    const flags = [
-      leg.trail_active ? "trail" : null,
-      leg.be_done ? "BE" : null,
-      leg.half_risk_done ? "½R" : null,
-    ].filter(Boolean).join(" ") || "—";
-
-    const cells = [
-      { text: "#" + leg.ticket, cls: "text-shade-300" },
-      { text: leg.side, cls: leg.side === "BUY" ? "text-live" : "text-offline" },
-      { text: "T" + leg.tier, cls: "" },
-      { text: price(leg.entry, digits), cls: "" },
-      { text: leg.lot === null ? "—" : Number(leg.lot).toFixed(2), cls: "" },
-      { text: price(leg.sl, digits), cls: leg.sl > 0 ? "" : "text-offline" },
-      { text: price(leg.risk_price, digits), cls: "text-shade-400" },
-      { text: rr(leg.progress_rr), cls: leg.progress_rr > 0 ? "text-live" : "text-shade-300" },
-      { text: flags, cls: "text-shade-400" },
-    ];
-
-    for (const cell of cells) {
-      const td = document.createElement("td");
-      td.className = "py-2 pr-3 " + cell.cls;
-      td.textContent = cell.text;
-      tr.append(td);
+    const key = String(leg.ticket);
+    let tr = existing.get(key);
+    if (tr) {
+      existing.delete(key);
+    } else {
+      tr = legRow(leg);
     }
-
-    // --- the ladder cell keeps its own small stack of rungs
-    const tdLadder = document.createElement("td");
-    tdLadder.className = "py-2";
-    const box = document.createElement("div");
-    box.className = "space-y-1";
-    renderLadder(box, leg.ladder);
-    tdLadder.append(box);
-    tr.append(tdLadder);
-
+    fillLegRow(tr, leg, digits);
     tbody.append(tr);
   }
+
+  // --- anything still in the map refers to a closed position
+  for (const tr of existing.values()) {
+    tr.remove();
+  }
 }
+
 
 //+------------------------------------------------------------------+
 //| Polling                                                          |
+//|                                                                  |
+//| A slow bridge is not an outage, but a hung one is: every poll has |
+//| a deadline, and a failure of any kind is reported as an error     |
+//| rather than silently leaving the last payload on screen looking   |
+//| current.                                                          |
 //+------------------------------------------------------------------+
-async function refresh() {
+async function fetchStatus() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const started = performance.now();
   try {
-    const response = await fetch("/api/status", { cache: "no-store" });
+    const response = await fetch("/api/status", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
-      setStatus("error", null, body.detail || "HTTP " + response.status);
-      return;
+      const error = new Error(body.detail || "HTTP " + response.status);
+      error.httpStatus = response.status;
+      error.detail = body.detail || null;
+      throw error;
     }
-    const payload = await response.json();
-    render(payload);
-    setStatus(payload.status, payload.age_seconds);
-  } catch (error) {
-    setStatus("error", null, "Cannot reach the bridge: " + error.message);
+    return { payload: await response.json(), elapsed: performance.now() - started };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
+let refreshing = false;
+
+async function refresh() {
+  // --- a slow poll must not stack up behind itself
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const { payload, elapsed } = await fetchStatus();
+    render(payload);
+    setStatus(payload.status, payload.age_seconds);
+    setLastGood(Date.now() / 1000);
+    setLatency(elapsed);
+    lastPollError = null;
+  } catch (error) {
+    setLatencyFailed();
+    // --- one line, not one per second: a bridge that stayed down for an
+    // --- hour should not fill the log with 3600 identical complaints
+    const detail =
+      error.name === "AbortError"
+        ? "GET /api/status timed out after " + FETCH_TIMEOUT_MS + " ms."
+        : "Cannot reach the bridge: " + error.message;
+    if (detail !== lastPollError) {
+      lastPollError = detail;
+      appendLocalLog("warn", detail);
+    }
+    setStatus("error", null, detail);
+  } finally {
+    refreshing = false;
+  }
+}
+
+let lastPollError = null;
+
+
 //+------------------------------------------------------------------+
-//| Commands                                                         |
+//| Commands (never orders)                                          |
+//|                                                                  |
+//| Queued is not applied. The EA drains its inbox on its own timer   |
+//| and can still refuse the command -- so the message says "queued",  |
+//| never "done", and the verdict shows up later in the log tail.     |
 //+------------------------------------------------------------------+
 async function postCommand(path, messageEl, label) {
+  messageEl.className = "mt-2 text-[11px] text-shade-400";
   messageEl.textContent = "sending…";
   try {
     const response = await fetch(path, { method: "POST" });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
+      messageEl.className = "mt-2 text-[11px] text-offline";
       messageEl.textContent = body.detail || "HTTP " + response.status;
       return;
     }
     // --- queued is not applied: the EA drains its inbox on its own timer
+    messageEl.className = "mt-2 text-[11px] text-accent";
     messageEl.textContent = label + " queued — the EA applies it on its next tick.";
   } catch (error) {
+    messageEl.className = "mt-2 text-[11px] text-offline";
     messageEl.textContent = "failed: " + error.message;
   }
 }
 
-$("armBtn").addEventListener("click", () =>
-  postCommand("/api/pyramid/arm", $("armMsg"), "Arm"));
+function wireCommands() {
+  $("armBtn").addEventListener("click", () =>
+    postCommand("/api/pyramid/arm", $("armMsg"), "Arm"));
 
-$("disarmBtn").addEventListener("click", () =>
-  postCommand("/api/pyramid/disarm", $("armMsg"), "Disarm"));
+  $("disarmBtn").addEventListener("click", () =>
+    postCommand("/api/pyramid/disarm", $("armMsg"), "Disarm"));
 
-$("trailSelect").addEventListener("change", (event) => {
-  const mode = event.target.value;
-  postCommand("/api/trail?mode=" + encodeURIComponent(mode), $("trailMsg"), "Trail mode");
-});
+  $("trailSelect").addEventListener("change", (event) => {
+    const mode = event.target.value;
+    postCommand("/api/trail?mode=" + encodeURIComponent(mode), $("trailMsg"), "Trail mode");
+  });
+}
 
 //+------------------------------------------------------------------+
 //| Log stream                                                       |
+//|                                                                  |
+//| The server assigns each entry a monotonic seq and honours        |
+//| Last-Event-ID, but a reconnect can still replay the tail -- so    |
+//| the client de-duplicates on seq as well. Belt and braces, because |
+//| a log that repeats itself on every hiccup is worse than no log.   |
 //+------------------------------------------------------------------+
 const LOG_COLOUR = {
   info: "text-shade-300",
@@ -309,23 +529,36 @@ const LOG_COLOUR = {
   command: "text-accent",
 };
 
-function appendLog(entry) {
+function appendLogLine(at, level, message) {
   const box = $("logBox");
   const line = document.createElement("div");
-  line.className = LOG_COLOUR[entry.level] || "text-shade-300";
+  line.className = LOG_COLOUR[level] || "text-shade-300";
 
   const stamp = document.createElement("span");
   stamp.className = "text-shade-400";
-  stamp.textContent = new Date(entry.at * 1000).toLocaleTimeString() + "  ";
+  stamp.textContent = clockText(at) + "  ";
 
-  line.append(stamp, document.createTextNode(entry.message));
+  line.append(stamp, document.createTextNode(message));
   box.append(line);
 
   // --- keep the DOM bounded; the ring buffer is capped server-side too
-  while (box.childElementCount > 300) {
+  while (box.childElementCount > LOG_MAX_LINES) {
     box.removeChild(box.firstChild);
   }
   box.scrollTop = box.scrollHeight;
+}
+
+// --- client-side notices share the same pane, timestamped the same way
+function appendLocalLog(level, message) {
+  appendLogLine(Date.now() / 1000, level, message);
+}
+
+function appendLog(entry) {
+  if (typeof entry.seq === "number") {
+    if (entry.seq <= lastLogSeq) return;   // already rendered
+    lastLogSeq = entry.seq;
+  }
+  appendLogLine(entry.at, entry.level, entry.message);
 }
 
 function startLog() {
@@ -338,13 +571,20 @@ function startLog() {
       /* a malformed frame is not worth breaking the tail over */
     }
   };
-  // --- EventSource reconnects on its own; no manual retry ladder needed
+  eventSource.onerror = () => {
+    // --- EventSource reconnects on its own; say so once rather than
+    // --- pretending the tail is still live
+    $("logBox").dataset.streaming = "reconnecting";
+  };
+  eventSource.onopen = () => {
+    $("logBox").dataset.streaming = "open";
+  };
 }
 
 //+------------------------------------------------------------------+
 //| Boot                                                             |
 //+------------------------------------------------------------------+
-async function boot() {
+async function loadHealth() {
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
     const health = await response.json();
@@ -352,28 +592,23 @@ async function boot() {
     $("schemaVersion").textContent = health.schema ?? "—";
   } catch {
     /* health is decorative; the status poll is what matters */
+    $("bridgeVersion").textContent = "—";
+    $("schemaVersion").textContent = "—";
   }
+}
 
+async function boot() {
+  wireCommands();
+  setLastGood(0);
+  await loadHealth();
   startLog();
   await refresh();
   setInterval(refresh, REFRESH_MS);
+
+  // --- the health block is static for a process, but a bridge restart
+  // --- during a long session should be visible without a page reload
+  setInterval(loadHealth, REFRESH_MS * 30);
 }
 
 boot();
 
-  const select = $("trailSelect");
-  if (document.activeElement !== select) {
-    select.value = String(snap.trail.mode);
-  }
-
-  renderLegs(snap.legs, digits);
-  $("noLegs").classList.toggle("hidden", snap.legs.length > 0);
-  lastGood = payload;
-}
-
-    banner.classList.add("hidden");
-  }
-}
-
-  }
-}

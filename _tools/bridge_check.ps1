@@ -114,6 +114,21 @@ if (-not (Test-Path $cssPath)) {
     }
 }
 
+# --- 6) invariant: the client script is structurally sound --------------
+# Empty cells and a page stuck at "connecting" look identical to a slow EA,
+# so the shape of app.js is checked rather than trusted. This is the gate
+# that would have caught the v1.0.3 dashboard shipping inert: node --check
+# passed on that file, because it parses -- it just never ran.
+Write-Host ""
+Write-Host "--- invariant: static/app.js is structurally sound ------------"
+Push-Location $Bridge
+try {
+    & $venvPython -m pytest tests/test_client_script.py -q 2>&1 | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) { $failures.Add("static/app.js failed its structural checks") }
+} finally {
+    Pop-Location
+}
+
 # --- verdict ------------------------------------------------------------
 Write-Host ""
 Write-Host "=================================================================="
