@@ -19,7 +19,7 @@ import pytest
 def make_snapshot(**overrides: Any) -> dict[str, Any]:
     """A live, healthy GBPUSD snapshot with two legs."""
     snap: dict[str, Any] = {
-        "schema": 1,
+        "schema": 2,
         "seq": 42,
         "ea_version": "1.0.3",
         "symbol": "GBPUSD",

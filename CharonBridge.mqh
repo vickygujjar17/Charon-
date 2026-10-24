@@ -30,7 +30,7 @@
 //|  nothing here is required for trading, risk or stops.             |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.00"
+#property version   "1.01"
 
 #ifndef __CHARON_BRIDGE__
 #define __CHARON_BRIDGE__
@@ -39,7 +39,12 @@
 #include "CharonMath.mqh"
 
 //--- schema revision understood by both sides of the bridge
-#define CHARON_BRIDGE_SCHEMA      1
+//---   2 = v1.1.0 attended execution: order verbs carry block geometry and
+//---       the snapshot carries an `order` verdict block. A snapshot or
+//---       command written at a different revision is refused outright,
+//---       which is what keeps a half-upgraded install from acting on a
+//---       ticket it only partially understands.
+#define CHARON_BRIDGE_SCHEMA      2
 #define CHARON_BRIDGE_ROOT        "Charon"
 #define CHARON_BRIDGE_CMD_DIR     "Charon\\commands"
 #define CHARON_BRIDGE_DONE_DIR    "Charon\\commands\\processed"
@@ -51,11 +56,23 @@
 //--- legs published per snapshot; the panel never needs more than this
 #define CHARON_BRIDGE_MAX_LEGS    16
 
-//--- permitted command verbs (nothing here touches an order)
+//--- permitted command verbs.
+//---  The first four are state-only. The last three are attended manual
+//---  execution: they carry an operator's *intent* and are still adjudicated
+//---  by CCharonRisk and the block geometry inside the EA. Nothing here lets
+//---  the caller choose a volume, a stop distance or an R multiple.
 #define CHARON_BRIDGE_V_ARM       "arm"
 #define CHARON_BRIDGE_V_DISARM    "disarm"
 #define CHARON_BRIDGE_V_TRAILMODE "trail_mode"
 #define CHARON_BRIDGE_V_PING      "ping"
+#define CHARON_BRIDGE_V_ORDER_OPEN   "order_open"
+#define CHARON_BRIDGE_V_ORDER_MODIFY "order_modify"
+#define CHARON_BRIDGE_V_ORDER_CANCEL "order_cancel"
+
+//--- highest RR rung a ticket may reference. The ladder publishes three
+//--- levels (InpRrLadderA/B/C), so rung 0 means "no rung" and 1..3 index
+//--- them. Must match MAX_RUNG in bridge/charon_bridge/schema.py.
+#define CHARON_BRIDGE_MAX_RUNG    3
 
 //+------------------------------------------------------------------+
 //| One published leg                                                |
@@ -90,6 +107,19 @@ struct SCharonBridgeCommand
    string            arg;
    long              issued;
    string            reject;          // non-empty when the file was refused
+
+   //--- order ticket payload. Only meaningful for the order_* verbs; the
+   //--- parser leaves them zeroed for the state-only verbs, and
+   //--- ApplyBridgeCommand re-validates every one of them before use.
+   string            side;            // "BUY" / "SELL"
+   string            orderType;       // "MARKET" / "LIMIT"
+   double            entry;           // 0 => fill at market
+   double            blockTop;
+   double            blockBottom;
+   double            riskPct;
+   int               trailTrigger;    // CHARON_TRAIL_*, applied on fill
+   int               rung;            // RR rung the ticket is stated against
+   ulong             ticket;          // target of order_modify / order_cancel
   };
 
 //+------------------------------------------------------------------+
@@ -138,6 +168,18 @@ struct SCharonBridgeSnapshot
    long              pyramidSecsLeft; // -1 = no expiry
    int               nextTier;
    double            progressRR;      // basket progress toward nextTier
+
+   //--- order verdict: what the EA decided about the last ticket
+   string            orderStatus;    // idle / pending / accepted / rejected
+   string            orderReason;
+   string            orderSide;
+   double            orderLots;
+   double            orderEntry;
+   double            orderStop;
+   double            orderRiskMoney;
+   double            orderRiskPct;
+   int               orderRung;
+   ulong             orderTicket;
 
    //--- account
    string            currency;
@@ -188,6 +230,7 @@ public:
    static bool       ReadJsonString(const string json, const string key, string &out);
    static bool       ReadJsonNumber(const string json, const string key, double &out);
    static bool       VerbAllowed(const string verb);
+   static bool       OrderVerb(const string verb);
    static bool       TrailModeValid(const int mode);
   };
 
@@ -349,15 +392,30 @@ bool CCharonBridge::ReadJsonNumber(const string json, const string key, double &
 
 //+------------------------------------------------------------------+
 //| The complete set of verbs the bridge will ever act on.           |
-//|  Adding a verb here is a security decision, not a feature flag:   |
-//|  none of these four can create, size, price or close an order.    |
+//|  Adding a verb here is a security decision, not a feature flag.   |
+//|  The order_* verbs are attended execution: they submit an intent, |
+//|  and CCharonRisk still decides whether, how large and where the   |
+//|  stop goes. None of them accepts a caller-chosen volume.          |
 //+------------------------------------------------------------------+
 bool CCharonBridge::VerbAllowed(const string verb)
   {
    return (verb == CHARON_BRIDGE_V_ARM ||
            verb == CHARON_BRIDGE_V_DISARM ||
            verb == CHARON_BRIDGE_V_TRAILMODE ||
-           verb == CHARON_BRIDGE_V_PING);
+           verb == CHARON_BRIDGE_V_PING ||
+           verb == CHARON_BRIDGE_V_ORDER_OPEN ||
+           verb == CHARON_BRIDGE_V_ORDER_MODIFY ||
+           verb == CHARON_BRIDGE_V_ORDER_CANCEL);
+  }
+
+//+------------------------------------------------------------------+
+//| Order-bearing verbs need a full ticket; state verbs do not       |
+//+------------------------------------------------------------------+
+bool CCharonBridge::OrderVerb(const string verb)
+  {
+   return (verb == CHARON_BRIDGE_V_ORDER_OPEN ||
+           verb == CHARON_BRIDGE_V_ORDER_MODIFY ||
+           verb == CHARON_BRIDGE_V_ORDER_CANCEL);
   }
 
 //+------------------------------------------------------------------+
@@ -489,6 +547,23 @@ bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
    j += StringFormat("\"progress_rr\":%s", DoubleToString(snap.progressRR, 4));
    j += "},";
 
+   //--- order verdict: what the EA decided, in the EA's own numbers.
+   //---  Every value here is copied from the last adjudication -- the
+   //---  dashboard renders this block verbatim and never recomputes a lot,
+   //---  a stop or an R multiple.
+   j += "\"order\":{";
+   j += StringFormat("\"status\":\"%s\",", JsonEscape(snap.orderStatus));
+   j += StringFormat("\"reason\":\"%s\",", JsonEscape(snap.orderReason));
+   j += StringFormat("\"side\":\"%s\",", JsonEscape(snap.orderSide));
+   j += StringFormat("\"lots\":%s,", DoubleToString(snap.orderLots, 2));
+   j += StringFormat("\"entry\":%s,", DoubleToString(snap.orderEntry, snap.digits));
+   j += StringFormat("\"stop\":%s,", DoubleToString(snap.orderStop, snap.digits));
+   j += StringFormat("\"risk_money\":%s,", DoubleToString(snap.orderRiskMoney, 2));
+   j += StringFormat("\"risk_pct\":%s,", DoubleToString(snap.orderRiskPct, 4));
+   j += StringFormat("\"rung\":%d,", snap.orderRung);
+   j += StringFormat("\"ticket\":%I64u", snap.orderTicket);
+   j += "},";
+
    //--- legs
    j += "\"legs\":[";
    for(int i = 0; i < shown; i++)
@@ -563,6 +638,15 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
    cmd.arg    = "";
    cmd.issued = 0;
    cmd.reject = "";
+   cmd.side          = "";
+   cmd.orderType     = "";
+   cmd.entry         = 0.0;
+   cmd.blockTop      = 0.0;
+   cmd.blockBottom   = 0.0;
+   cmd.riskPct       = 0.0;
+   cmd.trailTrigger  = (int)CHARON_TRAIL_OFF;
+   cmd.rung          = 0;
+   cmd.ticket        = 0;
 
    string path = CHARON_BRIDGE_CMD_DIR + "\\" + name;
    ResetLastError();
@@ -675,6 +759,147 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
      }
    else
       cmd.arg = "";
+
+   //--- order tickets: every field is re-validated here, because a ticket
+   //--- that reaches ApplyBridgeCommand unchecked would let the inbox
+   //--- decide risk. A missing or nonsensical field is a refusal, never a
+   //--- silent default.
+   if(OrderVerb(verb))
+     {
+      string side = "";
+      if(!ReadJsonString(body, "side", side) || (side != "BUY" && side != "SELL"))
+        {
+         cmd.reject = "order ticket without a valid side";
+         return false;
+        }
+
+      string otype = "";
+      if(ReadJsonString(body, "order_type", otype))
+        {
+         if(otype != "MARKET" && otype != "LIMIT")
+           {
+            cmd.reject = StringFormat("order type '%s' is not supported", otype);
+            return false;
+           }
+        }
+      else
+         otype = "MARKET";
+
+      double top = 0.0, bottom = 0.0;
+      if(!ReadJsonNumber(body, "block_top", top) ||
+         !ReadJsonNumber(body, "block_bottom", bottom))
+        {
+         cmd.reject = "order ticket without block geometry";
+         return false;
+        }
+      if(!MathIsValidNumber(top) || !MathIsValidNumber(bottom) ||
+         top <= 0.0 || bottom <= 0.0 || top == bottom)
+        {
+         cmd.reject = "block geometry is degenerate";
+         return false;
+        }
+      //--- the block's orientation must agree with the requested direction:
+      //--- an inverted block would put the stop on the wrong side of the
+      //--- structure the trader claims to be trading against.
+      if(side == "BUY" && top <= bottom)
+        {
+         cmd.reject = "a BUY block needs block_top above block_bottom";
+         return false;
+        }
+      if(side == "SELL" && bottom <= top)
+        {
+         cmd.reject = "a SELL block needs block_bottom above block_top";
+         return false;
+        }
+
+      double entry = 0.0;
+      if(ReadJsonNumber(body, "entry", entry))
+        {
+         if(!MathIsValidNumber(entry) || entry <= 0.0)
+           {
+            cmd.reject = "entry price is not a positive number";
+            return false;
+           }
+         if(otype == "LIMIT")
+           {
+            double lo = (top < bottom ? top : bottom);
+            double hi = (top < bottom ? bottom : top);
+            if(!(entry > lo && entry < hi))
+              {
+               cmd.reject = "a LIMIT entry must sit inside the block";
+               return false;
+              }
+           }
+        }
+      else
+        {
+         if(otype == "LIMIT")
+           {
+            cmd.reject = "a LIMIT order needs an entry price";
+            return false;
+           }
+         entry = 0.0;
+        }
+
+      double riskPct = 0.0;
+      if(!ReadJsonNumber(body, "risk_pct", riskPct))
+        {
+         cmd.reject = "order ticket without risk_pct";
+         return false;
+        }
+      if(!MathIsValidNumber(riskPct) || riskPct <= 0.0 || riskPct > InpMaxRiskPct)
+        {
+         cmd.reject = StringFormat("risk %.4f%% is outside (0, %.4f]",
+                                   riskPct, InpMaxRiskPct);
+         return false;
+        }
+
+      double trailTrigger = (double)CHARON_TRAIL_OFF;
+      if(ReadJsonNumber(body, "trail_trigger", trailTrigger))
+        {
+         if(!TrailModeValid((int)trailTrigger))
+           {
+            cmd.reject = StringFormat("trail trigger %.0f is out of range", trailTrigger);
+            return false;
+           }
+        }
+      else
+         trailTrigger = (double)CHARON_TRAIL_OFF;
+
+      double rung = 0.0;
+      if(ReadJsonNumber(body, "rung", rung))
+        {
+         if(rung < 0.0 || rung > (double)CHARON_BRIDGE_MAX_RUNG)
+           {
+            cmd.reject = StringFormat("rung %.0f is out of range", rung);
+            return false;
+           }
+        }
+      else
+         rung = 0.0;
+
+      double ticket = 0.0;
+      bool needsTicket = (verb == CHARON_BRIDGE_V_ORDER_MODIFY ||
+                          verb == CHARON_BRIDGE_V_ORDER_CANCEL);
+      if(needsTicket)
+        {
+         if(!ReadJsonNumber(body, "ticket", ticket) || ticket <= 0.0)
+           {
+            cmd.reject = "order ticket has no positive ticket number";
+            return false;
+           }
+        }
+
+      cmd.side         = side;
+      cmd.orderType    = otype;
+      cmd.entry        = entry;
+      cmd.blockTop     = top;
+      cmd.blockBottom  = bottom;
+      cmd.riskPct      = riskPct;
+      cmd.trailTrigger = (int)trailTrigger;
+      cmd.rung         = (int)rung;
+      cmd.ticket       = (ulong)ticket;
+     }
 
    cmd.valid = true;
    return true;

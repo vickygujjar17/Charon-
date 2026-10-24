@@ -7,7 +7,7 @@
 //|  the high-water mark and the latches for every live position.     |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.00"
+#property version   "1.01"
 
 #ifndef __CHARON_STATE__
 #define __CHARON_STATE__
@@ -40,6 +40,7 @@ public:
    void              RemoveAt(const int index);
    void              Compact(void);
    bool              Get(const int index, SCharonPosState &out) const;
+   bool              GetByTicket(const ulong ticket, SCharonPosState &out) const;
    bool              Set(const int index, const SCharonPosState &row);
 
    //--- persistence
@@ -97,6 +98,21 @@ int CCharonState::Find(const ulong ticket) const
 bool CCharonState::Get(const int index, SCharonPosState &out) const
   {
    if(index < 0 || index >= m_count)
+      return false;
+   out = m_rows[index];
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Locate a row by its ticket                                      |
+//|  Replaces the Get/Set pair callers would otherwise need: the     |
+//|  index of a ticket is an implementation detail, and callers that  |
+//|  re-derive it tend to drift from the table's ordering rules.      |
+//+------------------------------------------------------------------+
+bool CCharonState::GetByTicket(const ulong ticket, SCharonPosState &out) const
+  {
+   int index = Find(ticket);
+   if(index < 0)
       return false;
    out = m_rows[index];
    return true;

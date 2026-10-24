@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import main
 from charon_bridge import mt5_adapter
+from charon_bridge.version import SCHEMA_VERSION
 
 
 @pytest.fixture()
@@ -19,7 +21,7 @@ def client(common_dir: Path) -> TestClient:
 def test_health_needs_no_token(client: TestClient) -> None:
     body = client.get("/api/health").json()
     assert body["ok"] is True
-    assert body["schema"] == 1
+    assert body["schema"] == SCHEMA_VERSION
     assert "locations" in body
 
 
@@ -194,3 +196,108 @@ def test_mt5_adapter_is_importable_without_the_package() -> None:
     view = mt5_adapter.describe()
     assert isinstance(view.available, bool)
     assert isinstance(view.as_dict(), dict)
+
+
+#+------------------------------------------------------------------+
+#| POST /api/order                                                  |
+#+------------------------------------------------------------------+
+def _ticket(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "symbol": "GBPUSD",
+        "side": "BUY",
+        "order_type": "LIMIT",
+        "entry": 1.26000,
+        "block_top": 1.27000,
+        "block_bottom": 1.25000,
+        "risk_pct": 0.5,
+        "trail_trigger": 4,
+        "rung": 2,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_order_endpoint_queues_a_ticket(client: TestClient, common_dir: Path) -> None:
+    response = client.post("/api/order", json=_ticket())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["queued"] is True
+    assert body["verb"] == "order_open"
+    # --- the response promises a verdict, it does not claim a trade
+    assert "EA" in body["note"]
+
+    inbox = common_dir / "Charon" / "commands"
+    files = sorted(p.name for p in inbox.glob("*.json"))
+    assert len(files) == 1
+    sent = json.loads((inbox / files[0]).read_text(encoding="utf-8"))
+    assert sent["verb"] == "order_open"
+    assert sent["side"] == "BUY"
+    assert sent["risk_pct"] == 0.5
+    assert "lots" not in sent and "sl" not in sent
+
+
+def test_order_endpoint_defaults_to_market_without_an_entry(
+        client: TestClient, common_dir: Path) -> None:
+    response = client.post("/api/order", json=_ticket(order_type="MARKET", entry=None))
+    assert response.status_code == 200
+    inbox = common_dir / "Charon" / "commands"
+    sent = json.loads(next(inbox.glob("*.json")).read_text(encoding="utf-8"))
+    assert sent["order_type"] == "MARKET"
+    assert "entry" not in sent
+
+
+@pytest.mark.parametrize("body,reason", [
+    ({"side": "buy"}, "side"),
+    ({"order_type": "STOP"}, "order_type"),
+    ({"block_top": 1.25, "block_bottom": 1.27}, "BUY block"),
+    ({"block_top": 1.26, "block_bottom": 1.26}, "height"),
+    ({"entry": 1.24000}, "inside the block"),
+    ({"risk_pct": 0}, "risk_pct"),
+    ({"risk_pct": 101}, "risk_pct"),
+    ({"rung": 9}, "rung"),
+])
+def test_order_endpoint_refuses_malformed_intent(
+        client: TestClient, body: dict[str, object], reason: str) -> None:
+    response = client.post("/api/order", json=_ticket(**body))
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    # --- two layers refuse here: FastAPI's field constraints (a list of
+    # --- errors) and the order-intent validator (a plain sentence). Both
+    # --- are 422s, and both must name the offending field.
+    text = detail if isinstance(detail, str) else json.dumps(detail)
+    assert reason in text
+
+
+def test_order_endpoint_writes_nothing_when_it_refuses(
+        client: TestClient, common_dir: Path) -> None:
+    client.post("/api/order", json=_ticket(risk_pct=-1))
+    inbox = common_dir / "Charon" / "commands"
+    assert list(inbox.glob("*.json")) == []
+
+
+def test_order_modify_needs_a_position_ticket(client: TestClient) -> None:
+    response = client.post("/api/order/modify", params={"position": 0}, json=_ticket())
+    assert response.status_code == 422
+
+    queued = client.post("/api/order/modify", params={"position": 42}, json=_ticket())
+    assert queued.status_code == 200
+    assert queued.json()["verb"] == "order_modify"
+    assert queued.json()["command"]["sent"]["ticket"] == 42
+
+
+def test_order_cancel_queues_a_ticket(client: TestClient, common_dir: Path) -> None:
+    response = client.post("/api/order/cancel",
+                           params={"position": 77, "symbol": "GBPUSD"})
+    assert response.status_code == 200
+    assert response.json()["verb"] == "order_cancel"
+    inbox = common_dir / "Charon" / "commands"
+    sent = json.loads(next(inbox.glob("*.json")).read_text(encoding="utf-8"))
+    assert sent["ticket"] == 77
+
+
+def test_trade_endpoint_points_at_the_order_endpoint(client: TestClient) -> None:
+    """The tombstone stays, but it must not be the only door in town."""
+    body = client.post("/api/trade").json()
+    assert "order_open" in body["allowed_verbs"]
+    assert "open" not in body["allowed_verbs"]
+

@@ -9,7 +9,7 @@
 //|  Run it on any chart. The verdict line is "SELFTEST RESULT: ..." |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.00"
+#property version   "1.01"
 #property script_show_inputs
 
 #include "CharonMath.mqh"
@@ -317,24 +317,41 @@ void TestArmGating(void)
 //| Bridge: the command vocabulary is a security boundary            |
 //|                                                                  |
 //|  These assert what the bridge REFUSES. A verb that opens or sizes |
-//|  an order must never be accepted, so the negative cases here are  |
-//|  the important ones.                                              |
+//|  an order on the caller's terms must never be accepted, so the    |
+//|  negative cases here are the important ones. The order_* verbs    |
+//|  are permitted but carry intent only -- they are listed as        |
+//|  positive cases because the EA, not the caller, adjudicates them. |
 //+------------------------------------------------------------------+
 void TestBridgeVerbs(void)
   {
-   //--- the four permitted verbs
+   //--- the four state-only verbs
    Check(CCharonBridge::VerbAllowed("arm"), "bridge: arm is permitted");
    Check(CCharonBridge::VerbAllowed("disarm"), "bridge: disarm is permitted");
    Check(CCharonBridge::VerbAllowed("trail_mode"), "bridge: trail_mode is permitted");
    Check(CCharonBridge::VerbAllowed("ping"), "bridge: ping is permitted");
 
-   //--- nothing that could express a trade
+   //--- attended execution: intent-carrying, still not caller-priced
+   Check(CCharonBridge::VerbAllowed("order_open"), "bridge: order_open is permitted");
+   Check(CCharonBridge::VerbAllowed("order_modify"), "bridge: order_modify is permitted");
+   Check(CCharonBridge::VerbAllowed("order_cancel"), "bridge: order_cancel is permitted");
+
+   //--- the order verbs are exactly the three above
+   Check(CCharonBridge::OrderVerb("order_open"), "bridge: order_open is an order verb");
+   Check(CCharonBridge::OrderVerb("order_modify"), "bridge: order_modify is an order verb");
+   Check(CCharonBridge::OrderVerb("order_cancel"), "bridge: order_cancel is an order verb");
+   Check(!CCharonBridge::OrderVerb("arm"), "bridge: arm is not an order verb");
+   Check(!CCharonBridge::OrderVerb("ping"), "bridge: ping is not an order verb");
+
+   //--- nothing that could express a trade the EA did not size
    Check(!CCharonBridge::VerbAllowed("open"), "bridge: open is refused");
    Check(!CCharonBridge::VerbAllowed("close"), "bridge: close is refused");
    Check(!CCharonBridge::VerbAllowed("modify"), "bridge: modify is refused");
    Check(!CCharonBridge::VerbAllowed("buy"), "bridge: buy is refused");
    Check(!CCharonBridge::VerbAllowed("sell"), "bridge: sell is refused");
    Check(!CCharonBridge::VerbAllowed("size"), "bridge: size is refused");
+   Check(!CCharonBridge::VerbAllowed("cancel"), "bridge: bare cancel is refused");
+   Check(!CCharonBridge::VerbAllowed("order"), "bridge: bare order is refused");
+   Check(!CCharonBridge::VerbAllowed("order_close"), "bridge: order_close is refused");
    Check(!CCharonBridge::VerbAllowed(""), "bridge: empty verb is refused");
    Check(!CCharonBridge::VerbAllowed("ARM"), "bridge: verbs are case-sensitive");
 
@@ -343,6 +360,9 @@ void TestBridgeVerbs(void)
    Check(CCharonBridge::TrailModeValid(4), "bridge: trail RR_LOCK is valid");
    Check(!CCharonBridge::TrailModeValid(-1), "bridge: trail -1 is refused");
    Check(!CCharonBridge::TrailModeValid(5), "bridge: trail 5 is refused");
+
+   //--- the rung a ticket may reference matches the published ladder
+   Check(CHARON_BRIDGE_MAX_RUNG == 3, "bridge: three rungs are addressable");
   }
 
 //+------------------------------------------------------------------+

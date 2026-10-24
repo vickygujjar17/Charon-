@@ -4,7 +4,7 @@
 //|  Every monetary decision in Charon flows through this module.    |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.00"
+#property version   "1.01"
 
 #ifndef __CHARON_RISK__
 #define __CHARON_RISK__
@@ -86,6 +86,8 @@ public:
    double            MaxAllowedRiskMoney(void) const;
    double            LotForStop(const double distance, bool &sized,
                                 const bool isScaleIn = false, const double multiplier = 1.0);
+   double            LotForBudget(const double distance, const double budget,
+                                  bool &sized);
   };
 
 //+------------------------------------------------------------------+
@@ -379,6 +381,75 @@ double CCharonRisk::LotForStop(const double distance, bool &sized,
          return 0.0;
       lot = m_spec.volMin;
       //--- the min lot must still respect the hard ceiling
+      if(MoneyAtDistance(distance, lot) > MaxAllowedRiskMoney() + CHARON_EPS)
+         return 0.0;
+     }
+
+   sized = true;
+   return lot;
+  }
+
+//+------------------------------------------------------------------+
+//| Volume that risks an EXPLICIT money budget over a stop distance  |
+//|                                                                  |
+//|  Used by attended execution, where the ticket states its own     |
+//|  risk percentage instead of inheriting InpRiskPct. Five rules    |
+//|  are kept identical to LotForStop() so the two paths cannot      |
+//|  disagree:                                                       |
+//|    * FIXED_LOTS bypasses money sizing entirely;                  |
+//|    * commission is charged per lot and solved for, not ignored;  |
+//|    * the result is rounded to the broker's volume step;          |
+//|    * the applied risk is verified against the budget, not just   |
+//|      the rounded intent;                                         |
+//|    * the min-lot fallback still respects MaxAllowedRiskMoney().  |
+//|  size (not budget) is the binding constraint: a ticket can ask   |
+//|  for LESS than InpMaxRiskPct but never for more, because the     |
+//|  caller clamps the budget before it gets here.                   |
+//+------------------------------------------------------------------+
+double CCharonRisk::LotForBudget(const double distance, const double budget,
+                                 bool &sized)
+  {
+   sized = false;
+   if(!MathIsValidNumber(distance) || distance <= 0.0)
+      return 0.0;
+   if(!MathIsValidNumber(budget) || budget <= 0.0)
+      return 0.0;
+
+   //--- FIXED_LOTS is an operator override of money sizing: honour it
+   if(InpLotMode == CHARON_LOT_FIXED_LOTS)
+     {
+      double lots = ChNormalizeLot(InpFixedLots, m_spec.volStep);
+      if(lots > m_spec.volMax)
+         lots = ChNormalizeLot(m_spec.volMax, m_spec.volStep);
+      if(lots < m_spec.volMin)
+         return 0.0;
+      sized = true;
+      return lots;
+     }
+
+   double perLotRisk = 0.0;
+   if(m_spec.tickSize > 0.0 && m_spec.tickValue > 0.0)
+      perLotRisk = (distance / m_spec.tickSize) * m_spec.tickValue;
+   if(perLotRisk <= 0.0)
+      return 0.0;
+   perLotRisk += (InpCommissionPerLot > 0.0 ? InpCommissionPerLot : 0.0);
+
+   double lot = ChNormalizeLot(MathFloor((budget / perLotRisk) / m_spec.volStep + CHARON_EPS) * m_spec.volStep,
+                               m_spec.volStep);
+   if(lot > m_spec.volMax)
+      lot = ChNormalizeLot(m_spec.volMax, m_spec.volStep);
+
+   while(lot >= m_spec.volMin &&
+         MoneyAtDistance(distance, lot) > budget + CHARON_EPS)
+      lot = ChNormalizeLot(lot - m_spec.volStep, m_spec.volStep);
+
+   if(lot < m_spec.volMin)
+     {
+      if(!InpAllowMinLot)
+         return 0.0;
+      lot = m_spec.volMin;
+      //--- the min lot must still respect the hard ceiling, which is
+      //--- independent of what the ticket asked for
       if(MoneyAtDistance(distance, lot) > MaxAllowedRiskMoney() + CHARON_EPS)
          return 0.0;
      }

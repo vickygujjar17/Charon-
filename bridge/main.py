@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -41,6 +42,7 @@ from charon_bridge.schema import (
     FORBIDDEN_VERBS,
     TRAIL_MODE_NAMES,
     SchemaError,
+    build_order_intent,
 )
 from charon_bridge.version import BRIDGE_VERSION, SCHEMA_VERSION
 
@@ -278,6 +280,118 @@ def set_trail(mode: int = Query(ge=0, le=4),
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     LOG.command(f"trail_mode={mode} ({TRAIL_MODE_NAMES[mode]}) queued for {resolved}")
     return {"queued": True, "command": sent}
+
+
+class OrderTicket(BaseModel):
+    """The operator's ticket, as the dashboard submits it.
+
+    Deliberately *not* a trade request: there is no ``lots`` field, because
+    volume is solved by the EA from the block height and the risk figure.
+    Accepting a caller-chosen volume would move a risk decision out of
+    ``CharonRisk.mqh`` and into the browser, which is exactly what the
+    architecture forbids.
+
+    ``entry`` may be omitted for a MARKET ticket; ``LIMIT`` requires it.
+    """
+
+    symbol: str | None = Field(
+        default=None,
+        description="Defaults to the symbol the EA last published.",
+    )
+    side: str = Field(description="BUY or SELL")
+    order_type: str = Field(default="MARKET", description="MARKET or LIMIT")
+    entry: float | None = Field(default=None, description="Required for LIMIT")
+    block_top: float = Field(description="Upper structural boundary")
+    block_bottom: float = Field(description="Lower structural boundary")
+    risk_pct: float = Field(description="Risk as a percent of account")
+    trail_trigger: int = Field(default=0, ge=0, le=4, description="TrailMode rung")
+    rung: int = Field(default=0, ge=0, le=3, description="RR rung to report against")
+
+
+
+@app.post("/api/order", dependencies=[Depends(require_token)])
+def place_order(ticket: "OrderTicket") -> dict[str, Any]:
+    """Queue an order ticket for the EA to adjudicate.
+
+    This endpoint does **not** place a trade. It writes one command file
+    describing what the operator asked for, and the EA decides -- under
+    ``CCharonRisk`` and the block geometry -- whether a position is opened,
+    how large it is and where the stop goes. The response says only that a
+    ticket was queued; the verdict arrives in the next snapshot's ``order``
+    block, which is where the dashboard reads its numbers from.
+
+    Refusals here are all *shape* refusals (bad side, inverted block, a
+    LIMIT entry outside its block, a risk figure that is not a positive
+    number). Anything about money or market state is the EA's answer.
+    """
+    resolved = _symbol_or_404(ticket.symbol)
+    try:
+        intent = build_order_intent(
+            side=ticket.side,
+            order_type=ticket.order_type,
+            entry=ticket.entry,
+            block_top=ticket.block_top,
+            block_bottom=ticket.block_bottom,
+            risk_pct=ticket.risk_pct,
+            trail_trigger=ticket.trail_trigger,
+            rung=ticket.rung,
+        )
+        sent = commands.submit("order_open", resolved, order=intent)
+    except (SchemaError, commands.CommandError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    LOG.command(
+        f"order_open queued for {resolved}: {intent.side} {intent.order_type} "
+        f"risk={intent.risk_pct}% block={intent.block_bottom}-{intent.block_top} "
+        f"({sent['file']})"
+    )
+    return {
+        "queued": True,
+        "verb": "order_open",
+        "command": sent,
+        "note": "Queued for the EA. The EA decides sizing and the stop.",
+    }
+
+
+@app.post("/api/order/modify", dependencies=[Depends(require_token)])
+def modify_order(ticket: "OrderTicket", position: int = Query(gt=0)) -> dict[str, Any]:
+    """Re-submit block geometry for an existing position.
+
+    The EA re-derives the stop from the new block and re-checks it against
+    ``MinStopDistance``/``StopsLevel`` before touching the position.
+    """
+    resolved = _symbol_or_404(ticket.symbol)
+    try:
+        intent = build_order_intent(
+            side=ticket.side,
+            order_type=ticket.order_type,
+            entry=ticket.entry,
+            block_top=ticket.block_top,
+            block_bottom=ticket.block_bottom,
+            risk_pct=ticket.risk_pct,
+            trail_trigger=ticket.trail_trigger,
+            rung=ticket.rung,
+        )
+        sent = commands.submit("order_modify", resolved, order=intent, ticket=position)
+    except (SchemaError, commands.CommandError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    LOG.command(f"order_modify queued for {resolved} ticket={position} ({sent['file']})")
+    return {"queued": True, "verb": "order_modify", "command": sent}
+
+
+@app.post("/api/order/cancel", dependencies=[Depends(require_token)])
+def cancel_order(position: int = Query(gt=0),
+                 symbol: str | None = Query(default=None)) -> dict[str, Any]:
+    """Ask the EA to cancel a pending order or flatten a position."""
+    resolved = _symbol_or_404(symbol)
+    try:
+        sent = commands.submit("order_cancel", resolved, ticket=position)
+    except (SchemaError, commands.CommandError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    LOG.command(f"order_cancel queued for {resolved} ticket={position} ({sent['file']})")
+    return {"queued": True, "verb": "order_cancel", "command": sent}
 
 
 @app.post("/api/trade")

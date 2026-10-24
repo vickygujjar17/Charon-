@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.fake_ea import FakeEA
+from tests.fake_ea import SCHEMA, FakeEA
 
 BRIDGE_DIR = Path(__file__).resolve().parent.parent
 
@@ -204,7 +204,7 @@ def test_backdated_command_is_rejected_and_logged(bridge: Client, ea: FakeEA) ->
     """
     inbox_file = ea.inbox / "00000000000000000001-000001-stale.json"
     inbox_file.write_text(json.dumps({
-        "schema": 1,
+        "schema": SCHEMA,
         "id": "stale-command",
         "verb": "arm",
         "symbol": ea.symbol,
@@ -226,7 +226,7 @@ def test_backdated_command_is_rejected_and_logged(bridge: Client, ea: FakeEA) ->
 
 def test_future_dated_command_is_rejected(ea: FakeEA) -> None:
     (ea.inbox / "00000000000000000002-000002-future.json").write_text(json.dumps({
-        "schema": 1, "id": "future", "verb": "arm", "symbol": ea.symbol,
+        "schema": SCHEMA, "id": "future", "verb": "arm", "symbol": ea.symbol,
         "issued": int(time.time()) + 600,
     }), encoding="utf-8")
 
@@ -240,7 +240,7 @@ def test_future_dated_command_is_rejected(ea: FakeEA) -> None:
 def test_wrong_symbol_command_is_rejected(ea: FakeEA) -> None:
     """The EA targets exactly one symbol: its own."""
     (ea.inbox / "00000000000000000003-000003-eurusd.json").write_text(json.dumps({
-        "schema": 1, "id": "wrong-symbol", "verb": "arm", "symbol": "EURUSD",
+        "schema": SCHEMA, "id": "wrong-symbol", "verb": "arm", "symbol": "EURUSD",
         "issued": int(time.time()),
     }), encoding="utf-8")
 
@@ -255,7 +255,7 @@ def test_poison_command_does_not_block_the_inbox(ea: FakeEA) -> None:
     (ea.inbox / "00000000000000000000-000000-broken.json").write_text(
         "{ this is not json", encoding="utf-8")
     (ea.inbox / "00000000000000000009-000009-arm.json").write_text(json.dumps({
-        "schema": 1, "id": "good", "verb": "arm", "symbol": ea.symbol,
+        "schema": SCHEMA, "id": "good", "verb": "arm", "symbol": ea.symbol,
         "issued": int(time.time()),
     }), encoding="utf-8")
 

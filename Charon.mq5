@@ -16,7 +16,7 @@
 //|  direction, news filters, market-structure scanners.             |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.00"
+#property version   "1.01"
 #property description "Semi-automated copilot: strict SL, trailing stops, RR/risk sizing, pyramiding."
 #property link      "https://github.com/vickygujjar17/Charon-.git"
 #property strict

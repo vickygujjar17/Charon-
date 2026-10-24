@@ -22,10 +22,21 @@ from charon_bridge.schema import (
     SchemaError,
     build_command,
 )
+from charon_bridge.version import SCHEMA_VERSION
 
 
-def test_allowed_verbs_are_exactly_four() -> None:
-    assert set(ALLOWED_VERBS) == {"arm", "disarm", "trail_mode", "ping"}
+def test_allowed_verbs_are_exactly_seven() -> None:
+    """The vocabulary grew in v1.1.0, and the growth is deliberate.
+
+    The three order verbs submit *intent* to the EA's risk model; none of
+    them accepts a caller-chosen volume, stop distance or R multiple. The
+    raw verbs they might have been named after remain forbidden, so this
+    list is the whole of what the bridge can express.
+    """
+    assert set(ALLOWED_VERBS) == {
+        "arm", "disarm", "trail_mode", "ping",
+        "order_open", "order_modify", "order_cancel",
+    }
 
 
 @pytest.mark.parametrize("verb", FORBIDDEN_VERBS)
@@ -43,7 +54,7 @@ def test_unknown_verb_cannot_be_built() -> None:
 def test_arm_command_shape() -> None:
     doc = build_command("arm", 1_760_000_000, symbol="GBPUSD", command_id="abc")
     assert doc == {
-        "schema": 1,
+        "schema": SCHEMA_VERSION,
         "id": "abc",
         "verb": "arm",
         "symbol": "GBPUSD",
@@ -84,7 +95,7 @@ def test_submit_payload_round_trips(common_dir: Path) -> None:
     assert loaded["verb"] == "trail_mode"
     assert loaded["mode"] == 4
     assert loaded["symbol"] == "GBPUSD"
-    assert loaded["schema"] == 1
+    assert loaded["schema"] == SCHEMA_VERSION
     assert isinstance(loaded["issued"], int)
 
 

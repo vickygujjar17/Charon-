@@ -89,7 +89,12 @@ const IDS = ["banner", "statusPill", "ageLabel", "latencyLabel", "lastGoodLabel"
   "basketDir", "basketLegs", "basketAvg", "basketLot", "ladder", "pyramidTrigger",
   "armState", "armCountdown", "armBtn", "armHint", "armMsg", "disarmBtn",
   "trailSelect", "trailMsg", "legRows", "noLegs", "logBox",
-  "bridgeVersion", "schemaVersion"];
+  "bridgeVersion", "schemaVersion",
+  // --- new order panel (v1.1.0)
+  "tagline", "orderStatus", "orderSide", "orderType", "orderEntry", "orderRisk",
+  "orderBlockTop", "orderBlockBottom", "orderTrail", "orderRung",
+  "orderLots", "orderEntryPx", "orderStop", "orderRiskMoney", "orderTicket",
+  "orderVerdict", "orderPlaceBtn", "orderModifyBtn", "orderCancelBtn", "orderMsg"];
 for (const id of IDS) {
   const el = new Element(id === "legRows" ? "tbody" : "div");
   el.id = id;
@@ -110,6 +115,12 @@ const snapshot = {
       best: 1.269, ladder: "1.50R 1.26450 | 2.00R 1.26600" },
     model: {}, trail: { mode: 2, mode_name: "ATR", mutable: true, options: {} },
     pyramid: { enabled: true, trigger: "MANUAL", armed: false, secs_left: -1 },
+    // --- the EA's verdict on the last ticket. The numbers here are
+    // --- deliberately "odd" so an assertion can prove the client rendered
+    // --- them verbatim instead of recomputing its own.
+    order: { status: "accepted", reason: "BUY filled 0.37 lots", side: "BUY",
+      lots: 0.37, entry: 1.26050, stop: 1.24980, risk_money: 39.79,
+      risk_pct: 0.3931, rung: 2, ticket: 4242 },
     legs: [{ ticket: 111, side: "BUY", tier: 1, entry: 1.26, lot: 0.3, sl: 1.257,
       risk_price: 0.003, hwm: 1.269, progress_rr: 3.0, trail_active: true,
       be_done: true, half_risk_done: true, ladder: "1.50R 1.26450" }],
@@ -189,6 +200,28 @@ setTimeout(() => {
   }
   if (!timers.some(([kind]) => kind === "interval")) {
     problems.push("the client never scheduled a refresh interval");
+  }
+
+  // --- new order panel: the EA's verdict must be rendered verbatim
+  const orderPill = registry.get("orderStatus").textContent;
+  if (orderPill !== "accepted") {
+    problems.push(`order pill says ${JSON.stringify(orderPill)}, expected "accepted"`);
+  }
+  if (registry.get("orderLots").textContent !== "0.37") {
+    problems.push(`order size shows ${JSON.stringify(registry.get("orderLots").textContent)}`);
+  }
+  if (registry.get("orderStop").textContent !== "1.24980") {
+    problems.push(`order stop shows ${JSON.stringify(registry.get("orderStop").textContent)}`);
+  }
+  if (registry.get("orderTicket").textContent !== "#4242") {
+    problems.push(`order ticket shows ${JSON.stringify(registry.get("orderTicket").textContent)}`);
+  }
+  if (!String(registry.get("orderVerdict").textContent).includes("0.37")) {
+    problems.push("the order verdict line dropped the EA's own reason");
+  }
+  // --- the ticket form must not be pre-filled with a computed price
+  if (registry.get("orderBlockTop").value !== "") {
+    problems.push("the block top box was pre-filled by the client");
   }
 
   console.log("requests issued:");

@@ -37,11 +37,14 @@ from pathlib import Path
 from typing import Any
 
 # --- mirrors CHARON_BRIDGE_SCHEMA / CHARON_BRIDGE_CMD_MAX_AGE in CharonBridge.mqh
-SCHEMA = 1
+SCHEMA = 2
 CMD_MAX_AGE = 60
 
 # --- mirrors CCharonBridge::VerbAllowed(). Adding one is a security decision.
-ALLOWED_VERBS = ("arm", "disarm", "trail_mode", "ping")
+ALLOWED_VERBS = ("arm", "disarm", "trail_mode", "ping",
+                 "order_open", "order_modify", "order_cancel")
+ORDER_VERBS = ("order_open", "order_modify", "order_cancel")
+MAX_RUNG = 3
 
 TRAIL_MODE_NAMES = {
     0: "OFF",
@@ -74,6 +77,12 @@ class FakeEA:
         self.ready = True
         self.seq = 0
         self.applied: list[str] = []
+        # --- the EA's verdict on the last attended ticket
+        self.order: dict[str, Any] = {
+            "status": "idle", "reason": "", "side": "", "lots": 0.0,
+            "entry": 0.0, "stop": 0.0, "risk_money": 0.0, "risk_pct": 0.0,
+            "rung": 0, "ticket": 0,
+        }
 
     #+----------------------------------------------------------------+
     #| Inbox                                                         |
@@ -140,7 +149,73 @@ class FakeEA:
             if int(mode) not in TRAIL_MODE_NAMES:
                 return document, False, f"trail mode {mode} is out of range"
 
+        if verb in ORDER_VERBS:
+            reject = self._validate_ticket(document, verb)
+            if reject:
+                return document, False, reject
+
         return document, True, ""
+
+    def _validate_ticket(self, doc: dict[str, Any], verb: str) -> str:
+        """Mirror the order-ticket checks in ``ReadCommandFile``.
+
+        Empty string means valid. The checks are kept in the same order as the
+        MQL5 parser so a ticket the real EA would refuse also fails here --
+        that equivalence is the only thing that makes these tests meaningful.
+        """
+        side = doc.get("side")
+        if side not in ("BUY", "SELL"):
+            return "order ticket without a valid side"
+
+        otype = doc.get("order_type", "MARKET")
+        if otype not in ("MARKET", "LIMIT"):
+            return f"order type '{otype}' is not supported"
+
+        top = doc.get("block_top")
+        bottom = doc.get("block_bottom")
+        for name, value in (("block_top", top), ("block_bottom", bottom)):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return f"{name} is not a number"
+            if not value > 0:
+                return f"{name} is not positive"
+        if top == bottom:
+            return "block geometry is degenerate"
+        if side == "BUY" and top <= bottom:
+            return "a BUY block needs block_top above block_bottom"
+        if side == "SELL" and bottom <= top:
+            return "a SELL block needs block_bottom above block_top"
+
+        entry = doc.get("entry")
+        if entry is not None:
+            if not isinstance(entry, (int, float)) or isinstance(entry, bool) or not entry > 0:
+                return "entry price is not a positive number"
+            if otype == "LIMIT":
+                lo, hi = (bottom, top) if top > bottom else (top, bottom)
+                if not (lo < entry < hi):
+                    return "a LIMIT entry must sit inside the block"
+        elif otype == "LIMIT":
+            return "a LIMIT order needs an entry price"
+
+        risk = doc.get("risk_pct")
+        if not isinstance(risk, (int, float)) or isinstance(risk, bool):
+            return "order ticket without risk_pct"
+        if not 0 < risk <= 100:
+            return f"risk {risk}% is outside the permitted range"
+
+        trigger = doc.get("trail_trigger", 0)
+        if int(trigger) not in TRAIL_MODE_NAMES:
+            return f"trail trigger {trigger} is out of range"
+
+        rung = doc.get("rung", 0)
+        if isinstance(rung, bool) or not isinstance(rung, int) or not 0 <= rung <= MAX_RUNG:
+            return f"rung {rung} is out of range"
+
+        if verb in ("order_modify", "order_cancel"):
+            ticket = doc.get("ticket")
+            if isinstance(ticket, bool) or not isinstance(ticket, int) or ticket <= 0:
+                return "order ticket has no positive ticket number"
+
+        return ""
 
 
     def _retire(self, name: str, valid: bool) -> str:
@@ -182,6 +257,40 @@ class FakeEA:
             self.arm_secs = -1
         elif verb == "trail_mode":
             self.trail_mode = int(document["mode"])
+        elif verb == "order_cancel":
+            self.order = {
+                "status": "accepted",
+                "reason": f"pending #{document['ticket']} cancelled",
+                "side": "", "lots": 0.0, "entry": 0.0, "stop": 0.0,
+                "risk_money": 0.0, "risk_pct": 0.0, "rung": 0,
+                "ticket": int(document["ticket"]),
+            }
+        else:
+            # --- order_open / order_modify: simulate the EA's adjudication.
+            # --- The volume is SOLVED here from the block height and the
+            # --- ticket's budget, never taken from the command, which is
+            # --- exactly the property the tests below assert.
+            side = document["side"]
+            risk_pct = float(document["risk_pct"])
+            height = abs(float(document["block_top"]) - float(document["block_bottom"]))
+            budget = 10_000.0 * risk_pct / 100.0
+            lots = round(budget / (height * 100_000.0) / 0.01) * 0.01
+            lots = max(lots, 0.01)
+            entry = float(document.get("entry") or 1.26000)
+            stop = (float(document["block_bottom"]) if side == "BUY"
+                    else float(document["block_top"]))
+            self.order = {
+                "status": "pending" if document.get("order_type") == "LIMIT" else "accepted",
+                "reason": "",
+                "side": side,
+                "lots": lots,
+                "entry": entry,
+                "stop": stop,
+                "risk_money": round(height * 100_000.0 * lots, 2),
+                "risk_pct": risk_pct,
+                "rung": int(document.get("rung", 0)),
+                "ticket": int(document.get("ticket") or 555),
+            }
 
         self.applied.append(verb)
         return verdict
@@ -260,6 +369,7 @@ class FakeEA:
                 "next_tier": 2,
                 "progress_rr": 1.42,
             },
+            "order": dict(self.order),
             "legs": [
                 {
                     "ticket": 111,

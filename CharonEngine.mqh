@@ -7,7 +7,7 @@
 //|  order of operations is auditable in a single place.              |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.00"
+#property version   "1.01"
 
 #ifndef __CHARON_ENGINE__
 #define __CHARON_ENGINE__
@@ -56,7 +56,28 @@ private:
    //--- optional file bridge (never required for trading)
    void              ServiceBridge(void);
    bool              ApplyBridgeCommand(const SCharonBridgeCommand &cmd);
+   bool              ApplyOrderCommand(const SCharonBridgeCommand &cmd);
+   void              SetOrderVerdict(const string status, const string reason,
+                                     const string side, const double lots,
+                                     const double entry, const double stop,
+                                     const double riskMoney, const double riskPct,
+                                     const int rung, const ulong ticket);
+   double            OrderTarget(const double entry, const double distance,
+                                 const bool isLong);
+   bool              HasOwnPending(void);
    void              PublishBridge(void);
+
+   //--- verdict of the last attended ticket, published verbatim
+   string            m_orderStatus;
+   string            m_orderReason;
+   string            m_orderSide;
+   double            m_orderLots;
+   double            m_orderEntry;
+   double            m_orderStop;
+   double            m_orderRiskMoney;
+   double            m_orderRiskPct;
+   int               m_orderRung;
+   ulong             m_orderTicket;
 
    //--- helpers
    bool              WantsTicket(const ulong magic) const;
@@ -91,6 +112,16 @@ CCharonEngine::CCharonEngine(void)
    m_ready    = false;
    m_busy     = false;
    m_lastScan = 0;
+   m_orderStatus    = "idle";
+   m_orderReason    = "";
+   m_orderSide      = "";
+   m_orderLots      = 0.0;
+   m_orderEntry     = 0.0;
+   m_orderStop      = 0.0;
+   m_orderRiskMoney = 0.0;
+   m_orderRiskPct   = 0.0;
+   m_orderRung      = 0;
+   m_orderTicket    = 0;
    m_opts.symbol   = "";
    m_opts.slippage = 0;
    m_opts.retries  = 1;
@@ -1118,7 +1149,9 @@ void CCharonEngine::ServiceBridge(void)
 //|                                                                  |
 //|  Every branch calls a method that already existed before the      |
 //|  bridge did, so the bridge adds a remote input device and no new   |
-//|  capability. Nothing here can reach CharonTrade.mqh.              |
+//|  capability. The order_* verbs delegate to ApplyOrderCommand(),    |
+//|  which is the one place a ticket can reach CharonTrade.mqh -- and  |
+//|  only after the EA's own risk model has adjudicated it.           |
 //+------------------------------------------------------------------+
 bool CCharonEngine::ApplyBridgeCommand(const SCharonBridgeCommand &cmd)
   {
@@ -1174,8 +1207,424 @@ bool CCharonEngine::ApplyBridgeCommand(const SCharonBridgeCommand &cmd)
    if(cmd.verb == CHARON_BRIDGE_V_PING)
       return true;                    // liveness probe, no state change
 
+   //--- attended execution. The ticket carries intent only: the side, the
+   //--- block the stop is derived from, and the risk the operator is willing
+   //--- to carry. Everything else -- whether it is allowed, how large it is,
+   //--- where the stop sits -- is decided here, by the same CCharonRisk calls
+   //--- the rest of the engine uses.
+   if(CCharonBridge::OrderVerb(cmd.verb))
+      return ApplyOrderCommand(cmd);
+
    return false;
   }
+//+------------------------------------------------------------------+
+//| Record the verdict of the last attended ticket                   |
+//|  Every field is what the EA actually used or produced, so the     |
+//|  dashboard never has to derive a lot, a stop or an R multiple.    |
+//+------------------------------------------------------------------+
+void CCharonEngine::SetOrderVerdict(const string status, const string reason,
+                                    const string side, const double lots,
+                                    const double entry, const double stop,
+                                    const double riskMoney, const double riskPct,
+                                    const int rung, const ulong ticket)
+  {
+   m_orderStatus    = status;
+   m_orderReason    = reason;
+   m_orderSide      = side;
+   m_orderLots      = lots;
+   m_orderEntry     = entry;
+   m_orderStop      = stop;
+   m_orderRiskMoney = riskMoney;
+   m_orderRiskPct   = riskPct;
+   m_orderRung      = rung;
+   m_orderTicket    = ticket;
+  }
+
+//+------------------------------------------------------------------+
+//| Take-profit target, derived exactly as adoption and pyramid do   |
+//|  Returns 0.0 when the operator configured "no target", which is   |
+//|  the default: Charon never invents a TP the settings did not ask  |
+//|  for.                                                            |
+//+------------------------------------------------------------------+
+double CCharonEngine::OrderTarget(const double entry, const double distance,
+                                  const bool isLong)
+  {
+   if(!MathIsValidNumber(entry) || entry <= 0.0)
+      return 0.0;
+   if(!MathIsValidNumber(distance) || distance <= 0.0)
+      return 0.0;
+
+   double tp = 0.0;
+   if(InpTpUnit == CHARON_TP_RR && InpTpRR > 0.0)
+      tp = ChPriceAtRR(entry, distance, InpTpRR, isLong);
+   else if(InpTpUnit == CHARON_TP_POINTS && InpTpPoints > 0.0)
+     {
+      double tdist = ChPriceFromPoints(InpTpPoints, m_risk.Point());
+      tp = (isLong ? entry + tdist : entry - tdist);
+     }
+
+   if(!MathIsValidNumber(tp) || tp <= 0.0)
+      return 0.0;
+   return m_risk.NormalizePrice(tp);
+  }
+
+//+------------------------------------------------------------------+
+//| Is there already a pending order Charon should manage?           |
+//|  One basket per symbol is the whole state model, so a second     |
+//|  pending ticket would create an exposure the panel cannot show.  |
+//+------------------------------------------------------------------+
+bool CCharonEngine::HasOwnPending(void)
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!OrderSelect(ticket))
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != m_symbol)
+         continue;
+      if(WantsTicket((ulong)OrderGetInteger(ORDER_MAGIC)))
+         return true;
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Adjudicate and execute one attended order ticket                 |
+//|                                                                  |
+//|  The ordering of these checks is the design: every refusal is a   |
+//|  reason the operator can read, and no check is a "we'll fix it    |
+//|  later". A ticket either satisfies the same constraints the rest  |
+//|  of the engine enforces, or it is rejected with a verdict that    |
+//|  shows up in the dashboard.                                      |
+//|                                                                  |
+//|  Three invariants hold on every path through this function:       |
+//|    * a position is never opened without a strict stop attached in |
+//|      the same OrderSend request;                                 |
+//|    * the volume is solved by CCharonRisk from the block height    |
+//|      and the ticket's own budget -- never supplied by the caller; |
+//|    * the risk is re-verified against InpMaxRiskPct after sizing,  |
+//|      so a rounding edge or the min-lot floor cannot exceed it.    |
+//+------------------------------------------------------------------+
+bool CCharonEngine::ApplyOrderCommand(const SCharonBridgeCommand &cmd)
+  {
+   const bool   isLong = (cmd.side == "BUY");
+   const string side   = cmd.side;
+
+   //--- 1) cancel: remove a pending ticket, or flatten a position
+   if(cmd.verb == CHARON_BRIDGE_V_ORDER_CANCEL)
+     {
+      string err = "";
+      if(OrderSelect(cmd.ticket))
+        {
+         if(!ChExecCancelPending(m_opts, cmd.ticket, err))
+           {
+            SetOrderVerdict("rejected", "cancel refused: " + err, "", 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0, cmd.ticket);
+            PrintFormat("%s bridge: cancel #%I64u failed - %s", CHARON_NAME, cmd.ticket, err);
+            return false;
+           }
+         SetOrderVerdict("accepted", StringFormat("pending #%I64u cancelled", cmd.ticket),
+                         "", 0.0, 0.0, 0.0, 0.0, 0.0, 0, cmd.ticket);
+         PrintFormat("%s bridge: pending #%I64u cancelled via dashboard", CHARON_NAME, cmd.ticket);
+         return true;
+        }
+
+      if(PositionSelectByTicket(cmd.ticket))
+        {
+         if(!ChExecClosePosition(m_opts, cmd.ticket, 0.0, err))
+           {
+            SetOrderVerdict("rejected", "close refused: " + err, "", 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0, cmd.ticket);
+            PrintFormat("%s bridge: close #%I64u failed - %s", CHARON_NAME, cmd.ticket, err);
+            return false;
+           }
+         m_state.Erase(cmd.ticket);
+         SetOrderVerdict("accepted", StringFormat("position #%I64u closed", cmd.ticket),
+                         "", 0.0, 0.0, 0.0, 0.0, 0.0, 0, cmd.ticket);
+         PrintFormat("%s bridge: position #%I64u closed via dashboard", CHARON_NAME, cmd.ticket);
+         return true;
+        }
+
+      SetOrderVerdict("rejected", "no pending order or position with that ticket",
+                      "", 0.0, 0.0, 0.0, 0.0, 0.0, 0, cmd.ticket);
+      return false;
+     }
+
+   //--- 2) the account must be usable before any risk arithmetic happens
+   double base = m_risk.AccountBase();
+   if(base <= 0.0)
+     {
+      SetOrderVerdict("rejected", "account base is unavailable", side,
+                      0.0, 0.0, 0.0, 0.0, 0.0, cmd.rung, 0);
+      return false;
+     }
+
+   //--- 3) block geometry -> stop distance. The block is the structure the
+   //--- operator is trading against; the stop sits just beyond it, plus the
+   //--- same buffer the strict-stop path uses.
+   double buffer      = m_risk.StopDistanceWithBuffer();
+   double blockHeight = MathAbs(cmd.blockTop - cmd.blockBottom);
+   double distance    = blockHeight + buffer;
+   if(!MathIsValidNumber(distance) || distance <= 0.0)
+     {
+      SetOrderVerdict("rejected", "block has no usable height", side,
+                      0.0, 0.0, 0.0, 0.0, 0.0, cmd.rung, 0);
+      return false;
+     }
+   if(distance < m_risk.MinStopDistance())
+     {
+      SetOrderVerdict("rejected",
+                      StringFormat("block is tighter than the broker stop level (%.5f < %.5f)",
+                                   distance, m_risk.MinStopDistance()),
+                      side, 0.0, 0.0, 0.0, 0.0, 0.0, cmd.rung, 0);
+      return false;
+     }
+
+   //--- 4) entry reference: the requested price, or the market side
+   double entry = cmd.entry;
+   if(cmd.orderType == "MARKET" || entry <= 0.0)
+      entry = (isLong ? m_risk.Ask() : m_risk.Bid());
+   entry = m_risk.NormalizePrice(entry);
+   if(entry <= 0.0)
+     {
+      SetOrderVerdict("rejected", "no usable price for this symbol", side,
+                      0.0, 0.0, 0.0, 0.0, 0.0, cmd.rung, 0);
+      return false;
+     }
+
+   //--- the stop must sit on the far side of the block from the entry
+   double stop = (isLong ? MathMin(cmd.blockBottom, entry) - buffer
+                         : MathMax(cmd.blockTop, entry) + buffer);
+   stop = m_risk.NormalizePrice(stop);
+   if(stop <= 0.0 || (isLong ? stop >= entry : stop <= entry))
+     {
+      SetOrderVerdict("rejected", "block does not place a stop beyond the entry",
+                      side, 0.0, 0.0, 0.0, 0.0, 0.0, cmd.rung, 0);
+      return false;
+     }
+
+   //--- re-measure from the normalized prices: rounding can move the
+   //--- distance by a fraction of a point, and the risk below must describe
+   //--- the stop that will actually be sent
+   distance = MathAbs(entry - stop);
+   if(distance < m_risk.MinStopDistance())
+     {
+      SetOrderVerdict("rejected",
+                      StringFormat("normalized stop is inside the broker minimum (%.5f)",
+                                   distance),
+                      side, 0.0, 0.0, 0.0, 0.0, 0.0, cmd.rung, 0);
+      return false;
+     }
+   //--- 5) the ticket's own budget, clamped by the operator's hard ceiling.
+   //--- A ticket may ask for less than InpMaxRiskPct but never for more.
+   double wanted = cmd.riskPct;
+   if(wanted > InpMaxRiskPct)
+      wanted = InpMaxRiskPct;
+   double budget = base * wanted / 100.0;
+   if(budget <= 0.0)
+     {
+      SetOrderVerdict("rejected", "risk budget resolves to zero", side,
+                      0.0, entry, stop, 0.0, 0.0, cmd.rung, 0);
+      return false;
+     }
+
+   //--- 6) size it. LotForBudget enforces every LotForStop rule plus the
+   //--- min-lot floor against the hard ceiling.
+   bool   sized = false;
+   double lot   = m_risk.LotForBudget(distance, budget, sized);
+   if(!sized || lot <= 0.0)
+     {
+      SetOrderVerdict("rejected",
+                      StringFormat("no volume fits %.2f risk over %.5f", budget, distance),
+                      side, 0.0, entry, stop, 0.0, 0.0, cmd.rung, 0);
+      return false;
+     }
+
+   //--- 7) verify the applied risk, not the rounded intent
+   double riskMoney = m_risk.MoneyAtDistance(distance, lot);
+   double cap       = m_risk.MaxAllowedRiskMoney();
+   if(cap > 0.0 && riskMoney > cap + CHARON_EPS)
+     {
+      SetOrderVerdict("rejected",
+                      StringFormat("solved risk %.2f exceeds the %.2f cap", riskMoney, cap),
+                      side, lot, entry, stop, riskMoney, 0.0, cmd.rung, 0);
+      return false;
+     }
+
+   const double riskPct = (riskMoney / base * 100.0);
+
+   //--- 8) one basket per symbol, and never against the existing direction
+   if(m_basket.valid && !m_basket.mixed && m_basket.legs > 0)
+     {
+      bool basketLong = ChIsLong(m_basket.dir);
+      if(basketLong != isLong)
+        {
+         SetOrderVerdict("rejected",
+                         StringFormat("basket on %s is already %s", m_symbol,
+                                      (basketLong ? "LONG" : "SHORT")),
+                         side, lot, entry, stop, riskMoney, riskPct, cmd.rung, 0);
+         return false;
+        }
+     }
+
+   //--- 9) order_modify: re-derive the stop on an existing position
+   if(cmd.verb == CHARON_BRIDGE_V_ORDER_MODIFY)
+     {
+      if(!PositionSelectByTicket(cmd.ticket))
+        {
+         SetOrderVerdict("rejected", "position no longer exists", side, lot, entry, stop,
+                         riskMoney, riskPct, cmd.rung, cmd.ticket);
+         return false;
+        }
+      if(ChIsLong(PositionGetInteger(POSITION_TYPE)) != isLong)
+        {
+         SetOrderVerdict("rejected", "ticket direction does not match the ticket side",
+                         side, lot, entry, stop, riskMoney, riskPct, cmd.rung, cmd.ticket);
+         return false;
+        }
+
+      string err = "";
+      if(!ChExecModifyStops(m_opts, cmd.ticket, stop, 0.0, err))
+        {
+         SetOrderVerdict("rejected", "modify refused: " + err, side, lot, entry, stop,
+                         riskMoney, riskPct, cmd.rung, cmd.ticket);
+         PrintFormat("%s bridge: modify #%I64u failed - %s", CHARON_NAME, cmd.ticket, err);
+         return false;
+        }
+
+      //--- keep 1R anchored at the new stop so the ladder stays honest.
+      //--- GetByTicket hands back a COPY, so the row has to be written back
+      //--- through Set() before Save() -- Save() persists from the table,
+      //--- not from this local.
+      SCharonPosState row;
+      int rowIndex = m_state.Find(cmd.ticket);
+      if(rowIndex >= 0 && m_state.GetByTicket(cmd.ticket, row))
+        {
+         row.initialSL = stop;
+         row.riskPrice = distance;
+         if(m_state.Set(rowIndex, row))
+            m_state.Save(rowIndex, true);
+        }
+
+      SetOrderVerdict("accepted", "stop re-derived from the new block", side, lot, entry,
+                      stop, riskMoney, riskPct, cmd.rung, cmd.ticket);
+      PrintFormat("%s bridge: #%I64u stop -> %.5f (%.2f risk, rung %d)", CHARON_NAME,
+                  cmd.ticket, stop, riskMoney, cmd.rung);
+      return true;
+     }
+   //--- 10) order_open. A LIMIT ticket becomes a pending order with its stop
+   //--- attached; a MARKET ticket becomes a position with its stop attached.
+   //--- Neither path can produce an unprotected fill.
+   if(cmd.orderType == "LIMIT")
+     {
+      double ask = m_risk.Ask();
+      double bid = m_risk.Bid();
+      if(isLong && ask > 0.0 && entry >= ask)
+        {
+         SetOrderVerdict("rejected",
+                         StringFormat("a BUY LIMIT must sit below the ask (%.5f)", ask),
+                         side, lot, entry, stop, riskMoney, riskPct, cmd.rung, 0);
+         return false;
+        }
+      if(!isLong && bid > 0.0 && entry <= bid)
+        {
+         SetOrderVerdict("rejected",
+                         StringFormat("a SELL LIMIT must sit above the bid (%.5f)", bid),
+                         side, lot, entry, stop, riskMoney, riskPct, cmd.rung, 0);
+         return false;
+        }
+      if(HasOwnPending())
+        {
+         SetOrderVerdict("rejected", "a Charon pending order is already working on this symbol",
+                         side, lot, entry, stop, riskMoney, riskPct, cmd.rung, 0);
+         return false;
+        }
+
+      ulong  ticket  = 0;
+      string err     = "";
+      string comment = StringFormat("%s L%d", CHARON_COMMENT, cmd.rung);
+      if(!ChExecOpenPending(m_opts, (isLong ? POSITION_TYPE_BUY : POSITION_TYPE_SELL),
+                            lot, entry, stop, InpMagic, comment, ticket, err))
+        {
+         SetOrderVerdict("rejected", "pending send failed: " + err, side, lot, entry, stop,
+                         riskMoney, riskPct, cmd.rung, 0);
+         PrintFormat("%s bridge: pending order failed - %s", CHARON_NAME, err);
+         return false;
+        }
+
+      if(cmd.trailTrigger != (int)CHARON_TRAIL_OFF)
+         m_trail.SetMode((ENUM_CHARON_TRAIL_MODE)cmd.trailTrigger);
+
+      SetOrderVerdict("pending",
+                      StringFormat("limit working at %.5f, stop %.5f", entry, stop),
+                      side, lot, entry, stop, riskMoney, riskPct, cmd.rung, ticket);
+      PrintFormat("%s bridge: pending %s %.2f lots @ %.5f stop %.5f risk %.2f (#%I64u)",
+                  CHARON_NAME, side, lot, entry, stop, riskMoney, ticket);
+      return true;
+     }
+
+   //--- MARKET. Two different situations reach this point and they must not
+   //--- be conflated:
+   //---   * flat book -- the ticket is the primary, subject to its own budget;
+   //---   * an existing same-direction basket -- adding here is a scale-in,
+   //---     and the pyramid's collective ceiling applies instead. Letting a
+   //---     dashboard ticket bypass InpPyramidMaxRiskPct would quietly make
+   //---     the basket more dangerous than the chart would allow, so the
+   //---     extra exposure is projected and refused if it breaches the cap.
+   if(m_basket.valid && !m_basket.mixed && m_basket.legs > 0)
+     {
+      double projected = m_basket.riskMoney + riskMoney;
+      double basketCap = base * InpPyramidMaxRiskPct / 100.0;
+      if(basketCap > 0.0 && projected > basketCap + CHARON_EPS)
+        {
+         SetOrderVerdict("rejected",
+                         StringFormat("adding %.2f would take basket risk to %.2f (cap %.2f)",
+                                      riskMoney, projected, basketCap),
+                         side, lot, entry, stop, riskMoney, riskPct, cmd.rung, 0);
+         return false;
+        }
+     }
+
+   double tp      = OrderTarget(entry, distance, isLong);
+   ulong  opened  = 0;
+   double fill    = 0.0;
+   string note    = "";
+   string comment = StringFormat("%s M%d", CHARON_COMMENT, cmd.rung);
+   if(!ChExecOpenMarket(m_opts, (isLong ? POSITION_TYPE_BUY : POSITION_TYPE_SELL),
+                        lot, stop, tp, InpMagic, comment, opened, fill, note))
+     {
+      SetOrderVerdict("rejected", "open failed: " + note, side, lot, entry, stop,
+                      riskMoney, riskPct, cmd.rung, 0);
+      PrintFormat("%s bridge: market open failed - %s", CHARON_NAME, note);
+      return false;
+     }
+
+   if(cmd.trailTrigger != (int)CHARON_TRAIL_OFF)
+      m_trail.SetMode((ENUM_CHARON_TRAIL_MODE)cmd.trailTrigger);
+
+   //--- res.order is the ORDER ticket, not necessarily the position ticket,
+   //--- so re-scan instead of adopting by number. The leg already carries its
+   //--- stop, so there is no unprotected window here either way.
+   ScanAndAdopt();
+
+   double shownEntry = (fill > 0.0 ? fill : entry);
+   SetOrderVerdict("accepted",
+                   StringFormat("%s filled %.2f lots @ %.5f, stop %.5f",
+                                side, lot, shownEntry, stop),
+                   side, lot, shownEntry, stop, riskMoney, riskPct, cmd.rung, opened);
+   PrintFormat("%s bridge: %s %.2f lots @ %.5f stop %.5f risk %.2f (%.2f%%) (#%I64u)",
+               CHARON_NAME, side, lot, shownEntry, stop, riskMoney, riskPct, opened);
+   return true;
+  }
+
+
+
+
+
+
+
 
 //+------------------------------------------------------------------+
 //| Assemble and publish the snapshot the dashboard renders          |
@@ -1283,6 +1732,18 @@ void CCharonEngine::PublishBridge(void)
       snap.progressRR = ChProgressRR(m_basket.avgEntry, refRisk,
                                      (isLong ? m_risk.Bid() : m_risk.Ask()), isLong);
      }
+
+   //--- order verdict: copied, never recomputed
+   snap.orderStatus    = m_orderStatus;
+   snap.orderReason    = m_orderReason;
+   snap.orderSide      = m_orderSide;
+   snap.orderLots      = m_orderLots;
+   snap.orderEntry     = m_orderEntry;
+   snap.orderStop      = m_orderStop;
+   snap.orderRiskMoney = m_orderRiskMoney;
+   snap.orderRiskPct   = m_orderRiskPct;
+   snap.orderRung      = m_orderRung;
+   snap.orderTicket    = m_orderTicket;
 
    //--- legs
    SCharonBridgeLeg legs[];

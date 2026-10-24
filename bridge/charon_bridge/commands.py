@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .paths import commands_dir, ensure_dirs, processed_dir
-from .schema import ALLOWED_VERBS, SchemaError, build_command
+from .schema import ALLOWED_VERBS, OrderIntent, SchemaError, build_command
 
 
 class CommandError(RuntimeError):
@@ -59,13 +59,20 @@ def _atomic_write(path: Path, payload: str) -> None:
         raise CommandError(f"could not write command: {exc}") from exc
 
 
-def submit(verb: str, symbol: str, *, mode: int | None = None) -> dict[str, Any]:
+def submit(verb: str, symbol: str, *, mode: int | None = None,
+           order: OrderIntent | None = None,
+           ticket: int | None = None) -> dict[str, Any]:
     """Queue one command for the EA and return what was sent.
 
     ``issued`` is the local epoch second. The EA compares it against its
     own clock and refuses anything more than ``CHARON_BRIDGE_CMD_MAX_AGE``
     away in either direction, so a file left on disk and replayed later is
     a no-op rather than a surprise.
+
+    For ``order_open``/``order_modify`` the caller must pass a validated
+    :class:`~charon_bridge.schema.OrderIntent`; for ``order_modify``/
+    ``order_cancel`` a positive ticket. This module still writes the file
+    and nothing else -- the EA decides whether the order happens.
     """
     if verb not in ALLOWED_VERBS:
         raise SchemaError(f"verb {verb!r} is not permitted")
@@ -75,7 +82,8 @@ def submit(verb: str, symbol: str, *, mode: int | None = None) -> dict[str, Any]
     issued = int(now_ns // 1_000_000_000)
     command_id = uuid.uuid4().hex
 
-    doc = build_command(verb, issued, symbol=symbol, command_id=command_id, mode=mode)
+    doc = build_command(verb, issued, symbol=symbol, command_id=command_id,
+                        mode=mode, order=order, ticket=ticket)
     name = _next_name(now_ns)
     payload = json.dumps(doc, indent=2, sort_keys=True) + "\n"
 

@@ -313,6 +313,7 @@ function render(payload) {
     : "The EA reports this mode as not mutable on this chart.";
 
   renderLegs(snap.legs, digits);
+  renderOrder(snap.order, digits, snap.currency);
   $("noLegs").classList.toggle("hidden", snap.legs.length > 0);
 }
 
@@ -472,6 +473,200 @@ async function refresh() {
 }
 
 let lastPollError = null;
+//+------------------------------------------------------------------+
+//| New order panel                                                  |
+//|                                                                  |
+//| This is the only part of the page that sends an order ticket. It  |
+//| sends INTENT -- side, block, risk, rung -- and never a volume, a  |
+//| stop distance or an R multiple. Those are the EA's answers, and   |
+//| the EA publishes them back in snap.order for us to render.        |
+//|                                                                  |
+//| Rule 1 still holds here: nothing below multiplies, subtracts or   |
+//| otherwise derives a price. If a number is missing we print a dash.|
+//+------------------------------------------------------------------+
+const ORDER_TONE = {
+  idle: "pill bg-ink-700 text-shade-300",
+  pending: "pill bg-stale/15 text-stale",
+  accepted: "pill bg-live/15 text-live",
+  rejected: "pill bg-offline/15 text-offline",
+};
+
+function renderOrder(order, digits, currency) {
+  const status = (order && order.status) || "idle";
+  const badge = $("orderStatus");
+  badge.textContent = status;
+  badge.className = ORDER_TONE[status] || ORDER_TONE.idle;
+
+  // --- the EA's numbers, rendered verbatim. A rejected ticket still shows
+  // --- what was refused, which is the whole point of publishing them.
+  $("orderLots").textContent =
+    order && order.lots !== null && order.lots !== undefined
+      ? Number(order.lots).toFixed(2)
+      : "\u2014";
+  $("orderEntryPx").textContent = order ? price(order.entry, digits) : "\u2014";
+  $("orderStop").textContent = order ? price(order.stop, digits) : "\u2014";
+  $("orderRiskMoney").textContent =
+    order && order.risk_money !== null && order.risk_money !== undefined
+      ? money(order.risk_money, currency) +
+        (order.risk_pct !== null && order.risk_pct !== undefined
+          ? " (" + pct(order.risk_pct) + ")"
+          : "")
+      : "\u2014";
+  $("orderTicket").textContent =
+    order && order.ticket ? "#" + order.ticket : "\u2014";
+
+  const verdict = $("orderVerdict");
+  if (!order || status === "idle") {
+    verdict.className = "mt-2 text-[11px] text-shade-400";
+    verdict.textContent = "Nothing submitted yet.";
+    return;
+  }
+
+  if (status === "rejected") {
+    verdict.className = "mt-2 text-[11px] text-offline";
+    verdict.textContent = "EA refused: " + (order.reason || "no reason given");
+    return;
+  }
+
+  verdict.className =
+    status === "pending" ? "mt-2 text-[11px] text-stale" : "mt-2 text-[11px] text-live";
+  const parts = [];
+  if (order.side) parts.push(order.side);
+  if (order.rung) parts.push("rung " + order.rung);
+  parts.push(order.reason || (status === "pending" ? "working" : "filled"));
+  verdict.textContent = parts.join(" \u00b7 ");
+}
+
+// --- read the ticket out of the form. Values are strings in the DOM, so
+// --- anything empty becomes null and the server decides whether that is
+// --- acceptable (a MARKET ticket may have no entry; a LIMIT may not).
+function readTicket() {
+  const symbol = $("symbolLabel").textContent;
+  const entryRaw = $("orderEntry").value.trim();
+  const type = $("orderType").value;
+  return {
+    symbol: symbol && symbol !== "\u2014" ? symbol : null,
+    side: $("orderSide").value,
+    order_type: type,
+    entry: entryRaw === "" ? null : Number(entryRaw),
+    block_top: Number($("orderBlockTop").value),
+    block_bottom: Number($("orderBlockBottom").value),
+    risk_pct: Number($("orderRisk").value),
+    trail_trigger: Number($("orderTrail").value),
+    rung: Number($("orderRung").value),
+  };
+}
+
+async function postOrder(path, label) {
+  const message = $("orderMsg");
+  message.className = "mt-2 text-[11px] text-shade-400";
+  message.textContent = "sending\u2026";
+
+  const ticket = readTicket();
+  // --- a blank box is not zero: catch it here rather than sending NaN,
+  // --- which JSON turns into null and the server rejects with a message
+  // --- far less useful than this one.
+  for (const key of ["block_top", "block_bottom", "risk_pct"]) {
+    if (!Number.isFinite(ticket[key]) || ticket[key] <= 0) {
+      message.className = "mt-2 text-[11px] text-offline";
+      message.textContent = key.replace("_", " ") + " must be a positive number.";
+      return;
+    }
+  }
+  if (ticket.order_type === "LIMIT" && !Number.isFinite(ticket.entry)) {
+    message.className = "mt-2 text-[11px] text-offline";
+    message.textContent = "A LIMIT ticket needs an entry price.";
+    return;
+  }
+
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(ticket),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      message.className = "mt-2 text-[11px] text-offline";
+      const detail = body.detail;
+      message.textContent =
+        typeof detail === "string" ? detail : "HTTP " + response.status;
+      return;
+    }
+    // --- queued is not filled: the EA adjudicates on its next tick and the
+    // --- verdict arrives in the snapshot, not in this response.
+    message.className = "mt-2 text-[11px] text-accent";
+    message.textContent =
+      label + " queued \u2014 the EA adjudicates it on its next tick.";
+    appendLocalLog("command", "order: " + label + " queued from the dashboard");
+    refresh();
+  } catch (error) {
+    message.className = "mt-2 text-[11px] text-offline";
+    message.textContent = "failed: " + error.message;
+  }
+}
+
+function wireOrderPanel() {
+  $("orderType").addEventListener("change", (event) => {
+    const isLimit = event.target.value === "LIMIT";
+    $("orderEntry").disabled = !isLimit;
+    $("orderEntry").placeholder = isLimit ? "price inside the block" : "market";
+  });
+  $("orderEntry").disabled = true;
+
+  $("orderPlaceBtn").addEventListener("click", () =>
+    postOrder("/api/order", "Place"));
+
+  $("orderModifyBtn").addEventListener("click", () => {
+    const ticket = $("orderTicket").textContent;
+    if (!ticket.startsWith("#")) {
+      $("orderMsg").className = "mt-2 text-[11px] text-offline";
+      $("orderMsg").textContent = "No ticket to modify yet.";
+      return;
+    }
+    postOrder("/api/order/modify?position=" + encodeURIComponent(ticket.slice(1)),
+              "Modify");
+  });
+
+  $("orderCancelBtn").addEventListener("click", async () => {
+    const message = $("orderMsg");
+    const ticket = $("orderTicket").textContent;
+    if (!ticket.startsWith("#")) {
+      message.className = "mt-2 text-[11px] text-offline";
+      message.textContent = "No ticket to cancel yet.";
+      return;
+    }
+    const symbol = $("symbolLabel").textContent;
+    const path =
+      "/api/order/cancel?position=" +
+      encodeURIComponent(ticket.slice(1)) +
+      (symbol && symbol !== "\u2014" ? "&symbol=" + encodeURIComponent(symbol) : "");
+    message.className = "mt-2 text-[11px] text-shade-400";
+    message.textContent = "sending\u2026";
+    try {
+      const response = await fetch(path, { method: "POST" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        message.className = "mt-2 text-[11px] text-offline";
+        message.textContent =
+          typeof body.detail === "string" ? body.detail : "HTTP " + response.status;
+        return;
+      }
+      message.className = "mt-2 text-[11px] text-accent";
+      message.textContent = "Cancel queued \u2014 the EA applies it on its next tick.";
+      appendLocalLog("command", "order: cancel queued from the dashboard");
+      refresh();
+    } catch (error) {
+      message.className = "mt-2 text-[11px] text-offline";
+      message.textContent = "failed: " + error.message;
+    }
+  });
+}
+
+
+
+
+
 
 
 //+------------------------------------------------------------------+
@@ -502,6 +697,8 @@ async function postCommand(path, messageEl, label) {
 }
 
 function wireCommands() {
+  wireOrderPanel();
+
   $("armBtn").addEventListener("click", () =>
     postCommand("/api/pyramid/arm", $("armMsg"), "Arm"));
 

@@ -16,6 +16,7 @@ in a module whose whole job is protecting open risk.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,15 +29,47 @@ class SchemaError(ValueError):
 
 # --- verbs the bridge will ever emit. This tuple is the single source of
 # --- truth on the Python side; the EA independently whitelists the same
-# --- four in CCharonBridge::VerbAllowed(). Neither side can widen the set
+# --- set in CCharonBridge::VerbAllowed(). Neither side can widen the set
 # --- alone, which is the point.
-ALLOWED_VERBS: tuple[str, ...] = ("arm", "disarm", "trail_mode", "ping")
+# ---
+# --- v1.1.0 adds attended manual execution. The naming is load-bearing: the
+# --- raw verbs ``open``/``close``/``modify`` stay forbidden, because what the
+# --- bridge now emits is not "open a position at this price" -- it is "submit
+# --- this block-bounded ticket to the EA's own risk adjudication". The EA
+# --- still derives the stop from the block, solves the volume through
+# --- ``CCharonRisk::LotForStop`` and renders every R rung. Python carries the
+# --- operator's intent and nothing else; it never decides a price, a volume
+# --- or an R multiple.
+ALLOWED_VERBS: tuple[str, ...] = (
+    "arm", "disarm", "trail_mode", "ping",
+    "order_open", "order_modify", "order_cancel",
+)
 
 # --- verbs that are deliberately absent, documented so the gap is a
-# --- decision rather than an oversight.
+# --- decision rather than an oversight. These remain forbidden after v1.1.0
+# --- precisely because each one would hand the caller a decision the EA owns:
+# --- ``open``/``size``/``buy``/``sell`` imply caller-chosen volume or price,
+# --- and ``close``/``modify``/``cancel`` bypass the block-geometry contract.
 FORBIDDEN_VERBS: tuple[str, ...] = (
     "open", "close", "modify", "size", "buy", "sell", "cancel", "pyramid",
 )
+
+# --- the attended-execution subset. Every one of these requires an explicit
+# --- order specification; none of them is reachable with a bare verb.
+ORDER_VERBS: tuple[str, ...] = ("order_open", "order_modify", "order_cancel")
+
+SIDES: tuple[str, ...] = ("BUY", "SELL")
+ORDER_TYPES: tuple[str, ...] = ("MARKET", "LIMIT")
+
+# --- the ceiling the EA re-checks against its own money model. This is a
+# --- sanity bound on the *input*, not the risk gate: ``MaxAllowedRiskMoney``
+# --- and ``RiskBudgetMoney`` remain the authority at execution time.
+MAX_RISK_PCT: float = 100.0
+
+# --- RR rungs the EA is willing to index. The ladder publishes three
+# --- levels (InpRrLadderA/B/C), so 0 means "no rung" and 1..3 index them.
+# --- Must match CHARON_BRIDGE_MAX_RUNG in CharonBridge.mqh.
+MAX_RUNG: int = 3
 
 TRAIL_MODE_NAMES: dict[int, str] = {
     0: "OFF",
@@ -232,6 +265,54 @@ class Model:
 
 
 @dataclass(frozen=True)
+class Order:
+    """The EA's verdict on the last order ticket, rendered as published.
+
+    ``status`` is authoritative: ``idle`` (nothing pending), ``accepted``,
+    ``rejected`` or ``pending``. The numeric fields are the EA's own solved
+    values -- volume from ``LotForStop``, stop from the block geometry -- so
+    a rejected ticket still shows *why* with the numbers it refused.
+
+    ``None`` means "the EA did not report this", never zero. A zero lot on a
+    rejected ticket would read as a real size.
+    """
+
+    status: str
+    reason: str | None
+    side: str | None
+    lots: float | None
+    entry: float | None
+    stop: float | None
+    risk_money: float | None
+    risk_pct: float | None
+    rung: int | None
+    ticket: int | None
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any]) -> "Order":
+        if not isinstance(raw, dict):
+            return cls(status="idle", reason=None, side=None, lots=None, entry=None,
+                       stop=None, risk_money=None, risk_pct=None, rung=None,
+                       ticket=None)
+        status = _text(raw, "status")
+        side = _text(raw, "side")
+        rung = raw.get("rung")
+        ticket = raw.get("ticket")
+        return cls(
+            status=status if status in ("idle", "accepted", "rejected", "pending") else "idle",
+            reason=_text(raw, "reason"),
+            side=side if side in ("BUY", "SELL") else None,
+            lots=_number(raw, "lots"),
+            entry=_number(raw, "entry"),
+            stop=_number(raw, "stop"),
+            risk_money=_number(raw, "risk_money"),
+            risk_pct=_number(raw, "risk_pct"),
+            rung=rung if isinstance(rung, int) else None,
+            ticket=ticket if isinstance(ticket, int) and ticket > 0 else None,
+        )
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """One validated EA snapshot."""
 
@@ -250,6 +331,7 @@ class Snapshot:
     trail: Trail
     pyramid: Pyramid
     legs: tuple[Leg, ...] = field(default_factory=tuple)
+    order: Order = field(default_factory=lambda: Order.from_json(None))
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> "Snapshot":
@@ -291,15 +373,148 @@ class Snapshot:
             trail=Trail.from_json(raw.get("trail")),
             pyramid=Pyramid.from_json(raw.get("pyramid")),
             legs=legs,
+            order=Order.from_json(raw.get("order")),
         )
 
 
+@dataclass(frozen=True)
+class OrderIntent:
+    """What the operator asked for, validated and nothing more.
+
+    Every field here is an *input* to the EA's risk adjudication. The
+    snapshot that comes back carries the EA's verdict -- the solved volume,
+    the derived stop, the rendered rungs -- and the dashboard renders that
+    instead of computing a parallel answer.
+
+    ``block_top``/``block_bottom`` are the structural boundaries the stop is
+    derived from. They are prices the operator read off the chart, which is
+    why they are accepted here: they are observations, not calculations.
+    """
+
+    side: str
+    order_type: str
+    entry: float | None
+    block_top: float
+    block_bottom: float
+    risk_pct: float
+    trail_trigger: int
+    rung: int
+
+    def to_doc(self) -> dict[str, Any]:
+        doc: dict[str, Any] = {
+            "side": self.side,
+            "order_type": self.order_type,
+            "block_top": self.block_top,
+            "block_bottom": self.block_bottom,
+            "risk_pct": self.risk_pct,
+            "trail_trigger": self.trail_trigger,
+            "rung": self.rung,
+        }
+        if self.entry is not None:
+            doc["entry"] = self.entry
+        return doc
+
+
+def _finite(raw: Any, what: str) -> float:
+    """A positive, finite price -- anything else is a schema error.
+
+    ``NaN`` and ``inf`` are rejected explicitly: they survive JSON round
+    trips through many producers, compare false against every bound, and
+    would sail through a naive ``> 0`` test on the EA side.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise SchemaError(f"{what} must be a number, got {raw!r}")
+    value = float(raw)
+    if not math.isfinite(value):
+        raise SchemaError(f"{what} must be finite, got {raw!r}")
+    if value <= 0.0:
+        raise SchemaError(f"{what} must be positive, got {value!r}")
+    return value
+
+
+
+def build_order_intent(
+    *,
+    side: Any,
+    order_type: Any,
+    entry: Any,
+    block_top: Any,
+    block_bottom: Any,
+    risk_pct: Any,
+    trail_trigger: Any = 0,
+    rung: Any = 0,
+) -> OrderIntent:
+    """Validate an order ticket before it is allowed near the inbox.
+
+    This is a shape check, not a risk check. The EA is still the only party
+    that decides whether a trade happens; refusing malformed intent here
+    just keeps obvious garbage out of the command folder.
+    """
+    if side not in SIDES:
+        raise SchemaError(f"side must be one of {SIDES}, got {side!r}")
+    if order_type not in ORDER_TYPES:
+        raise SchemaError(f"order_type must be one of {ORDER_TYPES}, got {order_type!r}")
+
+    top = _finite(block_top, "block_top")
+    bottom = _finite(block_bottom, "block_bottom")
+    if top == bottom:
+        raise SchemaError("block_top and block_bottom must differ; the block has no height")
+
+    # --- the block defines which way the structure runs, and the direction
+    # --- has to agree with it: a BUY against an inverted block would put the
+    # --- stop on the wrong side of the structure it is supposed to respect.
+    if side == "BUY" and top <= bottom:
+        raise SchemaError("a BUY block needs block_top above block_bottom")
+    if side == "SELL" and bottom <= top:
+        raise SchemaError("a SELL block needs block_bottom above block_top")
+
+    entry_price: float | None = None
+    if entry is not None:
+        entry_price = _finite(entry, "entry")
+        low, high = (bottom, top) if top > bottom else (top, bottom)
+        if order_type == "LIMIT" and not (low < entry_price < high):
+            raise SchemaError("a LIMIT entry must sit strictly inside the block")
+
+    if isinstance(risk_pct, bool) or not isinstance(risk_pct, (int, float)):
+        raise SchemaError(f"risk_pct must be a number, got {risk_pct!r}")
+    risk = float(risk_pct)
+    if not math.isfinite(risk) or not (0.0 < risk <= MAX_RISK_PCT):
+        raise SchemaError(f"risk_pct must be in (0, {MAX_RISK_PCT}], got {risk_pct!r}")
+
+    if isinstance(trail_trigger, bool) or trail_trigger not in TRAIL_MODE_NAMES:
+        raise SchemaError(
+            f"trail_trigger must be one of {sorted(TRAIL_MODE_NAMES)}, got {trail_trigger!r}"
+        )
+
+    if isinstance(rung, bool) or not isinstance(rung, int):
+        raise SchemaError(f"rung must be an integer, got {rung!r}")
+    if not (0 <= rung <= MAX_RUNG):
+        raise SchemaError(f"rung must be in [0, {MAX_RUNG}], got {rung!r}")
+
+    return OrderIntent(
+        side=side,
+        order_type=order_type,
+        entry=entry_price,
+        block_top=top,
+        block_bottom=bottom,
+        risk_pct=risk,
+        trail_trigger=int(trail_trigger),
+        rung=rung,
+    )
+
+
+
+
 def build_command(verb: str, issued: int, *, symbol: str, command_id: str,
-                  mode: int | None = None) -> dict[str, Any]:
+                  mode: int | None = None,
+                  order: "OrderIntent | None" = None,
+                  ticket: int | None = None) -> dict[str, Any]:
     """Construct a command document for the EA inbox.
 
     Refuses any verb outside :data:`ALLOWED_VERBS`, so a bug elsewhere in
-    the process cannot turn into a file the EA might act on.
+    the process cannot turn into a file the EA might act on. Order verbs
+    additionally refuse to be built without a validated
+    :class:`OrderIntent` (or, for a cancel, an explicit ticket).
     """
     if verb not in ALLOWED_VERBS:
         raise SchemaError(f"verb {verb!r} is not permitted by the bridge")
@@ -317,20 +532,38 @@ def build_command(verb: str, issued: int, *, symbol: str, command_id: str,
             raise SchemaError(f"trail_mode needs a valid mode, got {mode!r}")
         doc["mode"] = int(mode)
 
+    if verb in ("order_open", "order_modify"):
+        if order is None:
+            raise SchemaError(f"{verb} needs a validated order intent")
+        doc.update(order.to_doc())
+
+    if verb in ("order_modify", "order_cancel"):
+        if ticket is None or ticket <= 0:
+            raise SchemaError(f"{verb} needs a positive ticket, got {ticket!r}")
+        doc["ticket"] = int(ticket)
+
     return doc
 
 
 __all__ = [
     "ALLOWED_VERBS",
     "FORBIDDEN_VERBS",
+    "MAX_RISK_PCT",
+    "MAX_RUNG",
+    "ORDER_TYPES",
+    "ORDER_VERBS",
+    "SIDES",
     "TRAIL_MODE_NAMES",
     "Basket",
     "Leg",
     "Model",
+    "Order",
+    "OrderIntent",
     "Pyramid",
     "SchemaError",
     "Snapshot",
     "Trail",
     "build_command",
+    "build_order_intent",
 ]
 

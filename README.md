@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.0.6**
+Current release: **v1.1.0**
 
 ---
 
@@ -382,16 +382,36 @@ refused outright.
 
 | Can | Cannot |
 |---|---|
-| Show basket, legs, live stop, R progress | Place, close, size or modify an order |
+| Show basket, legs, live stop, R progress | Choose a volume, a stop distance or an R multiple |
 | Render the EA's RR ladder verbatim | Compute a rung price itself |
+| Submit an order ticket (side, block, risk %, rung) | Bypass `CCharonRisk` — the EA sizes and prices it |
+| Re-derive a stop from a new block (`order_modify`) | Loosen a stop, or move one without a block |
+| Cancel a pending ticket or flatten a position | Act on a ticket the EA has not adjudicated |
 | Arm / disarm the MANUAL pyramid trigger | Override any risk gate |
 | Select the trailing mode | Move a stop directly |
 | Tail the bridge log | Substitute for the Experts log |
 
-The command vocabulary is four verbs — `arm`, `disarm`, `trail_mode`, `ping` — and both
-sides whitelist it independently, so neither can widen the set alone. There is no verb
-that can express an order. `POST /api/trade` exists purely to answer **`405`** with the
-reason, so someone who assumes otherwise gets a straight answer.
+The command vocabulary is seven verbs: four state-only (`arm`, `disarm`, `trail_mode`,
+`ping`) and three for attended execution (`order_open`, `order_modify`, `order_cancel`).
+Both sides whitelist it independently, so neither can widen the set alone.
+
+The order verbs carry **intent, never size**. A ticket states a side, the block the stop
+is derived from, a risk percentage and the rung it is stated against. It does not contain
+a lot, a stop distance, a take-profit or an R multiple, because those are the EA's
+answers: `CCharonRisk::LotForBudget` solves the volume from the block height and the
+ticket's budget, clamps that budget to `InpMaxRiskPct`, and re-verifies the applied risk
+before anything is sent. `CharonTrade.mqh` is still the only module that calls
+`OrderSend`.
+
+The raw verbs an attacker would reach for — `open`, `close`, `modify`, `buy`, `sell`,
+`size`, `cancel` — remain forbidden on both sides. `POST /api/trade` exists purely to
+answer **`405`** with the reason, and points at `POST /api/order` instead.
+
+Executing from the browser is attended, not autonomous: the EA applies its own gates
+(`InpMaxRiskPct`, the broker's stop level, one basket per symbol, no opposite direction,
+one working pending ticket) and reports a verdict — `accepted`, `pending` or `rejected`
+with the reason — in the snapshot's `order` block, which the panel renders in the EA's
+own numbers.
 
 Arming from the browser is the same call the `A` hotkey makes, and every other gate —
 max legs, cooldown, spread, basket risk — still applies. An arm can never force an

@@ -6,7 +6,7 @@
 //|  protective stop update. There is no signal logic here.           |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.00"
+#property version   "1.01"
 
 #ifndef __CHARON_TRADE__
 #define __CHARON_TRADE__
@@ -284,6 +284,131 @@ bool ChExecClosePosition(const SCharonExecOpts &opts, const ulong ticket,
          return true;
 
       err = "close rejected: " + ChRetcodeText(res.retcode) +
+            " (retcode " + IntegerToString((int)res.retcode) + ")";
+      if(opts.delayMs > 0)
+         Sleep(opts.delayMs);
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Place a pending limit order with a strict stop already attached  |
+//|                                                                  |
+//|  A pending ticket is the only way to express "enter here, not     |
+//|  now" on this broker. It goes out with its stop in the same       |
+//|  request, so the moment it fills the resulting position is        |
+//|  already protected -- there is no unprotected window between the  |
+//|  fill and a follow-up modify.                                     |
+//|                                                                  |
+//|  price must already be normalized and must respect the broker's   |
+//|  stop level; the caller validates that before calling in, because |
+//|  the direction of the stop depends on the block geometry the      |
+//|  caller owns.                                                     |
+//+------------------------------------------------------------------+
+bool ChExecOpenPending(const SCharonExecOpts &opts, const ENUM_POSITION_TYPE posType,
+                       const double lot, const double price, const double sl,
+                       const long magic, const string comment,
+                       ulong &ticket, string &err)
+  {
+   ticket = 0;
+   err    = "";
+
+   if(lot <= 0.0)
+     {
+      err = "volume must be positive";
+      return false;
+     }
+   if(!MathIsValidNumber(sl) || sl <= 0.0)
+     {
+      err = "refusing to place a pending order without a strict stop";
+      return false;
+     }
+   if(!MathIsValidNumber(price) || price <= 0.0)
+     {
+      err = "pending price must be positive";
+      return false;
+     }
+
+   int attempts = (opts.retries < 1 ? 1 : opts.retries);
+   for(int i = 0; i < attempts; i++)
+     {
+      MqlTradeRequest req;
+      MqlTradeResult  res;
+      ZeroMemory(req);
+      ZeroMemory(res);
+
+      req.action       = TRADE_ACTION_PENDING;
+      req.symbol       = opts.symbol;
+      req.volume       = lot;
+      req.type         = (posType == POSITION_TYPE_BUY ? ORDER_TYPE_BUY_LIMIT
+                                                       : ORDER_TYPE_SELL_LIMIT);
+      req.price        = price;
+      req.sl           = sl;
+      req.tp           = 0.0;
+      req.magic        = (ulong)magic;
+      req.comment      = comment;
+      req.type_filling = ChPickFilling(opts.symbol);
+      req.type_time    = ORDER_TIME_GTC;
+
+      if(!OrderSend(req, res))
+        {
+         err = "pending OrderSend failed: " + ChRetcodeText(res.retcode) +
+               " (last error " + IntegerToString((int)GetLastError()) + ")";
+         if(opts.delayMs > 0)
+            Sleep(opts.delayMs);
+         continue;
+        }
+
+      if(ChRetcodeIsOk(res.retcode))
+        {
+         ticket = res.order;
+         return (ticket > 0);
+        }
+
+      err = "pending rejected: " + ChRetcodeText(res.retcode) +
+            " (retcode " + IntegerToString((int)res.retcode) + ")";
+      if(opts.delayMs > 0)
+         Sleep(opts.delayMs);
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Remove a pending order by ticket                                 |
+//+------------------------------------------------------------------+
+bool ChExecCancelPending(const SCharonExecOpts &opts, const ulong ticket, string &err)
+  {
+   err = "";
+   if(ticket == 0)
+     {
+      err = "invalid ticket";
+      return false;
+     }
+
+   int attempts = (opts.retries < 1 ? 1 : opts.retries);
+   for(int i = 0; i < attempts; i++)
+     {
+      MqlTradeRequest req;
+      MqlTradeResult  res;
+      ZeroMemory(req);
+      ZeroMemory(res);
+
+      req.action = TRADE_ACTION_REMOVE;
+      req.order  = ticket;
+
+      if(!OrderSend(req, res))
+        {
+         err = "cancel failed: " + ChRetcodeText(res.retcode) +
+               " (last error " + IntegerToString((int)GetLastError()) + ")";
+         if(opts.delayMs > 0)
+            Sleep(opts.delayMs);
+         continue;
+        }
+
+      if(ChRetcodeIsOk(res.retcode))
+         return true;
+
+      err = "cancel rejected: " + ChRetcodeText(res.retcode) +
             " (retcode " + IntegerToString((int)res.retcode) + ")";
       if(opts.delayMs > 0)
          Sleep(opts.delayMs);
