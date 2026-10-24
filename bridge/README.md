@@ -13,10 +13,12 @@ express one, and `POST /api/trade` returns `405` on purpose.
 cd bridge
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8787
+.\.venv\Scripts\python.exe main.py
 ```
 
-Then open <http://127.0.0.1:8787>.
+Then open <http://127.0.0.1:8787>. `main.py` reads `CHARON_HOST` and `CHARON_PORT`, so
+`$env:CHARON_PORT = 9001` moves it without editing a file. `uvicorn main:app --host
+127.0.0.1 --port 8787` is the equivalent explicit form.
 
 On the chart, set:
 
@@ -62,12 +64,13 @@ Verified on Python 3.14 with `fastapi 0.162.0` and `uvicorn 0.54.0`.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and pass `--env-file .env` to uvicorn.
+Copy `.env.example` to `.env` and pass `--env-file .env` to uvicorn, or set the variables
+in your shell before `python main.py`.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `CHARON_HOST` | `127.0.0.1` | keep it loopback; this panel shows your account |
-| `CHARON_PORT` | `8787` | listen port |
+| `CHARON_PORT` | `8787` | listen port, used when you start with `python main.py` |
 | `CHARON_TOKEN` | _unset_ | when set, `/api/*` requires `X-Charon-Token` |
 | `CHARON_COMMON_DIR` | auto | override the terminal's `Common\Files` path |
 
@@ -86,12 +89,36 @@ charon_bridge/
   commands.py            atomic writes, FIFO names, audit trail
   logs.py                ring buffer behind the SSE tail
   mt5_adapter.py         optional read-only terminal diagnostic
+src/
+  input.css              Tailwind source, compiled into static/tailwind.css
 static/
   index.html             the dashboard
   app.js                 rendering; never computes a price
   tailwind.css           prebuilt - no CDN, works offline
-tests/                   72 pytest tests
+tests/                   112 pytest tests
+  conftest.py            synthetic EA snapshot in the real wire format
+  fake_ea.py             stand-in EA: drains the inbox like CCharonBridge
+  test_integration.py    real uvicorn + fake EA across the file bridge
+  client_harness.js      runs app.js in node and checks it polls
+package.json             Tailwind build only
+tailwind.config.js
 ```
+
+## Why there is no file lock
+
+The channel is shared with a running terminal, so it is fair to ask what stops two
+writers from corrupting a file. Nothing locks, and nothing needs to:
+
+* every command is written to a temp file, `fsync`ed, then `os.replace`d into place, so a
+  reader sees the whole document or the previous one — never a fragment;
+* command names carry a `uuid4` suffix, so two bridge processes cannot collide on a name;
+* the temp suffix is not `*.json`, so the EA's `*.json` glob can never pick one up;
+* the EA retires a command by moving it out of the inbox, and `recent()` skips a file that
+  vanishes between listing and stat rather than failing the request.
+
+A lock file would introduce a different failure mode — a crashed process leaving a stale
+lock that silently stops every future command — to solve a race that atomic rename already
+removes.
 
 ## Rebuilding the stylesheet
 

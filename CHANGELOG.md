@@ -7,6 +7,66 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
+## [1.0.5] - 2026-10-24
+
+A polish release. No trading behaviour changed and no MQL5 logic was touched — every
+change here is in the bridge, its tests, or the documentation. The headline fix is an
+audit trail that reported events out of order.
+
+### Fixed
+
+- **`GET /api/commands` reported the audit trail in the wrong order.** The EA retires a
+  consumed command as `ok_<fifo>.json` or `rejected_<fifo>.json`, and `recent()` sorted
+  on the whole filename. Because every name now begins with the verdict, the sort key was
+  the *verdict* rather than the time: an `ok_` from 02:35 sorted ahead of a `rejected_`
+  from 02:40, and vice versa, so the trail could claim a later rejection happened before
+  an earlier acceptance. Ordering is now by verdict time, with the verdict prefix stripped
+  before it is used as the tiebreak. Covered by
+  `test_recent_orders_by_verdict_time_not_by_verdict_prefix`.
+- **`recent()` could return `500` mid-retire.** It called `stat()` on every file it had
+  just globbed, but the EA moves files out of `processed/` concurrently, so a file could
+  vanish between listing and stat and raise an unhandled `OSError`. A vanished file is no
+  longer an audit entry — it is skipped. Covered by
+  `test_recent_tolerates_a_file_retired_mid_listing`.
+- **A republish could briefly report a healthy EA as offline.** `read_snapshot()` tested
+  for the snapshot exactly once. The EA republishes by renaming a temp file into place; if
+  it unlinks before it moves, a reader sampling that instant saw no file at all and the
+  dashboard flashed `offline` for a live terminal. The existence check now retries a few
+  times over ~50 ms. The retry still ends in `StateUnavailable`, so a genuinely stopped
+  EA is reported as stopped rather than waited on.
+- **`_read_json()` slept after its final failed attempt.** The 50 ms backoff now sits only
+  *between* attempts, removing dead latency from the common "terminal not started" path.
+- **`CHARON_HOST` and `CHARON_PORT` did nothing.** Both were documented in
+  `.env.example` and the configuration table, but `main.py` never read them: `uvicorn
+  main:app` ignores those names, so a trader who moved the panel to another port followed
+  the docs and saw no effect. `python main.py` now honours both, defaulting to
+  `127.0.0.1:8787`, and rejects a malformed or out-of-range port with a clear message
+  instead of a traceback.
+- **The startup hook used a deprecated API.** `@app.on_event("startup")` is deprecated and
+  emitted a `DeprecationWarning` on every boot; it is now a `lifespan` handler. Verified
+  against a live uvicorn process: the process starts, serves `/api/health`, and logs no
+  deprecation.
+
+### Changed
+
+- **Documented why there is no file lock**, in `bridge/README.md`. The channel is safe by
+  construction — temp file plus `fsync` plus atomic `os.replace`, `uuid4` in every name, a
+  temp suffix that is not `*.json` so the EA's glob cannot see it — and a lock file would
+  add a worse failure mode (a crashed process leaving a stale lock that silently blocks
+  every later command). Stated explicitly so the absence is a decision, not an oversight.
+
+### Documentation
+
+- `README.md`: added `integration_check.ps1` to the gate block and the `_tools/` tree, and
+  described what the two-process gate actually proves. Corrected the claim that
+  `CHARON_TOKEN` covers all of `/api/*` — `/api/health` and `/api/logs` stay open by
+  design, and the text now says why. Corrected `bump_version.py` coverage from four
+  literals to the six it has checked since v1.0.4, and named them. Added the missing
+  `bridge/` files (`src/input.css`, `tailwind.config.js`, `package.json`,
+  `test_integration.py`) to the tree.
+- `bridge/README.md`: test count corrected (72 → 112), the Layout block completed, and the
+  quick start now shows the entry point that honours `CHARON_HOST`/`CHARON_PORT`.
+
 ## [1.0.4] - 2026-10-24
 
 A repair release. The dashboard shipped in v1.0.3 was structurally dead: it loaded,

@@ -23,6 +23,30 @@ def test_health_needs_no_token(client: TestClient) -> None:
     assert "locations" in body
 
 
+def test_bind_defaults_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented default must be the safe one: no flags, no LAN exposure."""
+    monkeypatch.delenv("CHARON_HOST", raising=False)
+    monkeypatch.delenv("CHARON_PORT", raising=False)
+    assert main._bind() == ("127.0.0.1", 8787)
+
+
+def test_bind_honours_the_documented_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CHARON_HOST/CHARON_PORT are documented in .env.example, so they must bind."""
+    monkeypatch.setenv("CHARON_HOST", "127.0.0.1")
+    monkeypatch.setenv("CHARON_PORT", "9001")
+    assert main._bind() == ("127.0.0.1", 9001)
+
+
+def test_bind_rejects_a_nonsense_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHARON_PORT", "not-a-port")
+    with pytest.raises(SystemExit):
+        main._bind()
+
+    monkeypatch.setenv("CHARON_PORT", "70000")
+    with pytest.raises(SystemExit):
+        main._bind()
+
+
 def test_status_reports_live_basket(client: TestClient, write_snapshot) -> None:
     write_snapshot()
     body = client.get("/api/status", params={"symbol": "GBPUSD"}).json()

@@ -64,9 +64,14 @@ def _read_json(path: Path) -> dict[str, Any]:
     The EA renames a temp file into place, so a reader should never see a
     partial document. If it somehow does, a single retry resolves it; a
     second failure is reported rather than papered over.
+
+    The sleep sits *between* attempts only. Sleeping after the final one
+    would add 50 ms of dead latency to every genuine failure -- and a
+    failure here is the common path on a terminal that has not started.
     """
+    attempts = 2
     last_error: Exception | None = None
-    for _attempt in range(2):
+    for attempt in range(attempts):
         try:
             with path.open("r", encoding="utf-8", errors="strict") as handle:
                 loaded = json.load(handle)
@@ -75,14 +80,33 @@ def _read_json(path: Path) -> dict[str, Any]:
             return loaded
         except (OSError, json.JSONDecodeError, UnicodeDecodeError, SchemaError) as exc:
             last_error = exc
-            time.sleep(0.05)
+            if attempt < attempts - 1:
+                time.sleep(0.05)
     raise StateUnavailable(f"could not read {path.name}: {last_error}")
+
+
+# --- The EA republishes by writing a temp file and renaming over the old
+# --- one. On Windows the rename is atomic, but the EA may delete before it
+# --- moves; a reader that samples exactly that instant would otherwise
+# --- report a live EA as "offline". A few short retries close the window.
+_EXISTS_RETRIES = 3
+_EXISTS_RETRY_SECONDS = 0.025
+
+
+def _exists_briefly(path: Path) -> bool:
+    """``path.is_file()``, retrying across a probable republish window."""
+    for attempt in range(_EXISTS_RETRIES):
+        if path.is_file():
+            return True
+        if attempt < _EXISTS_RETRIES - 1:
+            time.sleep(_EXISTS_RETRY_SECONDS)
+    return False
 
 
 def read_snapshot(symbol: str) -> Reading:
     """Load and validate the snapshot for ``symbol``."""
     path = state_path(symbol)
-    if not path.is_file():
+    if not _exists_briefly(path):
         raise StateUnavailable(
             f"no snapshot for {symbol} at {path}. "
             "Is InpBridgeEnable true on the chart?"

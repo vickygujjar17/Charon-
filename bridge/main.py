@@ -14,7 +14,10 @@ Design constraints, in priority order:
 
 Run with::
 
-    uvicorn main:app --host 127.0.0.1 --port 8787
+    python main.py
+
+``CHARON_HOST`` / ``CHARON_PORT`` configure the bind address that way;
+``uvicorn main:app`` still works and uses uvicorn's own flags instead.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import asyncio
 import hmac
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +50,27 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 # --- a single-user desktop, and the README says exactly that.
 TOKEN_ENV = "CHARON_TOKEN"
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Announce where we are looking, so a misconfigured path is obvious.
+
+    The modern replacement for ``@app.on_event("startup")``, which is
+    deprecated and emits a ``DeprecationWarning`` on every boot.
+    """
+    where = state.locate()
+    LOG.info(f"Charon bridge {BRIDGE_VERSION} (schema {SCHEMA_VERSION})")
+    LOG.info(f"common files: {where['common_files']} [{where['common_exists']}]")
+    LOG.info(f"bridge root : {where['bridge_root']} [{where['root_exists']}]")
+    if not mt5_adapter.available():
+        LOG.info("MetaTrader5 package absent - dashboard reads the EA snapshot only")
+    try:
+        paths.ensure_dirs()
+    except OSError as exc:
+        LOG.error(f"could not create bridge directories: {exc}")
+    yield
+
+
 app = FastAPI(
     title="Charon bridge",
     version=BRIDGE_VERSION,
@@ -53,6 +78,7 @@ app = FastAPI(
         "Read-mostly window onto a running Charon EA. The EA remains the "
         "only component that talks to the broker."
     ),
+    lifespan=_lifespan,
 )
 
 
@@ -378,17 +404,30 @@ def index() -> Any:
     return FileResponse(page)
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    """Log where we are looking, so a misconfigured path is obvious."""
-    where = state.locate()
-    LOG.info(f"Charon bridge {BRIDGE_VERSION} (schema {SCHEMA_VERSION})")
-    LOG.info(f"common files: {where['common_files']} [{where['common_exists']}]")
-    LOG.info(f"bridge root : {where['bridge_root']} [{where['root_exists']}]")
-    if not mt5_adapter.available():
-        LOG.info("MetaTrader5 package absent - dashboard reads the EA snapshot only")
+def _bind() -> tuple[str, int]:
+    """Resolve the listen address from the environment.
+
+    ``.env.example`` documents ``CHARON_HOST`` and ``CHARON_PORT``, so they
+    have to actually do something -- otherwise a trader who moves the panel
+    to another port follows the docs and gets no effect. Loopback stays the
+    default: a dashboard that can place no orders still shows your account.
+    """
+    host = os.environ.get("CHARON_HOST", "").strip() or "127.0.0.1"
+    raw_port = os.environ.get("CHARON_PORT", "").strip()
+    if not raw_port:
+        return host, 8787
     try:
-        paths.ensure_dirs()
-    except OSError as exc:
-        LOG.error(f"could not create bridge directories: {exc}")
+        port = int(raw_port)
+    except ValueError as exc:
+        raise SystemExit(f"CHARON_PORT must be a number, got {raw_port!r}") from exc
+    if not 1 <= port <= 65535:
+        raise SystemExit(f"CHARON_PORT out of range: {port}")
+    return host, port
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    _host, _port = _bind()
+    uvicorn.run(app, host=_host, port=_port)
 

@@ -92,31 +92,71 @@ def pending() -> list[str]:
     return sorted(entry.name for entry in folder.glob("*.json"))
 
 
+# --- The EA prefixes the verdict to the original FIFO name when it retires
+# --- a command (``ok_<name>.json`` / ``rejected_<name>.json``). Both the
+# --- verdict and the original name have to be recovered from the one string.
+_VERDICT_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("ok_", "accepted"),
+    ("rejected_", "rejected"),
+)
+
+
+def _verdict(filename: str) -> str:
+    for prefix, label in _VERDICT_PREFIXES:
+        if filename.startswith(prefix):
+            return label
+    return "unknown"
+
+
+def _issued_name(filename: str) -> str:
+    """The FIFO name the bridge wrote, with the EA's verdict prefix removed.
+
+    Used only as a deterministic tiebreak: the prefix must never be the
+    primary sort key, because it would then group the whole trail by
+    verdict instead of ordering it by time.
+    """
+    for prefix, _label in _VERDICT_PREFIXES:
+        if filename.startswith(prefix):
+            return filename[len(prefix):]
+    return filename
+
+
 def recent(limit: int = 20) -> list[dict[str, Any]]:
     """The audit trail the EA left behind, newest first.
 
     The EA renames each consumed file into ``processed/`` and prefixes the
     verdict, so this is a record of what actually happened rather than
     what was requested.
+
+    Ordering is by the file's modification time -- i.e. *when the EA
+    rendered the verdict* -- falling back to the FIFO name so identical
+    timestamps still sort deterministically. Sorting on the raw filename
+    would order the trail by the ``ok_``/``rejected_`` prefix rather than
+    by time, which is a lie about what happened most recently.
     """
     folder = processed_dir()
     if not folder.is_dir():
         return []
 
-    entries = sorted(folder.glob("*.json"), key=lambda p: p.name, reverse=True)[:limit]
-    trail: list[dict[str, Any]] = []
-    for entry in entries:
-        verdict = "unknown"
-        if entry.name.startswith("ok_"):
-            verdict = "accepted"
-        elif entry.name.startswith("rejected_"):
-            verdict = "rejected"
-        trail.append({
-            "file": entry.name,
-            "verdict": verdict,
-            "at": entry.stat().st_mtime,
-        })
-    return trail
+    scanned: list[tuple[float, str, str]] = []
+    for entry in folder.glob("*.json"):
+        try:
+            stamped = entry.stat().st_mtime
+        except OSError:
+            # --- the EA retires files concurrently, so one can disappear
+            # --- between glob() and stat(). A vanished file is not an
+            # --- audit entry; skipping it is correct, raising is a 500.
+            continue
+        scanned.append((stamped, _issued_name(entry.name), entry.name))
+
+    if limit <= 0:
+        return []
+
+    scanned.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [
+        {"file": name, "verdict": _verdict(name), "at": stamped}
+        for stamped, _fifo, name in scanned[:limit]
+    ]
 
 
 __all__ = ["CommandError", "pending", "recent", "submit"]

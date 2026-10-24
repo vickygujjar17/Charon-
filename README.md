@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.0.4**
+Current release: **v1.0.5**
 
 ---
 
@@ -80,15 +80,20 @@ Charon/
       index.html          the dashboard
       app.js              renders it; never recomputes a price
       tailwind.css        PREBUILT — no CDN, works offline
-    tests/                102 pytest tests
+    tests/                112 pytest tests
       fake_ea.py          stand-in EA: drains the inbox like CCharonBridge
       client_harness.js   executes app.js in node and checks it polls
+      test_integration.py real uvicorn + fake EA across the file bridge
+    src/input.css         Tailwind source (prebuilt into static/tailwind.css)
+    tailwind.config.js
+    package.json          Tailwind build only; version kept in lockstep
     requirements.txt
     requirements-dev.txt
     .env.example
   _tools/
     build_check.ps1       staged MetaEditor compile gate (0 errors / 0 warnings)
     bridge_check.ps1      Python gate: ruff, pytest, invariant assertions
+    integration_check.ps1 two-process gate: real uvicorn + fake EA over the file bridge
     bump_version.py       keeps every version string in lockstep
   README.md
   CHANGELOG.md
@@ -387,7 +392,10 @@ than no number.
 
 The stylesheet is precompiled and vendored (`static/tailwind.css`), so the panel renders
 correctly with no network access. The server binds `127.0.0.1` only; set `CHARON_TOKEN`
-to require `X-Charon-Token` on the `/api/*` routes if other local processes are a concern.
+to require `X-Charon-Token` on the account-bearing `/api/*` routes if other local processes
+are a concern. `/api/health` and `/api/logs` stay open on purpose — a supervisor needs the
+first, and an `EventSource` cannot send custom headers for the second. Neither exposes
+account data.
 
 ---
 
@@ -400,16 +408,27 @@ terminal headers and never deploys anything — the `.ex5` lands in `%TEMP%`.
 # 0 errors / 0 warnings required, and every header must come from the staging tree
 powershell -NoProfile -ExecutionPolicy Bypass -File _tools\build_check.ps1
 
-# version strings must agree everywhere (EA, #property, VERSION, bridge)
+# version strings must agree everywhere (EA, #property, VERSION, bridge, README)
 python _tools\bump_version.py --check
 
 # Python bridge: ruff + pytest + the no-order-path invariants
 powershell -NoProfile -ExecutionPolicy Bypass -File _tools\bridge_check.ps1
+
+# two-process gate: a real uvicorn serves a POST that the stand-in EA drains
+powershell -NoProfile -ExecutionPolicy Bypass -File _tools\integration_check.ps1
 ```
 
 The gate compiles **both** `Charon.mq5` and `CharonSelfTest.mq5`, and fails if any
 `#include` resolved outside the staging tree — so a green result means *this commit*
 compiled, not some stale deployed copy.
+
+`integration_check.ps1` is the one gate that exercises both halves at once. It starts an
+actual uvicorn process against a throwaway `Common\Files` tree and drives the full loop —
+`POST /api/pyramid/arm` → `commands\*.json` → the stand-in EA drains it →
+`commands\processed\ok_*.json` → `GET /api/commands` reports `accepted`. The bridge, the
+HTTP surface and every file crossing the filesystem are real; only the EA's side of the
+handshake is simulated, because CI has no MetaTrader terminal. Nothing there touches the
+network beyond `127.0.0.1` or writes to your real terminal folder.
 
 `bridge_check.ps1` is deliberately offline: it never installs a package or downloads a
 wheel. Besides linting and running the tests, it asserts three things that are easy to
@@ -476,7 +495,9 @@ filesystem are real; only the EA is a stand-in.
 string. `#property version` must use MetaEditor's numeric `xxx.yyy` form, which mirrors it
 (`1.0.0 → 1.00`, `1.2.3 → 1.02`). `BRIDGE_VERSION` in `bridge/charon_bridge/version.py`
 carries the same release string, so the EA and the panel can never claim different
-versions — `bump_version.py --check` fails if the four disagree.
+versions — `bump_version.py --check` fails if the six disagree. Each literal is checked in
+place: `CHARON_VERSION`, every `#property version`, `VERSION`, `BRIDGE_VERSION`,
+`bridge/package.json` and the README's *Current release* line.
 
 Every change bumps the version, and every commit subject starts with it:
 

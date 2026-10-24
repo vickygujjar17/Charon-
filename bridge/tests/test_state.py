@@ -9,6 +9,7 @@ and the words used to describe them.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -69,6 +70,41 @@ def test_corrupt_json_is_refused(write_snapshot, common_dir) -> None:
     (folder / "state_GBPUSD.json").write_text("{not json", encoding="utf-8")
     with pytest.raises(state.StateUnavailable):
         state.read_snapshot("GBPUSD")
+
+
+def test_republish_window_does_not_report_a_live_ea_as_offline(
+    write_snapshot, common_dir, monkeypatch
+) -> None:
+    """A snapshot missing for one sample is a rename in flight, not a dead EA.
+
+    The EA republishes by moving a temp file over the old one. If it unlinks
+    before it moves, a reader sampling that instant sees no file at all and
+    would otherwise flag a perfectly healthy terminal as offline.
+    """
+    write_snapshot()
+    seen = {"checks": 0}
+    real_is_file = Path.is_file
+
+    def flaky_is_file(self: Path) -> bool:
+        if self.name == "state_GBPUSD.json":
+            seen["checks"] += 1
+            if seen["checks"] == 1:
+                return False  # --- simulate the unlink half of the rename
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", flaky_is_file)
+
+    reading = state.read_snapshot("GBPUSD")
+    assert reading.status == "live"
+    assert seen["checks"] > 1
+
+
+def test_a_persistently_missing_snapshot_still_raises(common_dir, monkeypatch) -> None:
+    """The retry must not turn "EA is not running" into an infinite wait."""
+    monkeypatch.setattr(state, "_EXISTS_RETRY_SECONDS", 0.0)
+    with pytest.raises(state.StateUnavailable) as caught:
+        state.read_snapshot("GBPUSD")
+    assert "InpBridgeEnable" in str(caught.value)
 
 
 def test_symbol_sanitising_blocks_traversal() -> None:
