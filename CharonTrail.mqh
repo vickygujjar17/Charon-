@@ -1,0 +1,228 @@
+//+------------------------------------------------------------------+
+//|                                                   CharonTrail.mqh |
+//|  Trailing stop engine: four independent modes, all driven off a   |
+//|  per-position high-water mark (HWM). A trailing update is only    |
+//|  ever accepted when it is strictly more protective than the stop  |
+//|  already on the position.                                        |
+//+------------------------------------------------------------------+
+#property copyright "Charon"
+#property version   "1.00"
+
+#ifndef __CHARON_TRAIL__
+#define __CHARON_TRAIL__
+
+#include "CharonDefines.mqh"
+#include "CharonMath.mqh"
+#include "CharonRisk.mqh"
+
+//+------------------------------------------------------------------+
+//| CCharonTrail                                                     |
+//+------------------------------------------------------------------+
+class CCharonTrail
+  {
+private:
+   CCharonRisk      *m_risk;
+
+public:
+                     CCharonTrail(void);
+   void              Init(CCharonRisk *risk);
+
+   //--- true once the activation threshold has been reached
+   bool              IsActivated(const double entry, const double riskPrice,
+                                 const double hwm, const bool isLong) const;
+
+   //--- trailing distance in price for the configured mode
+   double            Distance(void);
+
+   //--- candidate stop for the current mode, 0.0 when not applicable
+   double            Candidate(const double entry, const double riskPrice,
+                               const double hwm, const bool isLong,
+                               const double currentStop, string &label);
+
+   //--- convenience: activated + candidate + improvement test
+   bool              NextStop(const double entry, const double riskPrice,
+                              const double hwm, const bool isLong,
+                              const double currentStop, double &stopOut, string &label);
+  };
+
+//+------------------------------------------------------------------+
+CCharonTrail::CCharonTrail(void)
+  {
+   m_risk = NULL;
+  }
+
+//+------------------------------------------------------------------+
+void CCharonTrail::Init(CCharonRisk *risk)
+  {
+   m_risk = risk;
+  }
+
+//+------------------------------------------------------------------+
+//| Activation gate                                                  |
+//|  * R activation (InpTrailStartRR) is primary                     |
+//|  * a points activation may also arm it (either may trigger)      |
+//+------------------------------------------------------------------+
+bool CCharonTrail::IsActivated(const double entry, const double riskPrice,
+                               const double hwm, const bool isLong) const
+  {
+   if(InpTrailMode == CHARON_TRAIL_OFF || m_risk == NULL)
+      return false;
+   if(!MathIsValidNumber(hwm) || hwm <= 0.0)
+      return false;
+
+   if(riskPrice > 0.0 && InpTrailStartRR > 0.0)
+     {
+      double progress = ChProgressRR(entry, riskPrice, hwm, isLong);
+      if(progress >= InpTrailStartRR)
+         return true;
+     }
+
+   //--- points-based activation measured on the HWM
+   if(InpTrailStartPoints > 0.0)
+     {
+      double travelled = ChPointsFromPrice(MathAbs(hwm - entry), m_risk.Point());
+      if(travelled >= InpTrailStartPoints)
+         return true;
+     }
+
+   //--- when neither activation is configured, trail from the start
+   if(InpTrailStartRR <= 0.0 && InpTrailStartPoints <= 0.0)
+      return true;
+
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Fixed trailing distance for modes that use one                   |
+//+------------------------------------------------------------------+
+double CCharonTrail::Distance(void)
+  {
+   if(m_risk == NULL)
+      return 0.0;
+
+   switch(InpTrailMode)
+     {
+      case CHARON_TRAIL_POINTS:
+         return ChPriceFromPoints(InpTrailPoints, m_risk.Point());
+      case CHARON_TRAIL_ATR:
+        {
+         double atr = m_risk.Atr();
+         if(atr <= 0.0 || InpTrailAtrMult <= 0.0)
+            return 0.0;
+         return atr * InpTrailAtrMult;
+        }
+      default:
+         return 0.0;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Candidate stop for the active mode                               |
+//|  0.0 = mode does not produce a stop right now (no ATR, no gain)  |
+//+------------------------------------------------------------------+
+double CCharonTrail::Candidate(const double entry, const double riskPrice,
+                               const double hwm, const bool isLong,
+                               const double currentStop, string &label)
+  {
+   label = "";
+   if(m_risk == NULL || !MathIsValidNumber(hwm) || hwm <= 0.0)
+      return 0.0;
+
+   double candidate = 0.0;
+
+   switch(InpTrailMode)
+     {
+      case CHARON_TRAIL_POINTS:
+      case CHARON_TRAIL_ATR:
+        {
+         double dist = Distance();
+         if(dist <= 0.0)
+            return 0.0;
+         candidate = (isLong ? hwm - dist : hwm + dist);
+         label = (InpTrailMode == CHARON_TRAIL_ATR
+                  ? StringFormat("ATR trail %.2fx", InpTrailAtrMult)
+                  : StringFormat("points trail %.0f", InpTrailPoints));
+         break;
+        }
+
+      case CHARON_TRAIL_HWM_PERCENT:
+        {
+         //--- give back at most N% of the gain already earned
+         double gain = (isLong ? hwm - entry : entry - hwm);
+         if(gain <= 0.0)
+            return 0.0;
+         if(InpTrailGivebackPct <= 0.0 || InpTrailGivebackPct >= 100.0)
+            return 0.0;
+         double keep = gain * (1.0 - InpTrailGivebackPct / 100.0);
+         candidate = (isLong ? entry + keep : entry - keep);
+         label = StringFormat("HWM trail %.1f%% giveback", InpTrailGivebackPct);
+         break;
+        }
+
+      case CHARON_TRAIL_RR_LOCK:
+        {
+         //--- lock whatever has been earned minus a fixed R giveback
+         if(riskPrice <= 0.0 || InpTrailGivebackRR < 0.0)
+            return 0.0;
+         double progress = ChProgressRR(entry, riskPrice, hwm, isLong);
+         double lockRR = progress - InpTrailGivebackRR;
+         if(lockRR <= 0.0)
+            return 0.0;
+         candidate = ChPriceAtRR(entry, riskPrice, lockRR, isLong);
+         label = StringFormat("RR lock %.2fR (giveback %.2fR)", lockRR, InpTrailGivebackRR);
+         break;
+        }
+
+      case CHARON_TRAIL_OFF:
+      default:
+         return 0.0;
+     }
+
+   if(!MathIsValidNumber(candidate) || candidate <= 0.0)
+      return 0.0;
+
+   candidate = m_risk.NormalizePrice(candidate);
+   return (candidate > 0.0 ? candidate : 0.0);
+  }
+
+//+------------------------------------------------------------------+
+//| Full step: activation, candidate, improvement gate               |
+//+------------------------------------------------------------------+
+bool CCharonTrail::NextStop(const double entry, const double riskPrice,
+                            const double hwm, const bool isLong,
+                            const double currentStop, double &stopOut, string &label)
+  {
+   stopOut = 0.0;
+   label   = "";
+   if(m_risk == NULL || InpTrailMode == CHARON_TRAIL_OFF)
+      return false;
+   if(!IsActivated(entry, riskPrice, hwm, isLong))
+      return false;
+
+   double candidate = Candidate(entry, riskPrice, hwm, isLong, currentStop, label);
+   if(candidate <= 0.0)
+      return false;
+
+   //--- never move a stop backwards; require the configured step
+   double stepPrice = ChPriceFromPoints(InpTrailStepPoints, m_risk.Point());
+   if(!ChStopImproves(currentStop, candidate, isLong, stepPrice))
+      return false;
+
+   //--- a trailing stop must stay on the protective side of price
+   double buffer = m_risk.StopDistanceWithBuffer();
+   double bid = m_risk.Bid();
+   double ask = m_risk.Ask();
+   if(buffer <= 0.0 || bid <= 0.0 || ask <= 0.0)
+      return false;
+   if(isLong && candidate > bid - buffer + CHARON_EPS)
+      return false;
+   if(!isLong && candidate < ask + buffer - CHARON_EPS)
+      return false;
+
+   stopOut = candidate;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+#endif // __CHARON_TRAIL__
+//+------------------------------------------------------------------+

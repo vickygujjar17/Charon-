@@ -1,0 +1,11 @@
+# MQL5 sources: keep LF in the repository so the compile gate and the
+# terminal read byte-identical files. MetaEditor accepts both, but a mixed
+# working tree makes the header-provenance hashes needlessly fragile.
+*.mq5   text eol=lf
+*.mqh   text eol=lf
+
+# Tooling and docs
+*.ps1   text eol=crlf
+*.py    text eol=lf
+*.md    text eol=lf
+VERSION text eol=lf
