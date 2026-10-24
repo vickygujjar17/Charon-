@@ -245,6 +245,74 @@ void TestPyramidModel(void)
   }
 
 //+------------------------------------------------------------------+
+//| RR ladder: three rungs, disabled rungs skipped                    |
+//+------------------------------------------------------------------+
+void TestRrLadder(void)
+  {
+   double out[3];
+
+   //--- long: entry 1.10000, 1R = 0.00300
+   int n = ChRrLadderPrices(1.10000, 0.00300, true, 1.5, 2.0, 3.0, out);
+   Check(n == 3, "ladder: three rungs enabled", StringFormat("got %d", n));
+   Check(Near(out[0], 1.10450), "ladder: 1.5R long", StringFormat("got %.5f", out[0]));
+   Check(Near(out[1], 1.10600), "ladder: 2.0R long", StringFormat("got %.5f", out[1]));
+   Check(Near(out[2], 1.10900), "ladder: 3.0R long", StringFormat("got %.5f", out[2]));
+
+   //--- short mirrors the long
+   n = ChRrLadderPrices(1.10000, 0.00300, false, 1.5, 2.0, 3.0, out);
+   Check(n == 3, "ladder: three rungs on a short");
+   Check(Near(out[0], 1.09550), "ladder: 1.5R short", StringFormat("got %.5f", out[0]));
+   Check(Near(out[2], 1.09100), "ladder: 3.0R short", StringFormat("got %.5f", out[2]));
+
+   //--- a zero level disables exactly that rung, order preserved
+   n = ChRrLadderPrices(1.10000, 0.00300, true, 1.5, 0.0, 3.0, out);
+   Check(n == 2, "ladder: disabled middle rung skipped", StringFormat("got %d", n));
+   Check(Near(out[0], 1.10450), "ladder: first rung survives a gap");
+   Check(Near(out[1], 1.10900), "ladder: third rung shifts into slot 1",
+         StringFormat("got %.5f", out[1]));
+
+   //--- all disabled
+   n = ChRrLadderPrices(1.10000, 0.00300, true, 0.0, 0.0, 0.0, out);
+   Check(n == 0, "ladder: all rungs off yields nothing", StringFormat("got %d", n));
+
+   //--- degenerate inputs
+   Check(ChRrLadderPrices(0.0, 0.00300, true, 1.5, 2.0, 3.0, out) == 0,
+         "ladder: no entry yields nothing");
+   Check(ChRrLadderPrices(1.10000, 0.0, true, 1.5, 2.0, 3.0, out) == 0,
+         "ladder: no R reference yields nothing");
+   Check(ChRrLadderPrices(1.10000, -0.003, true, 1.5, 2.0, 3.0, out) == 0,
+         "ladder: negative R yields nothing");
+   Check(Near(out[0], 0.0) && Near(out[1], 0.0) && Near(out[2], 0.0),
+         "ladder: rejected calls zero the output");
+  }
+
+//+------------------------------------------------------------------+
+//| Manual pyramid arming: expiry and gating                          |
+//+------------------------------------------------------------------+
+void TestArmGating(void)
+  {
+   //--- disarmed is never live, whatever the timeout
+   Check(!ChArmIsLive(false, 1000, 1000, 60), "arm: disarmed is not live");
+   Check(!ChArmIsLive(false, 1000, 1000, 0), "arm: disarmed survives zero timeout");
+
+   //--- no timeout means the arm never expires
+   Check(ChArmIsLive(true, 1000, 999999, 0), "arm: zero timeout never expires");
+   Check(ChArmIsLive(true, 1000, 999999, -5), "arm: negative timeout never expires");
+
+   //--- normal expiry window
+   Check(ChArmIsLive(true, 1000, 1030, 60), "arm: live inside the window");
+   Check(ChArmIsLive(true, 1000, 1059, 60), "arm: live one second before expiry");
+   Check(!ChArmIsLive(true, 1000, 1060, 60), "arm: expires exactly on the boundary");
+   Check(!ChArmIsLive(true, 1000, 1200, 60), "arm: expired well past the window");
+
+   //--- clock skew must not disarm a fresh arm
+   Check(ChArmIsLive(true, 2000, 1000, 60), "arm: future stamp stays live");
+
+   //--- armed with no stamp is honoured
+   Check(ChArmIsLive(true, 0, 5000, 60), "arm: unstamped arm stays live");
+  }
+
+//+------------------------------------------------------------------+
 //| Script entry point                                               |
 //+------------------------------------------------------------------+
 void OnStart(void)
@@ -260,6 +328,8 @@ void OnStart(void)
    TestImprovementGate();
    TestExtremeAndClamp();
    TestPyramidModel();
+   TestRrLadder();
+   TestArmGating();
 
    PrintFormat("==================================================");
    PrintFormat("passed: %d   failed: %d", g_pass, g_fail);

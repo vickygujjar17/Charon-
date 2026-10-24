@@ -7,6 +7,45 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
+## [1.0.2] - 2026-10-24
+
+Two additions on top of 1.0.1: a manual trigger for the pyramid ladder, and an RR ladder
+readout on the panel. Everything that 1.0.1 already did — risk sizing, strict stops, RR
+targets, trailing, automatic tiering — is unchanged.
+
+### Added
+
+- **Manual pyramid trigger.** New `InpPyramidTrigger` (`AUTO` / `MANUAL`). In `MANUAL`
+  mode the R trigger is necessary but not sufficient: the trader must arm the ladder first
+  by pressing `InpPyramidArmKey` (default `A`). One arm authorises exactly one tier and is
+  consumed when that leg opens. `InpPyramidArmTimeoutSec` (default 60, `0` = never) expires
+  an unused arm. Arming satisfies only the trigger gate — max-legs, cooldown, spread and
+  basket-risk ceilings still apply, so an arm can never force an exposure add that the risk
+  model would refuse.
+- **RR ladder readout.** New `InpRrLadderA/B/C` (default `1.5R / 2.0R / 3.0R`) project up
+  to three R rungs as prices, shown for the basket (from its average entry and the primary
+  leg's R) and per ticket (from that leg's own entry and R). Display only — it never writes
+  a take profit. A rung set to `0` is hidden.
+- Dashboard rows: `Pyramid trig` (mode plus live arm state) and `RR ladder`.
+- `_tools` unaffected; `build_check.ps1` still gates 0 errors / 0 warnings on both entry
+  points.
+
+### Changed
+
+- `CCharonStops::RPrice()`, previously unused, now backs the ladder readout. Prices are
+  normalised to symbol digits so the panel matches broker-acceptable values.
+- The primary-leg R lookup in `MaybePyramid()` was extracted into
+  `CCharonEngine::BasketRefRisk()` and shared with the ladder, so the trigger and the
+  display can never disagree about what 1R means.
+- Self-test assertions: 73 → 98 (15 ladder, 10 arm-expiry).
+
+### Notes
+
+- `#property version` stays `"1.00"` because MetaEditor's numeric form is `major.minor`
+  only; `1.0.2 → 1.00`. `CHARON_VERSION` carries the full `1.0.2`.
+- A tiered lot decay such as `0.5 → 0.3 → 0.15` needs no new input: set
+  `InpPyramidT2Mult = 0.60`, `T3 = 0.30`, `T4 = 0.15`.
+
 ## [1.0.1] - 2026-10-24
 
 Documentation and tooling accuracy pass. No change to trading behaviour; the

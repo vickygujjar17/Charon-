@@ -24,7 +24,7 @@
 //| _tools/bump_version.py rewrites this literal and every other     |
 //| version string in the repository in one pass.                    |
 //+------------------------------------------------------------------+
-#define CHARON_VERSION        "1.0.1"
+#define CHARON_VERSION        "1.0.2"
 #define CHARON_NAME           "Charon"
 #define CHARON_REPO           "https://github.com/vickygujjar17/Charon-.git"
 
@@ -89,6 +89,13 @@ enum ENUM_CHARON_HALF_RISK
    CHARON_HALF_OFF      = 0,  // Disabled
    CHARON_HALF_HALVE    = 1,  // Move the stop to 0.5R at the trigger
    CHARON_HALF_LOCK_EN  = 2   // Move the stop to entry (breakeven) at the trigger
+  };
+
+//--- how a pyramid tier is allowed to fire
+enum ENUM_CHARON_PYRAMID_TRIGGER
+  {
+   CHARON_PYR_AUTO   = 0,   // Fire automatically at the R trigger
+   CHARON_PYR_MANUAL = 1    // Fire only when armed by the trader (hotkey)
   };
 
 //+------------------------------------------------------------------+
@@ -177,6 +184,9 @@ input ENUM_CHARON_TP_UNIT InpTpUnit         = CHARON_TP_NONE; // Take profit uni
 input double          InpTpRR               = 2.00;       // Reward:risk multiple
 input double          InpTpPoints           = 600.0;      // Fixed take profit (points)
 input bool            InpApplyTpOnAdopt     = true;       // Set the RR target when a trade is adopted
+input double          InpRrLadderA          = 1.50;       // RR ladder level A (R, 0 = off)
+input double          InpRrLadderB          = 2.00;       // RR ladder level B (R, 0 = off)
+input double          InpRrLadderC          = 3.00;       // RR ladder level C (R, 0 = off)
 
 input group "===== [4] TRAILING STOP ====="
 input ENUM_CHARON_TRAIL_MODE InpTrailMode   = CHARON_TRAIL_OFF; // Trailing mode
@@ -200,6 +210,9 @@ input double          InpPyramidT4Mult      = 0.50;       // Tier 4 lot multipli
 input double          InpPyramidMaxRiskPct  = 1.50;       // Reject a tier above this basket risk %
 input bool            InpPyramidCollectiveBE = true;      // Move the whole basket to collective breakeven
 input int             InpPyramidCooldownSec = 30;         // Minimum seconds between scale-ins
+input ENUM_CHARON_PYRAMID_TRIGGER InpPyramidTrigger = CHARON_PYR_AUTO; // Tier trigger
+input int             InpPyramidArmKey      = 65;         // Arm key (65 = 'A', 0 = disabled)
+input int             InpPyramidArmTimeoutSec = 60;       // Seconds an arm stays live (0 = no expiry)
 
 input group "===== [6] EXECUTION ====="
 input int             InpSlippagePoints     = 20;         // Max slippage (points)

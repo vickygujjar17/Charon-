@@ -8,6 +8,7 @@
 //|    3. the cooldown elapsed                                      |
 //|    4. spread is inside the configured ceiling                    |
 //|    5. the resulting BASKET risk stays under InpPyramidMaxRiskPct  |
+//|    6. (MANUAL trigger only) the trader has armed the ladder       |
 //|                                                                  |
 //|  Scale-in legs are opened with a strict stop already attached so  |
 //|  the basket is never unprotected, not even for one tick.          |
@@ -36,7 +37,8 @@ enum ENUM_CHARON_TIER_DECISION
    CH_TIER_RISK      = 7,
    CH_TIER_LOTZERO   = 8,
    CH_TIER_SEND_FAIL = 9,
-   CH_TIER_SEND_OK   = 10
+   CH_TIER_SEND_OK   = 10,
+   CH_TIER_NOTARMED  = 11   // MANUAL mode and the trader has not armed
   };
 
 //+------------------------------------------------------------------+
@@ -116,10 +118,18 @@ private:
    CCharonRisk      *m_risk;
    SCharonExecOpts   m_opts;
    datetime          m_lastLegTime;
+   bool              m_armed;          // MANUAL trigger: the trader armed a tier
+   datetime          m_armedAt;        // when the arm was set (expiry clock)
 
 public:
                      CCharonPyramid(void);
    void              Init(CCharonRisk *risk, const SCharonExecOpts &opts);
+
+   //--- manual trigger state
+   void              Arm(void);
+   void              ClearArm(void);
+   bool              IsArmed(void) const { return m_armed; }
+   datetime          ArmedAt(void) const { return m_armedAt; }
 
    //--- gates, evaluated in a fixed order so logs explain refusals
    ENUM_CHARON_TIER_DECISION Evaluate(const int legs, const int nextTier, const int dirSign,
@@ -140,6 +150,8 @@ CCharonPyramid::CCharonPyramid(void)
   {
    m_risk = NULL;
    m_lastLegTime = 0;
+   m_armed = false;
+   m_armedAt = 0;
    m_opts.symbol   = "";
    m_opts.slippage = 0;
    m_opts.retries  = 1;
@@ -152,6 +164,28 @@ void CCharonPyramid::Init(CCharonRisk *risk, const SCharonExecOpts &opts)
    m_risk = risk;
    m_opts = opts;
    m_lastLegTime = 0;
+   m_armed = false;
+   m_armedAt = 0;
+  }
+
+//+------------------------------------------------------------------+
+//| MANUAL trigger: the trader authorises the next tier              |
+//|                                                                  |
+//|  Arming only satisfies the trigger gate. Every other ceiling      |
+//|  (max legs, cooldown, spread, basket risk) still applies, so an   |
+//|  arm can never force an exposure add the risk model rejects.      |
+//+------------------------------------------------------------------+
+void CCharonPyramid::Arm(void)
+  {
+   m_armed   = true;
+   m_armedAt = TimeCurrent();
+  }
+
+//+------------------------------------------------------------------+
+void CCharonPyramid::ClearArm(void)
+  {
+   m_armed   = false;
+   m_armedAt = 0;
   }
 
 //+------------------------------------------------------------------+
@@ -190,6 +224,16 @@ ENUM_CHARON_TIER_DECISION CCharonPyramid::Evaluate(const int legs, const int nex
    SCharonTierSpec spec;
    if(!ChTierSpec(nextTier, spec))
       return CH_TIER_NONE;
+
+   //--- MANUAL trigger: the R trigger alone is not enough, the trader must
+   //--- have armed the ladder. Placed before the R check so "not armed" is
+   //--- reported as such instead of masquerading as "trigger not reached".
+   if(InpPyramidTrigger == CHARON_PYR_MANUAL)
+     {
+      if(!ChArmIsLive(m_armed, m_armedAt, TimeCurrent(), InpPyramidArmTimeoutSec))
+         return CH_TIER_NOTARMED;
+     }
+
    if(progressRR < spec.activationRR - CHARON_EPS)
       return CH_TIER_NOTRIGGER;
 

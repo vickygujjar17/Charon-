@@ -55,6 +55,9 @@ private:
    bool              WantsTicket(const ulong magic) const;
    void              AdoptTicket(const ulong ticket);
    double            BasketRiskMoney(const SCharonBasket &basket) const;
+   double            BasketRefRisk(void) const;
+   string            RrLadderText(const double entry, const double riskPrice,
+                                  const bool isLong);
 
 public:
                      CCharonEngine(void);
@@ -64,6 +67,9 @@ public:
    void              Deinit(void);
    void              OnTickWork(void);
    void              OnTimerWork(void);
+
+   //--- CHARTEVENT_KEYDOWN: arm the MANUAL pyramid trigger
+   void              OnKey(const long key);
 
    bool              Basket(SCharonBasket &out) const { out = m_basket; return m_basket.valid; }
   };
@@ -634,18 +640,7 @@ void CCharonEngine::MaybePyramid(void)
      }
 
    //--- R reference: the primary leg's original risk, not the average
-   double refRiskPrice = 0.0;
-   for(int i = 0; i < m_state.Count(); i++)
-     {
-      SCharonPosState row;
-      if(!m_state.Get(i, row))
-         continue;
-      if(row.tier == 1 && row.riskPrice > 0.0)
-        {
-         refRiskPrice = row.riskPrice;
-         break;
-        }
-     }
+   double refRiskPrice = BasketRefRisk();
    if(refRiskPrice <= 0.0)
       return;
 
@@ -685,7 +680,8 @@ void CCharonEngine::MaybePyramid(void)
                                                            progress, projected, base);
    if(decision != CH_TIER_READY)
      {
-      if(InpVerbose && decision != CH_TIER_NOTRIGGER && decision != CH_TIER_DISABLED)
+      if(InpVerbose && decision != CH_TIER_NOTRIGGER && decision != CH_TIER_DISABLED
+         && decision != CH_TIER_NOTARMED)
          PrintFormat("%s pyramid tier %d held: %s (progress %.2fR, basket risk %.2f%%)",
                      CHARON_NAME, nextTier, EnumToString(decision), progress, m_basket.riskPct);
       return;
@@ -705,6 +701,8 @@ void CCharonEngine::MaybePyramid(void)
                                                       ticket, fill, note);
    if(sent == CH_TIER_SEND_OK && ticket > 0)
      {
+      //--- a manual arm authorises exactly one tier: consume it
+      m_pyramid.ClearArm();
       //--- res.order is the ORDER ticket, which is not guaranteed to equal the
       //--- position ticket, so re-scan rather than adopting by ticket. The leg
       //--- is already protected: its strict stop was attached in the same
@@ -776,6 +774,65 @@ void CCharonEngine::MoveBasketToBreakeven(void)
   }
 
 //+------------------------------------------------------------------+
+//| R reference for the basket: the PRIMARY leg's original stop      |
+//|                                                                  |
+//|  Deliberately not the average, so a scale-in can never dilute the |
+//|  R multiple the ladder and the tier triggers are measured in.     |
+//|  Returns 0.0 when no primary leg carries a usable risk.           |
+//+------------------------------------------------------------------+
+double CCharonEngine::BasketRefRisk(void) const
+  {
+   for(int i = 0; i < m_state.Count(); i++)
+     {
+      SCharonPosState row;
+      if(!m_state.Get(i, row))
+         continue;
+      if(row.tier == 1 && row.riskPrice > 0.0)
+         return row.riskPrice;
+     }
+   return 0.0;
+  }
+
+//+------------------------------------------------------------------+
+//| Format the configured R ladder for one entry/R pair              |
+//|                                                                  |
+//|  Prices come from CCharonStops::RPrice() so the panel shows the   |
+//|  same normalised values a broker would accept, not raw floats.    |
+//|  Returns "" when no rung is usable.                              |
+//+------------------------------------------------------------------+
+string CCharonEngine::RrLadderText(const double entry, const double riskPrice,
+                                   const bool isLong)
+  {
+   double prices[3];
+   int count = ChRrLadderPrices(entry, riskPrice, isLong,
+                                InpRrLadderA, InpRrLadderB, InpRrLadderC, prices);
+   if(count <= 0)
+      return "";
+
+   double levels[3];
+   levels[0] = InpRrLadderA;
+   levels[1] = InpRrLadderB;
+   levels[2] = InpRrLadderC;
+
+   //--- rebuild the level list in the same order ChRrLadderPrices used
+   string text = "";
+   int written = 0;
+   for(int i = 0; i < 3 && written < count; i++)
+     {
+      if(!MathIsValidNumber(levels[i]) || levels[i] <= 0.0)
+         continue;
+      double shown = m_stops.RPrice(entry, riskPrice, levels[i], isLong);
+      if(shown <= 0.0)
+         continue;
+      if(written > 0)
+         text += " | ";
+      text += StringFormat("%.2fR %s", levels[i], DoubleToString(shown, m_risk.Digits()));
+      written++;
+     }
+   return text;
+  }
+
+//+------------------------------------------------------------------+
 //| On-chart status panel (chart comment, no objects to clean up)    |
 //+------------------------------------------------------------------+
 void CCharonEngine::DrawDashboard(void)
@@ -817,10 +874,32 @@ void CCharonEngine::DrawDashboard(void)
    text += StringFormat("RR target   : %s\n", tpText);
    text += StringFormat("Sizing      : %s  |  cap %.2f%%\n", sizing, InpMaxRiskPct);
    text += StringFormat("Trailing    : %s\n", EnumToString(InpTrailMode));
+   string pyrTrig = (InpPyramidTrigger == CHARON_PYR_MANUAL ? "MANUAL" : "AUTO");
+   if(InpPyramidTrigger == CHARON_PYR_MANUAL)
+     {
+      string armState = "disarmed";
+      if(m_pyramid.IsArmed())
+        {
+         if(ChArmIsLive(true, m_pyramid.ArmedAt(), TimeCurrent(), InpPyramidArmTimeoutSec))
+           {
+            long left = (long)InpPyramidArmTimeoutSec
+                        - (long)(TimeCurrent() - m_pyramid.ArmedAt());
+            armState = (InpPyramidArmTimeoutSec > 0
+                        ? StringFormat("ARMED %ds left", (int)left) : "ARMED");
+           }
+         else
+            armState = "expired";
+        }
+      if(InpPyramidArmKey > 0)
+         pyrTrig += StringFormat(" [%s = arm, %s]", ShortToString((ushort)InpPyramidArmKey), armState);
+      else
+         pyrTrig += StringFormat(" [arm key off, %s]", armState);
+     }
    text += StringFormat("Pyramiding  : %s  (max %d legs, cap %.2f%%)\n",
                         (InpPyramidEnable ? "ON" : "OFF"),
                         ChClampI(InpPyramidMaxLegs, 1, CHARON_MAX_TIERS),
                         InpPyramidMaxRiskPct);
+   text += StringFormat("Pyramid trig: %s\n", pyrTrig);
    text += StringFormat("ATR(%d)      : %s\n", InpAtrPeriod,
                         (atr > 0.0 ? DoubleToString(atr, m_risk.Digits()) : "warming up"));
    text += "------------------------------------------------------------\n";
@@ -838,6 +917,15 @@ void CCharonEngine::DrawDashboard(void)
                            m_basket.legs, m_basket.lot);
       text += StringFormat("Avg entry   : %s\n",
                            DoubleToString(m_basket.avgEntry, m_risk.Digits()));
+      //--- the R ladder is projected from the basket's average entry, so the
+      //--- rung prices match what the aggregate position actually needs
+      if(!m_basket.mixed)
+        {
+         string ladder = RrLadderText(m_basket.avgEntry, BasketRefRisk(),
+                                      ChIsLong(m_basket.dir));
+         if(ladder != "")
+            text += StringFormat("RR ladder   : %s\n", ladder);
+        }
       text += StringFormat("Open P/L    : %.2f %s\n", m_basket.openPL,
                            AccountInfoString(ACCOUNT_CURRENCY));
       text += StringFormat("Risk now    : %.2f %s (%.2f%% of equity)\n",
@@ -866,6 +954,14 @@ void CCharonEngine::DrawDashboard(void)
                            row.ticket, (isLong ? "BUY " : "SELL"), row.tier, row.lot,
                            ChPointsFromPrice(row.riskPrice, m_risk.Point()), rr,
                            (sl > 0.0 ? DoubleToString(sl, m_risk.Digits()) : "NONE"));
+      //--- each leg gets its own ladder, projected from its own entry and its
+      //--- own R, so a tier's targets never inherit the primary's geometry
+      if(row.riskPrice > 0.0 && row.entry > 0.0)
+        {
+         string legLadder = RrLadderText(row.entry, row.riskPrice, isLong);
+         if(legLadder != "")
+            text += StringFormat("       -> %s\n", legLadder);
+        }
      }
    if(m_state.Count() > 10)
       text += StringFormat("  ... and %d more\n", m_state.Count() - 10);
@@ -927,6 +1023,35 @@ void CCharonEngine::OnTimerWork(void)
    BuildBasket();
    DrawDashboard();
    m_busy = false;
+  }
+
+//+------------------------------------------------------------------+
+//| Keyboard: arm the next pyramid tier when the trigger is MANUAL   |
+//|                                                                  |
+//|  OnChartEvent only delivers CHARTEVENT_KEYDOWN while the chart    |
+//|  owns focus, which is an MQL5 constraint rather than a design     |
+//|  choice. The dashboard shows the armed state so it is always      |
+//|  visible whether the press landed.                                |
+//+------------------------------------------------------------------+
+void CCharonEngine::OnKey(const long key)
+  {
+   if(!m_ready)
+      return;
+   if(InpPyramidTrigger != CHARON_PYR_MANUAL)
+      return;                          // AUTO never needs an arm
+   if(InpPyramidArmKey <= 0)
+      return;                          // arming disabled
+
+   //--- lparam carries the virtual-key code
+   if(key != (long)InpPyramidArmKey)
+      return;
+
+   m_pyramid.Arm();
+   PrintFormat("%s pyramid trigger armed for the next tier (expires in %s)",
+               CHARON_NAME,
+               (InpPyramidArmTimeoutSec > 0
+                ? StringFormat("%ds", InpPyramidArmTimeoutSec) : "never"));
+   DrawDashboard();
   }
 
 //+------------------------------------------------------------------+

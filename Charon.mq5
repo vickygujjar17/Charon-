@@ -90,13 +90,16 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
   }
 
 //+------------------------------------------------------------------+
-//| Chart events - keep the panel alive after a chart change         |
+//| Chart events - keep the panel alive after a chart change, and     |
+//| forward hotkeys so the MANUAL pyramid trigger can be armed        |
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam,
                   const string &sparam)
   {
    if(id == CHARTEVENT_CHART_CHANGE)
       g_engine.OnTimerWork();
+   else if(id == CHARTEVENT_KEYDOWN)
+      g_engine.OnKey(lparam);
   }
 
 //+------------------------------------------------------------------+

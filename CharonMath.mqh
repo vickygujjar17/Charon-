@@ -242,6 +242,73 @@ int ChClampI(const int value, const int lo, const int hi)
   }
 
 //+------------------------------------------------------------------+
+//| Price ladder at three R multiples (pure)                         |
+//|                                                                  |
+//|  Fills out[0..2] with the price reached at levels a/b/c, skipping |
+//|  any level that is <= 0 (disabled) or unusable. Returns how many  |
+//|  levels were written, so the caller can format exactly that many. |
+//|  Levels are emitted in the caller's order, not sorted: the input  |
+//|  order is what the trader configured.                            |
+//+------------------------------------------------------------------+
+int ChRrLadderPrices(const double entryPrice, const double riskPrice, const bool isLong,
+                     const double levelA, const double levelB, const double levelC,
+                     double &out[])
+  {
+   //--- MQL5 only allows dynamic arrays as reference parameters; the callers
+   //--- pass a fixed 3-slot array, so every write is bounded by its real size
+   int slots = ArraySize(out);
+   for(int k = 0; k < slots; k++)
+      out[k] = 0.0;
+
+   if(!MathIsValidNumber(entryPrice) || entryPrice <= 0.0)
+      return 0;
+   if(!MathIsValidNumber(riskPrice) || riskPrice <= 0.0)
+      return 0;
+
+   double levels[3];
+   levels[0] = levelA;
+   levels[1] = levelB;
+   levels[2] = levelC;
+
+   int count = 0;
+   for(int i = 0; i < 3; i++)
+     {
+      //--- a level of 0 (or nonsense) simply disables that rung
+      if(!MathIsValidNumber(levels[i]) || levels[i] <= 0.0)
+         continue;
+      double p = ChPriceAtRR(entryPrice, riskPrice, levels[i], isLong);
+      if(!MathIsValidNumber(p) || p <= 0.0)
+         continue;
+      if(count < slots)
+         out[count] = p;
+      count++;
+     }
+   return (count > slots ? slots : count);
+  }
+
+//+------------------------------------------------------------------+
+//| Is a manual pyramid arm still live? (pure)                       |
+//|                                                                  |
+//|  armed=false                       -> never live                 |
+//|  timeoutSec <= 0                   -> live until cleared          |
+//|  armedAt in the future / clock skew -> treated as just armed      |
+//+------------------------------------------------------------------+
+bool ChArmIsLive(const bool armed, const datetime armedAt,
+                 const datetime now, const int timeoutSec)
+  {
+   if(!armed)
+      return false;
+   if(timeoutSec <= 0)
+      return true;
+   if(armedAt <= 0)
+      return true;                     // armed without a stamp: honour it
+   if(now <= armedAt)
+      return true;                     // clock skew must not silently disarm
+   long elapsed = (long)(now - armedAt);
+   return (elapsed < (long)timeoutSec);
+  }
+
+//+------------------------------------------------------------------+
 #endif // __CHARON_MATH__
 //+------------------------------------------------------------------+
 
