@@ -7,6 +7,36 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
+## [1.0.6] - 2026-10-24
+
+A deployment-correctness release. No trading behaviour changed. The compilation gate was
+validating a directory layout the documentation never described, so it stayed green while
+a real installation failed to compile.
+
+### Fixed
+
+- **The compile gate proved the wrong thing.** `build_check.ps1` staged every `.mqh` and
+  `.mq5` file *flat* into `MQL5\Experts\`, but `README.md` instructs users to install into
+  `MQL5\Experts\Charon\`. Because Charon's includes are sibling-relative
+  (`#include "CharonDefines.mqh"`), the compiler resolves them against the including file's
+  own directory — so the gate passed on a tree that no user ever has, while a real install
+  could fail with `error 106: file 'Experts\CharonDefines.mqh' not found`. The gate now
+  stages `MQL5\Experts\Charon\`, the documented layout, and so fails when an install would
+  fail. Reproduced the user-facing error first (a lone `Charon.mq5` gives exactly
+  `error 106` at line 24, column 10), then confirmed the documented layout compiles to
+  `0 errors, 0 warnings` from the nested folder.
+- **A partial copy could pass the gate.** Staging used `Copy-Item` and never checked the
+  result, so a short copy would have been compiled as if complete. The gate now compares the
+  staged `.mq*` set against the source set and aborts on any missing file, naming it.
+
+### Documentation
+
+- `README.md`: the Installation section now states the hard requirement instead of implying
+  it — all twelve MQL5 files must remain in one folder, the folder *name* is free, and
+  copying `Charon.mq5` alone produces `error 106: file 'Experts\CharonDefines.mqh' not
+  found`, with the reason (sibling-relative includes). Also states what a green gate now
+  means: the files compile as an installed EA, not just as a staging tree.
+
 ## [1.0.5] - 2026-10-24
 
 A polish release. No trading behaviour changed and no MQL5 logic was touched — every

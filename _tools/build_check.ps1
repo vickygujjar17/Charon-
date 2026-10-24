@@ -53,14 +53,22 @@ if (-not (Test-Path (Join-Path $Source $Entry))) {
 # /inc must point at the staging MQL5 folder so MetaEditor never reads the
 # live terminal's headers.
 #
-# Charon's entry uses RELATIVE includes ("CharonDefines.mqh"), so the headers
-# are staged next to the .mq5 inside Experts. The provenance check below then
-# proves every header really came from this staging tree.
+# Charon's entry uses SIBLING-RELATIVE includes ("CharonDefines.mqh"), which
+# MQL5 resolves against the including file's own directory. The headers must
+# therefore sit in the same folder as the .mq5 -- wherever that folder is.
+#
+# v1.0.6: the gate used to stage everything FLAT in MQL5\Experts, a layout the
+# documentation never told anyone to use. That made the gate pass while a real
+# install failed with "file 'Experts\CharonDefines.mqh' not found": a user who
+# copied Charon.mq5 without the headers beside it still got a green build here.
+# We now stage exactly the documented install layout -- MQL5\Experts\Charon\ --
+# so the gate validates the path users actually take.
 if (Test-Path $buildRoot) { Remove-Item $buildRoot -Recurse -Force }
-New-Item -ItemType Directory -Force -Path $experts, $stageInc | Out-Null
+$deploy = Join-Path $experts "Charon"
+New-Item -ItemType Directory -Force -Path $deploy, $stageInc | Out-Null
 
-Copy-Item (Join-Path $Source "*.mqh") $experts -Force
-Copy-Item (Join-Path $Source "*.mq5") $experts -Force
+Copy-Item (Join-Path $Source "*.mqh") $deploy -Force
+Copy-Item (Join-Path $Source "*.mq5") $deploy -Force
 
 $charonModules = Get-ChildItem (Join-Path $Source "*.mqh") |
     ForEach-Object { $_.BaseName } | Sort-Object
@@ -69,6 +77,25 @@ if ($charonModules.Count -eq 0) {
     Write-Host "FATAL: no Charon headers found in $Source"
     exit 2
 }
+
+# --- Deployment completeness --------------------------------------------
+# Every header plus both entry points must land in ONE folder. A partial copy
+# is the failure mode this gate exists to make impossible, so verify the staged
+# set against the source set rather than trusting Copy-Item.
+$srcMql = @(Get-ChildItem (Join-Path $Source "*.mq*") -File | ForEach-Object { $_.Name } | Sort-Object)
+$stgMql = @(Get-ChildItem (Join-Path $deploy "*.mq*") -File | ForEach-Object { $_.Name } | Sort-Object)
+$missingFiles = @($srcMql | Where-Object { $stgMql -notcontains $_ })
+if ($missingFiles.Count -gt 0) {
+    Write-Host "FATAL: staging is incomplete, missing: $($missingFiles -join ', ')"
+    exit 2
+}
+$charonSelfTest = Join-Path $Source "CharonSelfTest.mq5"
+if ((Test-Path $charonSelfTest) -and ($stgMql -notcontains "CharonSelfTest.mq5")) {
+    Write-Host "FATAL: CharonSelfTest.mq5 was not staged beside the headers"
+    exit 2
+}
+Write-Host ("deploy    : {0} ({1} MQL5 files, headers beside the entry point)" -f $deploy, $stgMql.Count)
+Write-Host ""
 
 # --- Stock framework includes so <Trade/...> resolves -------------------
 # Only the official include tree is copied, never a Charon folder.
@@ -107,7 +134,7 @@ if (Test-Path $scriptSrc) { $entryPoints += "CharonSelfTest.mq5" }
 
 $allLines = New-Object System.Collections.Generic.List[string]
 foreach ($ep in $entryPoints) {
-    $entryPath = Join-Path $experts $ep
+    $entryPath = Join-Path $deploy $ep
     if (-not (Test-Path $entryPath)) {
         $allLines.Add("FATAL: staged entry missing: $entryPath")
         continue
@@ -183,7 +210,7 @@ foreach ($line in $lines) {
 }
 Write-Host ""
 
-$ex5 = @(Get-ChildItem $experts -Filter "*.ex5" -File -ErrorAction SilentlyContinue)
+$ex5 = @(Get-ChildItem $deploy -Filter "*.ex5" -File -ErrorAction SilentlyContinue)
 
 Write-Host "=================================================================="
 Write-Host "VERDICT"

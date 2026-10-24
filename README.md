@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.0.5**
+Current release: **v1.0.6**
 
 ---
 
@@ -126,6 +126,22 @@ snapshot and hands it validated commands to apply.
 3. Attach `Charon` to a chart. One instance manages one symbol.
 
 Charon only touches positions whose symbol matches the chart symbol.
+
+> **All 12 MQL5 files must stay in the same folder.** `Charon.mq5` includes its
+> headers with sibling-relative paths (`#include "CharonDefines.mqh"`), which MQL5
+> resolves against the *including file's own directory*. Copy `Charon.mq5` on its own
+> and compilation fails with
+> `error 106: file 'Experts\CharonDefines.mqh' not found` — the exact error you get
+> when only the `.mq5` was copied. Copy the folder, not the file.
+>
+> The destination folder name is yours to choose: `Experts\Charon\` (documented
+> default) and a flat `Experts\` both work, because the includes are relative to the
+> files rather than to `Experts`. What is not optional is that the ten headers and
+> the two `.mq5` files sit together.
+>
+> `build_check.ps1` compiles exactly this layout, so `*** GATE PASSED ***` means the
+> files you have would compile as an installed EA — not merely that a hand-built
+> staging tree would.
 
 ---
 
@@ -418,9 +434,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File _tools\bridge_check.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File _tools\integration_check.ps1
 ```
 
-The gate compiles **both** `Charon.mq5` and `CharonSelfTest.mq5`, and fails if any
-`#include` resolved outside the staging tree — so a green result means *this commit*
-compiled, not some stale deployed copy.
+The gate compiles **both** `Charon.mq5` and `CharonSelfTest.mq5`, staged in the documented
+install layout (`MQL5\Experts\Charon\`), and fails if any `#include` resolved outside the
+staging tree — so a green result means *this commit* compiled as an installed EA, not some
+stale deployed copy and not a tree of convenience that the docs never mention. It also
+aborts if the staged file set does not match the source set, so a partial copy cannot be
+compiled as if it were whole.
 
 `integration_check.ps1` is the one gate that exercises both halves at once. It starts an
 actual uvicorn process against a throwaway `Common\Files` tree and drives the full loop —
