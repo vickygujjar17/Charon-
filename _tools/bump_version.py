@@ -40,6 +40,10 @@ def source_files() -> list[Path]:
     return [f for f in files if f.is_file()]
 
 
+def version_file() -> Path:
+    return REPO_ROOT / "VERSION"
+
+
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -99,6 +103,16 @@ def main(argv: list[str] | None = None) -> int:
             changes.append(path.name)
             if not args.check and not args.dry_run:
                 path.write_text(text, encoding="utf-8", newline="\n")
+
+    # --- the VERSION file must agree too
+    vfile = version_file()
+    if vfile.is_file():
+        stored = read(vfile).strip()
+        if stored != target:
+            problems.append(f"VERSION: \"{stored}\" != \"{target}\"")
+            changes.append("VERSION")
+            if not args.check and not args.dry_run:
+                vfile.write_text(target + "\n", encoding="utf-8", newline="\n")
 
     print(f"current CHARON_VERSION : {current}")
     print(f"target  CHARON_VERSION : {target}")

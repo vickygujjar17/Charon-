@@ -7,6 +7,19 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
+## [1.0.1] - 2026-10-24
+
+Documentation and tooling accuracy pass. No change to trading behaviour; the
+compiled EA is functionally identical to 1.0.0.
+
+### Fixed
+
+- `_tools/bump_version.py` ignored the `VERSION` file, so it could silently drift
+  out of step with `CHARON_VERSION`. It is now read, verified in `--check` mode and
+  rewritten on a bump.
+- Corrected the self-test assertion count in `README.md` and `CHANGELOG.md` to the
+  actual figure, verified by counting every `Check(` call site.
+
 ## [1.0.0] - 2026-10-24
 
 First release. The scope is deliberately narrow: Charon manages stops, risk and
@@ -74,7 +87,7 @@ escalation for positions a human opened. It contains no entry logic of any kind.
   verification that every header came from the staging tree.
 - `_tools/bump_version.py`: keeps `CHARON_VERSION` and every `#property version`
   in lockstep; `--check` mode fails CI on drift.
-- `CharonSelfTest.mq5`: 70 assertions over the pure arithmetic, with no trades and
+- `CharonSelfTest.mq5`: 73 assertions over the pure arithmetic, with no trades and
   no market data required.
 
 ### Safety defaults

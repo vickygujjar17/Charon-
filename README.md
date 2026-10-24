@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.0.0**
+Current release: **v1.0.1**
 
 ---
 
@@ -260,7 +260,7 @@ gate, HWM tracking, clamps, and the pyramid tier model. It performs no trades an
 market data. Run it on any chart and read the log:
 
 ```
-SELFTEST RESULT: PASS (70/70)
+SELFTEST RESULT: PASS (73/73)
 ```
 
 ---
