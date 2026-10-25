@@ -3,112 +3,158 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<meta name="theme-color" content="#030712" />
+<meta name="description" content="Charon — attended MT5 execution console. The EA derives every stop, size and R multiple." />
 <title>Charon</title>
 <!-- Vendored stylesheet: no CDN, no network, no flash of unstyled risk. -->
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
 <link rel="stylesheet" href="/static/tailwind.css" />
 </head>
-<body class="min-h-screen bg-ink-950 text-shade-200 antialiased">
+<body class="min-h-screen bg-ink-950 font-mono text-shade-200 antialiased">
 
 <!-- ================= STALE / OFFLINE BANNER ================= -->
 <!-- Deliberately the first thing in the body: a banner you have to scroll
      to find is a banner that will not stop anyone. -->
 <div id="banner" class="hidden sticky top-0 z-50 border-b px-4 py-2 text-center text-sm font-semibold"></div>
 
-<main class="mx-auto max-w-6xl px-4 py-5">
+<main class="mx-auto max-w-7xl px-4 py-4">
 
-  <!-- ================= HEADER ================= -->
-  <header class="mb-5 flex flex-wrap items-end justify-between gap-3">
-    <div>
-      <div class="flex items-baseline gap-3">
-        <h1 class="text-2xl font-bold tracking-tight text-shade-100">Charon</h1>
-        <span id="symbolLabel" class="font-mono text-sm text-shade-400">—</span>
-        <span id="eaVersion" class="text-[11px] text-shade-400"></span>
+  <!-- ================= COMMAND BAR ================= -->
+  <header class="mb-4 flex flex-wrap items-center justify-between gap-x-6 gap-y-3
+                 border-b border-ink-700 pb-3">
+
+    <!-- The mark is inline and context-free: every stroke uses currentColor,
+         so the logo takes the accent colour from the <a> and needs no second
+         asset to draw. -->
+    <div class="flex items-center gap-3">
+      <a href="/" class="flex items-center gap-3 text-accent" aria-label="Charon dashboard">
+        <svg viewBox="0 0 40 40" width="34" height="34" aria-hidden="true"
+             class="shrink-0 drop-shadow-[0_0_10px_rgba(56,189,248,0.35)]">
+          <!-- the obol -->
+          <circle cx="20" cy="20" r="12.5" fill="none" stroke="currentColor"
+                  stroke-width="1.75" stroke-opacity="0.9" />
+          <circle cx="20" cy="20" r="16" fill="none" stroke="currentColor"
+                  stroke-width="0.75" stroke-opacity="0.25" />
+          <!-- the ferryman's pole, crossing at full diagonal -->
+          <path d="M6 34 L34 6" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" />
+          <!-- the fare struck in the middle -->
+          <circle cx="20" cy="20" r="2.75" fill="currentColor" />
+        </svg>
+        <span class="leading-none">
+          <span class="block font-display text-[22px] font-semibold uppercase
+                       tracking-[0.26em] text-shade-100">Charon</span>
+          <span class="mt-1 block text-[9px] font-semibold uppercase
+                       tracking-[0.3em] text-shade-400">execution console</span>
+        </span>
+      </a>
+
+      <div class="ml-1 flex flex-col gap-1 border-l border-ink-700 pl-3">
+        <div class="flex items-baseline gap-2">
+          <span id="symbolLabel" class="readout text-sm font-semibold tracking-wider text-shade-100">—</span>
+          <span id="eaVersion" class="text-[10px] text-shade-400"></span>
+        </div>
+        <p id="tagline" class="text-[10px] text-shade-400">
+          Attended execution. The EA derives every stop, size and R multiple.
+        </p>
       </div>
-      <p id="tagline" class="mt-0.5 text-xs text-shade-400">
-        Attended execution. The EA derives every stop, size and R multiple.
-      </p>
     </div>
-    <div class="flex items-center gap-2">
+
+    <!-- Status cluster: receipts about the transport, not about the market. -->
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
       <span id="statusPill" class="pill bg-ink-700 text-shade-300">connecting</span>
-      <span id="ageLabel" class="font-mono text-[11px] text-shade-400"></span>
+      <span id="ageLabel" class="text-[11px] text-shade-400"></span>
       <!-- Round trip for the poll. Hidden until the first answer arrives. -->
-      <span id="latencyLabel" class="font-mono text-[11px] text-shade-400"></span>
+      <span id="latencyLabel" class="text-[11px] text-shade-400"></span>
       <!-- When the bridge last delivered a valid snapshot. -->
-      <span id="lastGoodLabel" class="font-mono text-[11px] text-shade-400"></span>
+      <span id="lastGoodLabel" class="text-[11px] text-shade-400"></span>
     </div>
   </header>
 
-  <!-- ================= ACCOUNT ================= -->
-  <section class="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-    <div class="card-tight">
+  <!-- ================= ACCOUNT READOUT STRIP ================= -->
+  <!-- Four figures in one hairline-divided row: a strip reads as a single
+       instrument panel, four separate cards read as four web widgets. -->
+  <section class="panel mb-4 grid grid-cols-2 divide-ink-700 sm:grid-cols-4
+                  sm:divide-x" aria-label="Account">
+    <div class="px-4 py-3">
       <div class="label">Equity</div>
-      <div id="equity" class="value-lg">—</div>
+      <div id="equity" class="readout mt-1 text-lg font-semibold">—</div>
     </div>
-    <div class="card-tight">
+    <div class="border-t border-ink-700 px-4 py-3 sm:border-t-0">
       <div class="label">Balance</div>
-      <div id="balance" class="value-lg">—</div>
+      <div id="balance" class="readout mt-1 text-lg font-semibold">—</div>
     </div>
-    <div class="card-tight">
+    <div class="border-t border-ink-700 px-4 py-3 sm:border-t-0">
       <div class="label">Open P/L</div>
-      <div id="openPl" class="value-lg">—</div>
+      <div id="openPl" class="readout mt-1 text-lg font-semibold">—</div>
     </div>
-    <div class="card-tight">
-      <div class="label">Basket risk</div>
-      <div id="riskPct" class="value-lg">—</div>
-      <div id="riskMoney" class="mt-0.5 font-mono text-[11px] text-shade-400"></div>
+    <div class="border-t border-ink-700 px-4 py-3 sm:border-t-0">
+      <div class="flex items-baseline justify-between gap-2">
+        <div class="label">Basket risk</div>
+        <div id="riskMoney" class="readout text-[10px] text-shade-400"></div>
+      </div>
+      <div id="riskPct" class="readout mt-1 text-lg font-semibold">—</div>
     </div>
   </section>
+
   <div class="grid gap-4 lg:grid-cols-3">
 
     <!-- ================= BASKET + LADDER ================= -->
-    <section class="card lg:col-span-2">
-      <div class="mb-3 flex items-center justify-between">
-        <h2 class="label">Basket</h2>
+    <section class="panel lg:col-span-2">
+      <div class="flex items-center justify-between border-b border-ink-700 px-4 py-2.5">
+        <h2 class="mark">Basket</h2>
         <span id="basketDir" class="pill bg-ink-700 text-shade-300">—</span>
       </div>
 
-      <div class="mb-4 grid grid-cols-3 gap-3">
-        <div>
+      <div class="grid grid-cols-3 divide-x divide-ink-700 border-b border-ink-700">
+        <div class="px-4 py-3">
           <div class="label">Legs</div>
-          <div id="basketLegs" class="value">—</div>
+          <div id="basketLegs" class="value mt-1">—</div>
         </div>
-        <div>
+        <div class="px-4 py-3">
           <div class="label">Avg entry</div>
-          <div id="basketAvg" class="value">—</div>
+          <div id="basketAvg" class="value mt-1">—</div>
         </div>
-        <div>
+        <div class="px-4 py-3">
           <div class="label">Volume</div>
-          <div id="basketLot" class="value">—</div>
+          <div id="basketLot" class="value mt-1">—</div>
         </div>
       </div>
 
-      <div class="mb-2 flex items-center justify-between">
-        <h3 class="label">RR ladder</h3>
-        <!-- Provenance matters: these rungs are the EA's own numbers. -->
-        <span class="text-[10px] text-shade-400">from the EA, unmodified</span>
-      </div>
-      <div id="ladder" class="space-y-1.5">
-        <div class="text-xs text-shade-400">No basket yet.</div>
+      <div class="px-4 py-3">
+        <div class="mb-2 flex items-center justify-between">
+          <h3 class="mark">RR ladder</h3>
+          <!-- Provenance matters: these rungs are the EA's own numbers. -->
+          <span class="text-[10px] text-shade-400">from the EA, unmodified</span>
+        </div>
+        <div id="ladder" class="space-y-1.5">
+          <div class="text-xs text-shade-400">No basket yet.</div>
+        </div>
       </div>
     </section>
+
 
     <!-- ================= NEW ORDER ================= -->
     <!-- The only control on this page that can originate an order. Every
          field below is an INPUT to the EA's risk model: the EA derives the
          stop from the block, solves the volume and renders the rungs. The
          panel shows the EA's answer and never computes one of its own. -->
-    <section class="card mt-4">
-      <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h2 class="label">New order</h2>
+    <section class="panel mt-4">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2.5">
+        <div class="flex items-center gap-2">
+          <h2 class="mark">New order</h2>
+          <span class="rounded border border-violet/40 bg-violet/10 px-1.5 py-0.5
+                       text-[9px] font-semibold uppercase tracking-[0.14em] text-violet">
+            intent only
+          </span>
+        </div>
         <span id="orderStatus" class="pill bg-ink-700 text-shade-300">idle</span>
       </div>
 
-      <div class="grid gap-3 md:grid-cols-4">
+      <div class="grid gap-3 px-4 py-3 md:grid-cols-4">
         <label class="block">
           <span class="label">Direction</span>
-          <select id="orderSide"
-                  class="mt-1 w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-                         font-mono text-xs text-shade-100 focus:border-accent focus:outline-none">
+          <select id="orderSide" class="ticket-field mt-1">
             <option value="BUY">BUY</option>
             <option value="SELL">SELL</option>
           </select>
@@ -116,9 +162,7 @@
 
         <label class="block">
           <span class="label">Type</span>
-          <select id="orderType"
-                  class="mt-1 w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-                         font-mono text-xs text-shade-100 focus:border-accent focus:outline-none">
+          <select id="orderType" class="ticket-field mt-1">
             <option value="MARKET">MARKET</option>
             <option value="LIMIT">LIMIT</option>
           </select>
@@ -127,36 +171,30 @@
         <label class="block">
           <span class="label">Entry (LIMIT only)</span>
           <input id="orderEntry" type="number" step="0.00001" placeholder="market"
-                 class="mt-1 w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-                        font-mono text-xs text-shade-100 focus:border-accent focus:outline-none" />
+                 class="ticket-field mt-1" />
         </label>
 
         <label class="block">
           <span class="label">Risk %</span>
           <input id="orderRisk" type="number" step="0.01" min="0.01" value="0.50"
-                 class="mt-1 w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-                        font-mono text-xs text-shade-100 focus:border-accent focus:outline-none" />
+                 class="ticket-field mt-1" />
         </label>
 
         <label class="block">
           <span class="label">Block top</span>
           <input id="orderBlockTop" type="number" step="0.00001" placeholder="price"
-                 class="mt-1 w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-                        font-mono text-xs text-shade-100 focus:border-accent focus:outline-none" />
+                 class="ticket-field mt-1" />
         </label>
 
         <label class="block">
           <span class="label">Block bottom</span>
           <input id="orderBlockBottom" type="number" step="0.00001" placeholder="price"
-                 class="mt-1 w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-                        font-mono text-xs text-shade-100 focus:border-accent focus:outline-none" />
+                 class="ticket-field mt-1" />
         </label>
 
         <label class="block">
           <span class="label">Trail from entry</span>
-          <select id="orderTrail"
-                  class="mt-1 w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-                         font-mono text-xs text-shade-100 focus:border-accent focus:outline-none">
+          <select id="orderTrail" class="ticket-field mt-1">
             <option value="0">OFF</option>
             <option value="1">POINTS</option>
             <option value="2">ATR</option>
@@ -167,9 +205,7 @@
 
         <label class="block">
           <span class="label">Stated at rung</span>
-          <select id="orderRung"
-                  class="mt-1 w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-                         font-mono text-xs text-shade-100 focus:border-accent focus:outline-none">
+          <select id="orderRung" class="ticket-field mt-1">
             <option value="0">none</option>
             <option value="1">1st rung</option>
             <option value="2">2nd rung</option>
@@ -178,82 +214,92 @@
         </label>
       </div>
 
-      <!-- The EA's answer, in the EA's own numbers. -->
-      <div class="mt-3 grid grid-cols-2 gap-2 rounded-md border border-ink-700 bg-ink-900 p-3 md:grid-cols-5">
-        <div>
-          <div class="label">Size</div>
-          <div id="orderLots" class="value">—</div>
+      <!-- The EA's answer, in the EA's own numbers. Labelled as such so
+           nobody mistakes this block for editable inputs. -->
+      <div class="mx-4 mb-3 rounded-md border border-ink-700 bg-ink-900">
+        <div class="border-b border-ink-700 px-3 py-1.5">
+          <span class="mark text-violet">EA verdict</span>
         </div>
-        <div>
-          <div class="label">Entry</div>
-          <div id="orderEntryPx" class="value">—</div>
-        </div>
-        <div>
-          <div class="label">Stop</div>
-          <div id="orderStop" class="value">—</div>
-        </div>
-        <div>
-          <div class="label">Risk</div>
-          <div id="orderRiskMoney" class="value">—</div>
-        </div>
-        <div>
-          <div class="label">Ticket</div>
-          <div id="orderTicket" class="value">—</div>
+        <div class="grid grid-cols-2 gap-2 px-3 py-2.5 md:grid-cols-5">
+          <div>
+            <div class="label">Size</div>
+            <div id="orderLots" class="readout mt-0.5 text-sm font-semibold">—</div>
+          </div>
+          <div>
+            <div class="label">Entry</div>
+            <div id="orderEntryPx" class="readout mt-0.5 text-sm font-semibold">—</div>
+          </div>
+          <div>
+            <div class="label">Stop</div>
+            <div id="orderStop" class="readout mt-0.5 text-sm font-semibold">—</div>
+          </div>
+          <div>
+            <div class="label">Risk</div>
+            <div id="orderRiskMoney" class="readout mt-0.5 text-sm font-semibold">—</div>
+          </div>
+          <div>
+            <div class="label">Ticket</div>
+            <div id="orderTicket" class="readout mt-0.5 text-sm font-semibold">—</div>
+          </div>
         </div>
       </div>
 
-      <div class="mt-2 text-[11px] text-shade-400" id="orderVerdict">
+      <div class="mx-4 text-[11px] text-shade-400" id="orderVerdict">
         Nothing submitted yet.
       </div>
 
-      <div class="mt-3 flex flex-wrap gap-2">
+      <div class="flex flex-wrap gap-2 px-4 py-3">
         <button id="orderPlaceBtn" class="btn-primary">Place order</button>
         <button id="orderModifyBtn" class="btn-ghost">Re-derive stop</button>
         <button id="orderCancelBtn" class="btn-danger">Cancel ticket</button>
       </div>
-      <div class="mt-2 text-[11px] text-shade-400" id="orderMsg"></div>
+      <div class="px-4 pb-3 text-[11px] text-shade-400" id="orderMsg"></div>
     </section>
 
     <!-- ================= ARM + TRAIL ================= -->
     <section class="space-y-4">
-      <div class="card">
-        <div class="mb-3 flex items-center justify-between">
-          <h2 class="label">Pyramid trigger</h2>
+      <div class="panel">
+        <div class="flex items-center justify-between border-b border-ink-700 px-4 py-2.5">
+          <h2 class="mark">Pyramid trigger</h2>
           <span id="pyramidTrigger" class="text-[11px] font-semibold text-shade-400">—</span>
         </div>
 
-        <div id="armPanel" class="mb-3 rounded-md border border-ink-700 bg-ink-900 p-3">
-          <div class="flex items-center justify-between">
-            <span id="armState" class="text-sm font-semibold text-shade-300">disarmed</span>
-            <span id="armCountdown" class="font-mono text-lg font-bold text-shade-300"></span>
+        <div class="px-4 py-3">
+          <div id="armPanel" class="mb-3 rounded-md border border-ink-700 bg-ink-900 p-3">
+            <div class="flex items-center justify-between">
+              <span id="armState" class="text-sm font-semibold text-shade-300">disarmed</span>
+              <span id="armCountdown" class="readout text-lg font-bold text-shade-300"></span>
+            </div>
+            <div class="mt-1 text-[11px] text-shade-400" id="armHint">
+              Arming authorises one scale-in. Risk gates still apply.
+            </div>
           </div>
-          <div class="mt-1 text-[11px] text-shade-400" id="armHint">
-            Arming authorises one scale-in. Risk gates still apply.
-          </div>
-        </div>
 
-        <div class="flex gap-2">
-          <button id="armBtn" class="btn-primary flex-1">Arm next tier</button>
-          <button id="disarmBtn" class="btn-ghost">Disarm</button>
+          <div class="flex gap-2">
+            <button id="armBtn" class="btn-primary flex-1">Arm next tier</button>
+            <button id="disarmBtn" class="btn-ghost">Disarm</button>
+          </div>
+          <div class="mt-2 text-[11px] text-shade-400" id="armMsg"></div>
         </div>
-        <div class="mt-2 text-[11px] text-shade-400" id="armMsg"></div>
       </div>
 
-      <div class="card">
-        <h2 class="label mb-3">Trailing mode</h2>
-        <select id="trailSelect"
-                class="w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-                       font-mono text-xs text-shade-100 focus:border-accent focus:outline-none">
-          <option value="0">OFF</option>
-          <option value="1">POINTS</option>
-          <option value="2">ATR</option>
-          <option value="3">HWM_PERCENT</option>
-          <option value="4">RR_LOCK</option>
-        </select>
-        <div class="mt-2 text-[11px] text-shade-400">
-          Changes how stops trail. Cannot open or size a position.
+      <div class="panel">
+        <div class="border-b border-ink-700 px-4 py-2.5">
+          <h2 class="mark">Trailing mode</h2>
         </div>
-        <div class="mt-2 text-[11px] text-shade-400" id="trailMsg"></div>
+        <div class="px-4 py-3">
+          <select id="trailSelect" class="ticket-field">
+            <option value="0">OFF</option>
+            <option value="1">POINTS</option>
+            <option value="2">ATR</option>
+            <option value="3">HWM_PERCENT</option>
+            <option value="4">RR_LOCK</option>
+          </select>
+          <div class="mt-2 text-[11px] text-shade-400">
+            Changes how stops trail. Cannot open or size a position.
+          </div>
+          <div class="mt-2 text-[11px] text-shade-400" id="trailMsg"></div>
+        </div>
       </div>
     </section>
   </div>
@@ -261,48 +307,59 @@
 
 
   <!-- ================= LEGS ================= -->
-  <section class="card mt-4">
-    <h2 class="label mb-3">Legs</h2>
+  <section class="panel mt-4">
+    <div class="flex items-center justify-between border-b border-ink-700 px-4 py-2.5">
+      <h2 class="mark">Legs</h2>
+      <span class="text-[10px] text-shade-400">stops and 1R are the EA's</span>
+    </div>
     <div class="overflow-x-auto">
       <table class="w-full text-left text-xs">
-        <thead class="text-[10px] uppercase tracking-wider text-shade-400">
+        <thead class="text-[10px] uppercase tracking-[0.14em] text-shade-400">
           <tr class="border-b border-ink-700">
-            <th class="py-2 pr-3">Ticket</th>
-            <th class="py-2 pr-3">Side</th>
-            <th class="py-2 pr-3">Tier</th>
-            <th class="py-2 pr-3">Entry</th>
-            <th class="py-2 pr-3">Vol</th>
-            <th class="py-2 pr-3">Stop</th>
-            <th class="py-2 pr-3">1R</th>
-            <th class="py-2 pr-3">Progress</th>
-            <th class="py-2 pr-3">Flags</th>
-            <th class="py-2">Ladder</th>
+            <th class="py-2 pl-4 pr-3 font-semibold">Ticket</th>
+            <th class="py-2 pr-3 font-semibold">Side</th>
+            <th class="py-2 pr-3 font-semibold">Tier</th>
+            <th class="py-2 pr-3 font-semibold">Entry</th>
+            <th class="py-2 pr-3 font-semibold">Vol</th>
+            <th class="py-2 pr-3 font-semibold">Stop</th>
+            <th class="py-2 pr-3 font-semibold">1R</th>
+            <th class="py-2 pr-3 font-semibold">Progress</th>
+            <th class="py-2 pr-3 font-semibold">Flags</th>
+            <th class="py-2 pr-4 font-semibold">Ladder</th>
           </tr>
         </thead>
-        <tbody id="legRows" class="font-mono text-shade-200"></tbody>
+        <tbody id="legRows" class="font-mono tabular-nums text-shade-200"></tbody>
       </table>
     </div>
-    <div id="noLegs" class="py-3 text-xs text-shade-400">
+    <div id="noLegs" class="border-t border-ink-700 px-4 py-3 text-xs text-shade-400">
       No managed positions. Open a trade in the terminal — Charon adopts it and arms the stop.
     </div>
   </section>
 
   <!-- ================= LOG ================= -->
-  <section class="card mt-4">
-    <div class="mb-2 flex items-center justify-between">
-      <h2 class="label">Bridge log</h2>
+  <!-- A <details> element, not a scripted disclosure: the harness forbids
+       the DOM APIs a custom toggle would need, and native <details> keeps
+       the feed open across polls without touching app.js. -->
+  <details class="panel mt-4" open>
+    <summary class="flex cursor-pointer list-none items-center justify-between
+                    border-b border-ink-700 px-4 py-2.5 focus:outline-none">
+      <h2 class="mark">Execution log</h2>
       <span class="text-[10px] text-shade-400">
         bridge-side transcript — the EA's Experts log remains the trading record
       </span>
-    </div>
+    </summary>
     <div id="logBox"
-         class="h-48 overflow-y-auto rounded border border-ink-700 bg-ink-950 p-2
-                font-mono text-[11px] leading-relaxed"></div>
-  </section>
+         class="h-48 overflow-y-auto px-3 py-2 text-[11px] leading-relaxed"></div>
+  </details>
 
-  <footer class="mt-5 pb-6 text-center text-[10px] text-shade-400">
-    Charon bridge <span id="bridgeVersion">—</span> · schema <span id="schemaVersion">—</span>
-    · orders are originated only by CharonTrade.mqh
+  <footer class="mt-5 flex flex-wrap items-center justify-between gap-2 pb-6 text-[10px] text-shade-400">
+    <span>
+      Charon bridge <span id="bridgeVersion" class="text-shade-300">—</span>
+      · schema <span id="schemaVersion" class="text-shade-300">—</span>
+    </span>
+    <span class="tracking-[0.14em] uppercase">
+      orders are originated only by CharonTrade.mqh
+    </span>
   </footer>
 </main>
 <script src="/static/app.js"></script>

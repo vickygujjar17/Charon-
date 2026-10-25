@@ -7,6 +7,73 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
+## [1.1.1] - 2026-10-25
+
+A presentation release. No trading behaviour changed, no wire format changed, and
+`SCHEMA_VERSION` stays at `2` — a v1.1.0 EA and a v1.1.1 panel remain interchangeable. Every
+change here is in the dashboard's markup, stylesheet and renderer.
+
+### Changed
+
+- **The dashboard was rebuilt as an execution console.** It previously read as a generic admin
+  page: four equal cards, sentence-case headings, and no visual hierarchy between a number the
+  EA published and decoration around it. It is now an obsidian (`#030712` / `#0a0f1d`) terminal
+  with a command bar, a hairline-divided account readout strip, and dense panelled sections.
+- **Colour now carries meaning instead of dressing the page.** Emerald (`#10b981`) is
+  live/long/profit, crimson (`#f43f5e`) is offline/short/loss/refused, cyan (`#38bdf8`) is
+  technical (latency, queued commands), violet (`#818cf8`) is rung and tier metadata. Amber
+  remains reserved for staleness, because a stale feed is warnable, not fatal.
+- **Readouts use tabular figures.** A ticking equity or latency value can no longer shift the
+  layout, which previously made a live panel look restless.
+- **The status pill carries a live dot** and breathes only while the snapshot is actually
+  `live`. Motion on a stale or offline pill would read as "working" at a glance, so every other
+  state holds still.
+- **The bridge log is now a tall gutter-marked feed** inside a native `<details>` element, so it
+  can be collapsed without JavaScript. Its heading is renamed *Execution log* — it remains the
+  bridge-side transcript, and the EA's own Experts log is still the trading record.
+
+### Added
+
+- **An inline SVG mark.** An obol (the ferryman's fare) crossed by Charon's pole, drawn with
+  `currentColor` so it inherits the accent tone and costs no extra request.
+- **`static/favicon.svg`**, the same mark at 16px, served by the existing `/static` mount.
+
+### Fixed
+
+- **Documentation counts had drifted.** `README.md` claimed 102 Python tests against an actual
+  168, and 135/135 self-test checks against an actual 147/147. Both are corrected. (The
+  Versioning section's "the six disagree" was already accurate — `bump_version.py` guards six
+  literal *kinds*, of which `#property version` covers all twelve MQL5 files.)
+- **`CHANGELOG.md` had no `[1.1.0]` entry** despite `v1.1.0` being shipped and tagged. It is
+  backfilled below.
+
+## [1.1.0] - 2026-10-24
+
+An execution release, backfilled into this changelog after the fact. It added the first
+order-originating control and the schema that carries it.
+
+### Added
+
+- **An interactive New Order panel.** The dashboard can now submit order *intent* — side,
+  order type, entry, risk percentage, block top/bottom, trailing mode and the rung the entry
+  is stated at — to the EA. It sends no volume, no stop distance and no R multiple: those are
+  the EA's answers, and the EA publishes them back in `snap.order` for the panel to render
+  verbatim. The client never multiplies, subtracts or otherwise derives a price, which
+  `test_client_script.py` and `tests/client_harness.js` both pin.
+- **`POST /api/order`, `POST /api/order/modify` and `POST /api/order/cancel`**, plus the
+  `order` block in the schema carrying the EA's verdict (accepted / pending / rejected, with
+  size, entry, stop, risk and ticket).
+- **Dashboard controls for arming and trailing** were unlocked, alongside the New Order
+  panel.
+
+### Changed
+
+- **`SCHEMA_VERSION` raised to `2`** for the `order` block and the new command verbs. Pairing
+  is checked on the wire, so a schema-1 bridge refuses a schema-2 client instead of silently
+  misreading it.
+- **`CharonBridge.mqh`, `CharonEngine.mqh`, `CharonRisk.mqh` and `CharonTrade.mqh`** grew the
+  command-intake and adjudication paths that back the panel.
+
 ## [1.0.6] - 2026-10-24
 
 A deployment-correctness release. No trading behaviour changed. The compilation gate was

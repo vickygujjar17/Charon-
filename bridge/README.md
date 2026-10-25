@@ -94,8 +94,9 @@ src/
 static/
   index.html             the dashboard
   app.js                 rendering; never computes a price
+  favicon.svg            the obol mark, high contrast at 16px
   tailwind.css           prebuilt - no CDN, works offline
-tests/                   112 pytest tests
+tests/                   168 pytest tests
   conftest.py            synthetic EA snapshot in the real wire format
   fake_ea.py             stand-in EA: drains the inbox like CCharonBridge
   test_integration.py    real uvicorn + fake EA across the file bridge

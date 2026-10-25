@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.1.0**
+Current release: **v1.1.1**
 
 ---
 
@@ -79,8 +79,9 @@ Charon/
     static/
       index.html          the dashboard
       app.js              renders it; never recomputes a price
+      favicon.svg         inline mark as a file: obol + ferryman's pole
       tailwind.css        PREBUILT — no CDN, works offline
-    tests/                112 pytest tests
+    tests/                168 pytest tests
       fake_ea.py          stand-in EA: drains the inbox like CCharonBridge
       client_harness.js   executes app.js in node and checks it polls
       test_integration.py real uvicorn + fake EA across the file bridge
@@ -484,10 +485,10 @@ expiry, and the bridge's command vocabulary and JSON helpers. It performs no tra
 needs no market data. Run it on any chart and read the log:
 
 ```
-SELFTEST RESULT: PASS (135/135)
+SELFTEST RESULT: PASS (147/147)
 ```
 
-The bridge's 102 Python tests run offline:
+The bridge's 168 Python tests run offline:
 
 ```powershell
 cd bridge

@@ -97,13 +97,13 @@ function renderLadder(container, text) {
     const level = document.createElement("span");
     level.className = rung.missing
       ? "text-[11px] italic text-shade-400"
-      : "text-[11px] font-semibold text-shade-300";
+      : "text-[11px] font-semibold uppercase tracking-wider text-violet";
     level.textContent = rung.level;
 
     const px = document.createElement("span");
     px.className = rung.missing
       ? "font-mono text-[11px] text-shade-400"
-      : "font-mono text-xs font-semibold text-shade-100";
+      : "readout text-xs font-semibold";
     px.textContent = rung.price ?? "—";
 
     row.append(level, px);
@@ -119,18 +119,22 @@ function renderLadder(container, text) {
 //| instead of only that it is currently lying.                       |
 //+------------------------------------------------------------------+
 const STATUS_STYLE = {
-  live: "bg-live/15 text-live",
+  live: "bg-live/15 text-live shadow-glow-live",
   stale: "bg-stale/15 text-stale",
-  offline: "bg-offline/15 text-offline",
-  starting: "bg-accent/15 text-accent",
-  error: "bg-offline/15 text-offline",
+  offline: "bg-offline/15 text-offline shadow-glow-offline",
+  starting: "bg-accent/15 text-accent shadow-glow-accent",
+  error: "bg-offline/15 text-offline shadow-glow-offline",
 };
 
 let lastGoodAt = 0;   // epoch seconds of the last good payload
 
 // --- the panels dim together, so a stale screen cannot look live in the
-// --- corner while the numbers still read as current.
-const DIMMABLE_SELECTOR = "main > header, main > section, main .card";
+// --- corner while the numbers still read as current. The selector is
+// --- deliberately broad: `section` and `details` cover the panels of the
+// --- current markup, and `.card` is kept so an older cache of index.html
+// --- still dims instead of silently staying bright.
+const DIMMABLE_SELECTOR =
+  "main > header, main > section, main > details, main .panel, main .card";
 let dimmed = false;
 
 function setDimmed(on) {
@@ -152,10 +156,10 @@ function hideBanner() {
 const BANNER_STYLE = {
   stale:
     "sticky top-0 z-50 border-b border-stale/40 bg-stale/15 px-4 py-2 " +
-    "text-center text-sm font-semibold text-stale",
+    "text-center text-sm font-semibold tracking-wide text-stale backdrop-blur-sm",
   offline:
     "sticky top-0 z-50 border-b border-offline/40 bg-offline/15 px-4 py-2 " +
-    "text-center text-sm font-semibold text-offline",
+    "text-center text-sm font-semibold tracking-wide text-offline backdrop-blur-sm",
 };
 
 function showBanner(kind, message) {
@@ -250,7 +254,8 @@ function render(payload) {
   // --- a negative P/L reads red, positive green, flat neutral
   const pl = snap.basket.open_pl;
   $("openPl").className =
-    "value-lg " + (pl > 0 ? "text-live" : pl < 0 ? "text-offline" : "text-shade-100");
+    "readout mt-1 text-lg font-semibold " +
+    (pl > 0 ? "text-live" : pl < 0 ? "text-offline" : "text-shade-100");
 
   // --- basket
   const dir = $("basketDir");
@@ -258,9 +263,9 @@ function render(payload) {
   dir.className =
     "pill " +
     (snap.basket.direction === "BUY"
-      ? "bg-live/15 text-live"
+      ? "bg-live/15 text-live shadow-glow-live"
       : snap.basket.direction === "SELL"
-        ? "bg-offline/15 text-offline"
+        ? "bg-offline/15 text-offline shadow-glow-offline"
         : "bg-ink-700 text-shade-300");
 
   $("basketLegs").textContent = snap.basket.legs;
@@ -280,12 +285,12 @@ function render(payload) {
     armState.className = "text-sm font-semibold text-live";
     countdown.textContent =
       pyr.secs_left !== null && pyr.secs_left >= 0 ? pyr.secs_left + "s" : "∞";
-    countdown.className = "font-mono text-lg font-bold text-live";
+    countdown.className = "readout text-lg font-bold text-live";
   } else {
     armState.textContent = pyr.enabled ? "disarmed" : "pyramiding off";
     armState.className = "text-sm font-semibold text-shade-400";
     countdown.textContent = "";
-    countdown.className = "font-mono text-lg font-bold text-shade-300";
+    countdown.className = "readout text-lg font-bold text-shade-300";
   }
 
   const canArm = pyr.enabled && pyr.trigger === "MANUAL" && snap.basket.valid;
@@ -327,20 +332,20 @@ function render(payload) {
 //+------------------------------------------------------------------+
 function legRow(leg) {
   const tr = document.createElement("tr");
-  tr.className = "border-b border-ink-800";
+  tr.className = "border-b border-ink-800 transition-colors hover:bg-ink-800/40";
   tr.dataset.ticket = String(leg.ticket);
 
   // --- ticket, side, tier, entry, vol, stop, 1R, progress, flags
   for (let index = 0; index < 9; index += 1) {
     const td = document.createElement("td");
-    td.className = "py-2 pr-3";
+    td.className = index === 0 ? "py-2 pl-4 pr-3" : "py-2 pr-3";
     td.dataset.cell = String(index);
     tr.append(td);
   }
 
   // --- the ladder cell keeps its own small stack of rungs
   const tdLadder = document.createElement("td");
-  tdLadder.className = "py-2";
+  tdLadder.className = "py-2 pr-4";
   const box = document.createElement("div");
   box.className = "space-y-1";
   box.dataset.role = "leg-ladder";
@@ -360,22 +365,28 @@ function fillLegRow(tr, leg, digits) {
 
   const cells = [
     { text: "#" + leg.ticket, cls: "text-shade-300" },
-    { text: leg.side, cls: leg.side === "BUY" ? "text-live" : "text-offline" },
-    { text: "T" + leg.tier, cls: "" },
+    {
+      text: leg.side,
+      cls: leg.side === "BUY" ? "font-semibold text-live" : "font-semibold text-offline",
+    },
+    { text: "T" + leg.tier, cls: "text-violet" },
     { text: price(leg.entry, digits), cls: "" },
     { text: leg.lot === null ? "—" : Number(leg.lot).toFixed(2), cls: "" },
     // --- a zero stop is not a tight stop, it is an unprotected leg
     { text: price(leg.sl, digits), cls: leg.sl > 0 ? "" : "text-offline" },
     { text: price(leg.risk_price, digits), cls: "text-shade-400" },
     { text: rr(leg.progress_rr), cls: leg.progress_rr > 0 ? "text-live" : "text-shade-300" },
-    { text: flags, cls: "text-shade-400" },
+    { text: flags, cls: "text-[10px] uppercase tracking-wider text-shade-400" },
   ];
 
   const tdNodes = tr.querySelectorAll("td[data-cell]");
   for (let index = 0; index < cells.length; index += 1) {
     const td = tdNodes[index];
     if (!td) continue;
-    td.className = "py-2 pr-3 " + cells[index].cls;
+    // --- the first cell keeps the table's left gutter; without it the
+    // --- ticket number sits flush against the panel edge
+    td.className =
+      (index === 0 ? "py-2 pl-4 pr-3 " : "py-2 pr-3 ") + cells[index].cls;
     td.textContent = cells[index].text;
   }
 
@@ -487,8 +498,8 @@ let lastPollError = null;
 const ORDER_TONE = {
   idle: "pill bg-ink-700 text-shade-300",
   pending: "pill bg-stale/15 text-stale",
-  accepted: "pill bg-live/15 text-live",
-  rejected: "pill bg-offline/15 text-offline",
+  accepted: "pill bg-live/15 text-live shadow-glow-live",
+  rejected: "pill bg-offline/15 text-offline shadow-glow-offline",
 };
 
 function renderOrder(order, digits, currency) {
@@ -729,10 +740,10 @@ const LOG_COLOUR = {
 function appendLogLine(at, level, message) {
   const box = $("logBox");
   const line = document.createElement("div");
-  line.className = LOG_COLOUR[level] || "text-shade-300";
+  line.className = "log-line " + (LOG_COLOUR[level] || "text-shade-300");
 
   const stamp = document.createElement("span");
-  stamp.className = "text-shade-400";
+  stamp.className = "text-shade-400/80";
   stamp.textContent = clockText(at) + "  ";
 
   line.append(stamp, document.createTextNode(message));

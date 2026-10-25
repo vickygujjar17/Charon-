@@ -3,14 +3,54 @@
 @tailwind utilities;
 
 /* --- A handful of component classes, so index.html stays readable and
-   --- the Tailwind build still sees every utility it must emit. */
+   --- the Tailwind build still sees every utility it must emit.
+
+   The classes that app.js constructs at runtime (`.pill`, `.rung`, the
+   `.btn*` variants) appear here as complete literals as well: Tailwind
+   scans app.js as text, so renaming one here without renaming it there
+   leaves an element unstyled with no error anywhere. */
+@layer base {
+  ::selection {
+    @apply bg-accent/25 text-shade-100;
+  }
+  /* --- the panel is a terminal: square-ish scrollbars, no light chrome */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #2c3c5c transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: #2c3c5c;
+    border-radius: 4px;
+  }
+}
+
 @layer components {
+  /* --- surfaces ---------------------------------------------------- */
+  /* --- `.card` / `.card-tight` are the v1.1.0 surface classes. The
+     --- current page uses `.panel`, but `.card` is still named in
+     --- app.js's DIMMABLE_SELECTOR and both are cheap to keep, so a
+     --- browser holding a cached v1.1.0 index.html still styles. */
   .card {
     @apply rounded-lg border border-ink-700 bg-ink-850 p-4;
   }
   .card-tight {
     @apply rounded-lg border border-ink-700 bg-ink-850 px-3 py-2;
   }
+  /* --- a panel is the page's main container; slightly darker than the
+     --- card wells it holds, so nesting reads without extra borders */
+  .panel {
+    @apply rounded-lg border border-ink-700 bg-ink-925 shadow-panel;
+  }
+  /* --- 1px separator that survives a dark background without shouting */
+  .hairline {
+    @apply border-ink-700/80;
+  }
+
+  /* --- typography -------------------------------------------------- */
   .label {
     @apply text-[10px] font-semibold uppercase tracking-[0.14em] text-shade-400;
   }
@@ -20,10 +60,35 @@
   .value-lg {
     @apply font-mono text-xl font-semibold text-shade-100;
   }
+  /* --- a readout is a number meant to be read at a glance: fixed-width
+     --- digits so a ticking value cannot make the layout twitch */
+  .readout {
+    @apply font-mono tabular-nums tracking-tight text-shade-100;
+  }
+  .mark {
+    @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-shade-400;
+  }
+
+  /* --- status ------------------------------------------------------ */
+  /* --- the dot is a pseudo-element, not a DOM node: app.js assigns the
+     --- pill's whole textContent and className on every poll, so anything
+     --- inside the pill would be destroyed. currentColor makes the dot
+     --- inherit whatever tone the poll chose. */
   .pill {
     @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1
            text-[11px] font-semibold uppercase tracking-wider;
   }
+  .pill::before {
+    content: "";
+    @apply h-1.5 w-1.5 shrink-0 rounded-full bg-current;
+  }
+  /* --- only the live pill breathes. A stale, refused or connecting state
+     --- must hold still, because motion reads as "working" at a glance. */
+  #statusPill[class*="text-live"]::before {
+    animation: charon-pulse 2.4s ease-in-out infinite;
+  }
+
+  /* --- controls ---------------------------------------------------- */
   .btn {
     @apply rounded-md border px-3 py-1.5 text-xs font-semibold
            transition-colors disabled:cursor-not-allowed disabled:opacity-40;
@@ -37,8 +102,54 @@
   .btn-danger {
     @apply btn border-offline/40 bg-offline/10 text-offline hover:bg-offline/20;
   }
+  /* --- inputs in the ticket: a dark well with a cyan focus ring, so the
+     --- active field is obvious without a bright background */
+  .ticket-field {
+    @apply w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
+           font-mono text-xs text-shade-100 placeholder:text-shade-400/60
+           focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/40
+           disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  /* --- ladder ------------------------------------------------------ */
   .rung {
     @apply flex items-center justify-between rounded border border-ink-700
            bg-ink-900 px-2.5 py-1.5 text-xs;
   }
+
+  /* --- log feed ---------------------------------------------------- */
+  /* --- a gutter mark per line keeps a wall of text scannable without
+     --- adding a DOM node per entry */
+  .log-line {
+    @apply relative pl-3;
+  }
+  .log-line::before {
+    content: "";
+    @apply absolute left-0 top-0 h-full w-px bg-ink-600;
+  }
 }
+
+/* --- Motion: the only moving thing on this page is the live dot. It is
+   --- defined outside @layer so it is never purged for being "unused". */
+@keyframes charon-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55);
+  }
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0);
+  }
+}
+
+/* --- A trader who has asked the OS to stop animating means it. */
+@media (prefers-reduced-motion: reduce) {
+  #statusPill[class*="text-live"]::before {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
+
