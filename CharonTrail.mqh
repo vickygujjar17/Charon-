@@ -6,7 +6,7 @@
 //|  already on the position.                                        |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.01"
+#property version   "1.02"
 
 #ifndef __CHARON_TRAIL__
 #define __CHARON_TRAIL__

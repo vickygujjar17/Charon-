@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.1.2**
+Current release: **v1.2.0**
 
 ---
 
@@ -368,8 +368,13 @@ Nothing moves a stop or opens a trade until you enable it.
 
 ## The dashboard (optional)
 
-Charon ships a local web panel. It is **off by default** and the EA is fully functional
-without it — enable `InpBridgeEnable` on the chart when you want it.
+Charon ships a local web panel. The EA is fully functional without it, and since v1.2.0
+the bridge publishes by default: `InpBridgeEnable` is `true` out of the box, so a freshly
+attached chart starts writing snapshots with no configuration. Set it to `false` to opt out.
+
+MetaTrader stores input values per chart, so a chart that was attached before v1.2.0 keeps
+whatever it saved — open its properties once and set `InpBridgeEnable` to `true`, or copy
+the saved `.set` file to other charts.
 
 ```powershell
 cd bridge
@@ -586,7 +591,8 @@ Use `_tools/bump_version.py` rather than editing version literals by hand.
   to drive. Validate on a demo account.
 - **The EA runs standalone.** The Python dashboard is optional. With
   `InpBridgeEnable = false` nothing writes to `Common\Files` and every trading feature
-  above works identically.
+  above works identically. It defaults to `true` since v1.2.0, so check that input
+  before wondering why a snapshot directory appeared.
 - **One bridge per terminal.** Snapshot names are per symbol, so several charts can run
   at once, but two bridge processes pointed at the same terminal would race on the
   command inbox.

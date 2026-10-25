@@ -7,6 +7,42 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
+## [1.2.0] - 2026-10-25
+
+A single-default release. No calculation, no wire format and no `SCHEMA_VERSION` (`2`) moves:
+a v1.1.2 EA and a v1.2.0 panel remain fully interchangeable. What changes is that the bridge
+publishes without being asked to.
+
+### Changed
+
+- **`InpBridgeEnable` now ships as `true`.** The EA writes its snapshot under
+  `Common\Files\Charon` and drains the command queue on attach, with no chart configuration.
+  This is the setting that made the v1.1.x bridge look broken on a fresh install: the panel
+  was up and `/api/status` returned `no Charon snapshot found` because a default-off EA had
+  never created the directory. Publishing state is now the stock behaviour and opting out is
+  the explicit act.
+
+### Notes
+
+- **Existing charts keep their saved value.** MetaTrader persists input values per chart and in
+  `.set`/`.tpl` templates, so the new default reaches only charts attached after the upgrade.
+  A chart that was already running will keep publishing with `false` until its inputs are set
+  to `true` once. The README documents this rather than implying the flip retrofits anything.
+
+### Added
+
+- **`_tools/bridge_doctor.ps1`** — a read-only diagnostic for the filesystem transport. It
+  reports the resolved bridge root, per-symbol snapshot ages (live / stale / offline), MT5
+  process and log recency, the bridge install and its version, listeners on 8000-9100, a
+  loopback `/api/health` probe, and the `InpBridgeEnable` default, then prints a verdict.
+  Written because "no Charon snapshot found" named neither the directory that was searched nor
+  the two-machine mistake that most often causes it.
+- **Startup now warns when no snapshot exists.** `_lifespan` emits a `WARNING` naming the
+  resolved bridge root, before `ensure_dirs()` runs, so it describes what the EA actually left
+  behind instead of a directory the bridge just created itself. The 503 body carries the same
+  directory and whether `Common` exists, and the dashboard footer renders the path the bridge
+  is reading so a cross-machine mismatch is visible without reading logs.
+
 ## [1.1.2] - 2026-10-25
 
 A packaging release with one breaking change and no change to trading behaviour: the wire

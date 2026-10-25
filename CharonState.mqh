@@ -7,7 +7,7 @@
 //|  the high-water mark and the latches for every live position.     |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.01"
+#property version   "1.02"
 
 #ifndef __CHARON_STATE__
 #define __CHARON_STATE__

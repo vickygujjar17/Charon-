@@ -798,10 +798,26 @@ async function loadHealth() {
     const health = await response.json();
     $("bridgeVersion").textContent = health.bridge_version || "—";
     $("schemaVersion").textContent = health.schema ?? "—";
+    // --- The footer path is the fastest answer to "why is every field
+    // --- empty?": it is the directory this process resolved, which is
+    // --- regularly not the one the terminal is publishing to. Tooltip
+    // --- carries the full pair; the visible text stays short.
+    const locations = health.locations || {};
+    const root = locations.bridge_root || "—";
+    const rootEl = $("bridgeRoot");
+    rootEl.textContent = root;
+    rootEl.title = "common files: " + (locations.common_files || "?") +
+      " [" + (locations.common_exists || "?") + "]" +
+      " / bridge root [" + (locations.root_exists || "?") + "]";
+    rootEl.className = locations.root_exists === "yes"
+      ? "text-shade-300"
+      : "text-shade-300 underline decoration-dotted";
   } catch {
     /* health is decorative; the status poll is what matters */
     $("bridgeVersion").textContent = "—";
     $("schemaVersion").textContent = "—";
+    $("bridgeRoot").textContent = "—";
+    $("bridgeRoot").title = "";
   }
 }
 

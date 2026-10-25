@@ -44,7 +44,32 @@ Verified on Python 3.14 with `fastapi 0.162.0` and `uvicorn 0.54.0`.
   and apply cannot replay it, and nothing is ever deleted.
 * Every command carries `issued` (epoch seconds). The EA refuses anything more than
   **60s** away from its own clock, so a file left on disk and reused later is inert.
-* `schema` must match `CHARON_BRIDGE_SCHEMA` (currently `1`) on both sides.
+* `schema` must match `CHARON_BRIDGE_SCHEMA` (currently `2`) on both sides.
+
+### Both ends must share a host
+
+There is no network protocol here. The EA writes with `FILE_COMMON` and Python reads the
+resulting directory with `pathlib`; **the transport is the filesystem**. That constrains
+where the bridge may run:
+
+> The bridge and the terminal must see the *same* directory on the *same* machine.
+
+The failure mode when they do not is quiet, which is why it is written down. On a Linux
+VPS there is no `%APPDATA%` and no Wine prefix, so `paths.common_files_dir()` falls through
+to `~/MetaQuotes/Terminal/Common/Files`. `ensure_dirs()` then **creates** that directory,
+so the bridge boots cleanly, `/api/health` answers, and every read finds nothing. The
+dashboard reports "no Charon snapshot found" and no log line anywhere says why.
+
+Two consequences worth knowing before choosing a deployment shape:
+
+* **Clock skew breaks commands, not snapshots.** The EA compares `issued` against
+  `TimeLocal()` within ±60s. A UTC server writing commands for a UTC+5:30 terminal rejects
+  every one of them as `stale command (19800s old)`.
+* **A sync client is a workaround, not a transport.** Syncing the folder both ways adds
+  latency to a 1-second control loop and can surface conflict copies mid-rename.
+
+Run `_tools\bridge_doctor.ps1` to see the resolved paths, whether the terminal is up, the
+snapshot ages, what is listening, and the `InpBridgeEnable` default — read-only, one screen.
 
 ## Endpoints
 
@@ -73,6 +98,29 @@ in your shell before `python main.py`.
 | `CHARON_PORT` | `8787` | listen port, used when you start with `python main.py` |
 | `CHARON_TOKEN` | _unset_ | when set, `/api/*` requires `X-Charon-Token` |
 | `CHARON_COMMON_DIR` | auto | override the terminal's `Common\Files` path |
+
+### Exposing it beyond loopback
+
+`CHARON_HOST` defaults to loopback for a reason. If you put a tunnel in front of this
+bridge, read this first.
+
+`CHARON_TOKEN` is honoured only via the `X-Charon-Token` **header**. The dashboard's
+`EventSource` log tail cannot send headers at all, and `app.js` never sets one, so a token
+on a browser-facing bridge locks out the UI it was meant to protect. The practical
+consequence: **an unset token plus a public tunnel is an unauthenticated trading control
+panel.** Anyone with the URL can `POST /api/order`, `/api/order/modify`, `/api/order/cancel`,
+`/api/pyramid/arm` and `/api/trail` on whatever account the chart is attached to.
+
+Put the authentication at the edge instead, where it also covers the websocket-less
+`EventSource`:
+
+```powershell
+ngrok http 8787 --basic-auth "operator:a-long-passphrase"
+```
+
+Check the port. The bridge binds **8787**; a tunnel aimed at `8000` returns `502` no matter
+how healthy the bridge is.
+
 
 `/api/health` and `/api/logs` stay unauthenticated: a supervisor needs the first, and an
 `EventSource` cannot send custom headers for the second. Neither exposes account data.

@@ -9,7 +9,7 @@
 //|  Run it on any chart. The verdict line is "SELFTEST RESULT: ..." |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.01"
+#property version   "1.02"
 #property script_show_inputs
 
 //--- Same angle-include contract as Charon.mq5: headers live in Include\Charon\.

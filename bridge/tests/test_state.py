@@ -134,3 +134,26 @@ def test_env_override_wins(monkeypatch, tmp_path) -> None:
     target.mkdir()
     monkeypatch.setenv(paths.ENV_OVERRIDE, str(target))
     assert paths.common_files_dir() == target
+
+
+def test_without_appdata_or_wine_it_falls_back_to_home(monkeypatch) -> None:
+    """Pins the behaviour that made a split deployment look like an empty EA.
+
+    With no ``%APPDATA%`` and no Wine prefix -- a bare Linux container or VPS --
+    the resolver lands on ``~/MetaQuotes/Terminal/Common/Files``, which no
+    terminal is writing to. ``ensure_dirs()`` then *creates* ``Charon`` there,
+    so the directory exists, the bridge starts cleanly, and every read finds
+    nothing. The symptom is "no snapshot found" with no error anywhere.
+
+    This is not a bug to fix -- there is no remote transport to fix it with --
+    but the fallback must stay deliberate and visible rather than accidental.
+    """
+    monkeypatch.delenv(paths.ENV_OVERRIDE, raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setattr(paths, "_appdata_candidates", lambda: [])
+
+    assert paths.common_files_dir() == (
+        Path.home() / "MetaQuotes" / "Terminal" / "Common" / "Files"
+    )
+    assert paths.bridge_root().name == paths.ROOT_NAME
+

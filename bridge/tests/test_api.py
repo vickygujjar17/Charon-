@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,24 @@ def test_status_503_when_no_snapshot(client: TestClient) -> None:
     response = client.get("/api/status")
     assert response.status_code == 503
     assert "InpBridgeEnable" in response.json()["detail"]
+
+
+def test_status_503_names_the_directory_it_searched(client: TestClient, common_dir: Path) -> None:
+    """A bare "no snapshot found" hides the only fact worth having.
+
+    The operator needs the absolute path this process resolved, because the
+    usual fault is that it is not the path the terminal is writing to.
+    """
+    detail = client.get("/api/status").json()["detail"]
+    assert str(common_dir / "Charon") in detail
+    assert "InpBridgeEnable" in detail
+
+
+def test_health_locations_survive_a_missing_root(client: TestClient, common_dir: Path) -> None:
+    """``/api/health`` must answer before the EA has ever published."""
+    locations = client.get("/api/health").json()["locations"]
+    assert locations["bridge_root"] == str(common_dir / "Charon")
+    assert locations["common_exists"] == "yes"
 
 
 def test_status_picks_the_only_symbol_without_a_query(client: TestClient, write_snapshot) -> None:
@@ -300,4 +319,39 @@ def test_trade_endpoint_points_at_the_order_endpoint(client: TestClient) -> None
     body = client.post("/api/trade").json()
     assert "order_open" in body["allowed_verbs"]
     assert "open" not in body["allowed_verbs"]
+
+
+def test_startup_warns_on_the_console_when_nothing_is_publishing(
+    common_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The startup diagnosis must reach stderr, not just the HTTP ring buffer.
+
+    This is the gap that hid the split-deployment fault: ``charon_bridge.logs``
+    is only readable over ``/api/logs``, and only while the process is up. An
+    operator watching uvicorn saw a clean boot and no reason to suspect the
+    path. ``caplog`` captures exactly what the console handler would receive.
+    """
+    from charon_bridge.logs import LOG
+
+    before = LOG.latest_seq
+    with caplog.at_level(logging.WARNING, logger="charon.bridge"):
+        with TestClient(main.app):
+            pass
+
+    assert any(str(common_dir / "Charon") in rec.getMessage() for rec in caplog.records), (
+        "the resolved bridge root must appear in the startup warning"
+    )
+    assert any(rec.levelno == logging.WARNING for rec in caplog.records)
+    assert any(str(common_dir / "Charon") in e.message for e in LOG.since(before))
+
+
+def test_startup_stays_quiet_when_a_snapshot_is_present(
+    write_snapshot, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A healthy deployment must not be nagged at every boot."""
+    write_snapshot()
+    with caplog.at_level(logging.WARNING, logger="charon.bridge"):
+        with TestClient(main.app):
+            pass
+    assert not [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
 

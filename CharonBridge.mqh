@@ -30,7 +30,7 @@
 //|  nothing here is required for trading, risk or stops.             |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.01"
+#property version   "1.02"
 
 #ifndef __CHARON_BRIDGE__
 #define __CHARON_BRIDGE__

@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -52,6 +53,24 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 # --- a single-user desktop, and the README says exactly that.
 TOKEN_ENV = "CHARON_TOKEN"
 
+# --- stdlib logger for the console. ``LOG`` is the dashboard's in-memory
+# --- ring buffer: it is only reachable over HTTP and it is wiped on every
+# --- restart, which is exactly useless for the question "which directory is
+# --- this process actually reading?". That answer has to reach stderr, where
+# --- whoever started uvicorn is already looking.
+logger = logging.getLogger("charon.bridge")
+
+
+def _announce(level: str, message: str) -> None:
+    """Record a startup fact in the ring buffer *and* on the console.
+
+    Both destinations matter and neither substitutes for the other: the ring
+    buffer is what the dashboard tail shows while the bridge is up, the
+    stdlib logger is what survives in the terminal transcript afterwards.
+    """
+    getattr(LOG, level)(message)
+    getattr(logger, "warning" if level in ("warn", "error") else "info")(message)
+
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -61,15 +80,29 @@ async def _lifespan(_app: FastAPI):
     deprecated and emits a ``DeprecationWarning`` on every boot.
     """
     where = state.locate()
-    LOG.info(f"Charon bridge {BRIDGE_VERSION} (schema {SCHEMA_VERSION})")
-    LOG.info(f"common files: {where['common_files']} [{where['common_exists']}]")
-    LOG.info(f"bridge root : {where['bridge_root']} [{where['root_exists']}]")
+    _announce("info", f"Charon bridge {BRIDGE_VERSION} (schema {SCHEMA_VERSION})")
+    _announce("info", f"common files: {where['common_files']} [{where['common_exists']}]")
+    _announce("info", f"bridge root : {where['bridge_root']} [{where['root_exists']}]")
     if not mt5_adapter.available():
-        LOG.info("MetaTrader5 package absent - dashboard reads the EA snapshot only")
+        _announce("info", "MetaTrader5 package absent - dashboard reads the EA snapshot only")
+
+    # --- Checked *before* ensure_dirs(), so the answer describes what the EA
+    # --- left behind rather than what this process just created. The
+    # --- directory is a poor liveness signal anyway -- the bridge makes it by
+    # --- existing -- so the durable test is whether any snapshot is in it.
+    if not state.discover_symbols():
+        _announce(
+            "warn",
+            f"no snapshot in {where['bridge_root']} - nothing is publishing here. "
+            "Set InpBridgeEnable=true and attach Charon to a chart, or point "
+            f"{paths.ENV_OVERRIDE} at the terminal's Common\\Files folder. If the "
+            "terminal runs on another machine, this process cannot see it: the "
+            "EA publishes to a local folder, not over the network.",
+        )
     try:
         paths.ensure_dirs()
     except OSError as exc:
-        LOG.error(f"could not create bridge directories: {exc}")
+        _announce("error", f"could not create bridge directories: {exc}")
     yield
 
 
@@ -107,10 +140,17 @@ def _symbol_or_404(symbol: str | None) -> str:
         return paths.sanitize_symbol(symbol)
     found = state.discover_symbols()
     if not found:
+        # --- Name the directory that was searched. "no snapshot found" sends
+        # --- an operator looking at the chart; "no snapshot in <path>" sends
+        # --- them at the one thing that is usually wrong -- the path, or the
+        # --- fact that the terminal is on a different machine entirely.
+        where = state.locate()
         raise HTTPException(
             status_code=503,
             detail=(
-                "no Charon snapshot found. Enable InpBridgeEnable on the chart, "
+                f"no Charon snapshot found in {where['bridge_root']} "
+                f"(common files {where['common_exists']}). "
+                "Enable InpBridgeEnable on the chart, "
                 f"or set {paths.ENV_OVERRIDE} to the terminal's Common\\Files folder."
             ),
         )

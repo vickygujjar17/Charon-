@@ -89,7 +89,7 @@ const IDS = ["banner", "statusPill", "ageLabel", "latencyLabel", "lastGoodLabel"
   "basketDir", "basketLegs", "basketAvg", "basketLot", "ladder", "pyramidTrigger",
   "armState", "armCountdown", "armBtn", "armHint", "armMsg", "disarmBtn",
   "trailSelect", "trailMsg", "legRows", "noLegs", "logBox",
-  "bridgeVersion", "schemaVersion",
+  "bridgeVersion", "schemaVersion", "bridgeRoot",
   // --- new order panel (v1.1.0)
   "tagline", "orderStatus", "orderSide", "orderType", "orderEntry", "orderRisk",
   "orderBlockTop", "orderBlockBottom", "orderTrail", "orderRung",
@@ -130,7 +130,20 @@ const snapshot = {
 function fetchStub(url) {
   calls.push(url);
   const body = url.includes("/api/health")
-    ? { ok: true, bridge_version: "1.0.4", schema: 1 }
+    ? {
+        ok: true,
+        bridge_version: "1.0.4",
+        schema: 1,
+        // --- the real /api/health always carries this; the client renders
+        // --- the resolved path from it, so the stub must not omit it.
+        locations: {
+          common_files: "/tmp/common/Files",
+          bridge_root: "/tmp/common/Files/Charon",
+          common_exists: "yes",
+          root_exists: "yes",
+        },
+        symbols: ["GBPUSD"],
+      }
     : snapshot;
   return Promise.resolve({
     ok: true,
