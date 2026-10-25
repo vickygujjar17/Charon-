@@ -13,7 +13,7 @@
 //|  target and optionally trails / pyramids.                        |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.02"
+#property version   "1.03"
 #property link      "https://github.com/vickygujjar17/Charon-.git"
 
 #ifndef __CHARON_DEFINES__
@@ -24,7 +24,7 @@
 //| _tools/bump_version.py rewrites this literal and every other     |
 //| version string in the repository in one pass.                    |
 //+------------------------------------------------------------------+
-#define CHARON_VERSION        "1.2.0"
+#define CHARON_VERSION        "1.3.0"
 #define CHARON_NAME           "Charon"
 #define CHARON_REPO           "https://github.com/vickygujjar17/Charon-.git"
 

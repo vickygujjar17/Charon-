@@ -35,10 +35,19 @@ Verified on Python 3.14 with `fastapi 0.162.0` and `uvicorn 0.54.0`.
 ```
 %APPDATA%\MetaQuotes\Terminal\Common\Files\Charon\
   state_<SYMBOL>.json          EA -> Python, once per timer tick
-  commands\*.json              Python -> EA, drained one per tick
-  commands\processed\*.json    audit trail: ok_* / rejected_*
+  commands\<SYMBOL>\*.json     Python -> EA, drained one per tick
+  commands\<SYMBOL>\processed\ audit trail: ok_* / rejected_*
+  commands\*.json              legacy flat inbox (pre-v1.3.0 EAs only)
 ```
 
+* Every chart owns its own inbox. Before v1.3.0 all charts on a terminal drained one
+  shared folder, so each could retire a command meant for another: the `symbol` field
+  stopped it being *applied*, but the file had already moved to `processed\` and the
+  rightful chart never saw it again. Per-symbol folders remove the race entirely.
+* The bridge writes to the flat inbox until that chart's subfolder exists, so upgrading
+  Python and the EA separately is safe. The subfolder is created by the EA in `Init()`
+  and never by the bridge -- if the bridge created it, its own probe would always
+  succeed and commands for an older EA would be routed into a folder nothing reads.
 * Both directions write a temp file then rename, so a reader never sees a fragment.
 * A command is renamed into `processed\` **before** it is applied. A crash between read
   and apply cannot replay it, and nothing is ever deleted.
@@ -63,8 +72,12 @@ dashboard reports "no Charon snapshot found" and no log line anywhere says why.
 Two consequences worth knowing before choosing a deployment shape:
 
 * **Clock skew breaks commands, not snapshots.** The EA compares `issued` against
-  `TimeLocal()` within ±60s. A UTC server writing commands for a UTC+5:30 terminal rejects
-  every one of them as `stale command (19800s old)`.
+  `TimeLocal()` within ±60s, so they must be stamped on the *local* clock. This was a
+  real bug through v1.2.0: the bridge stamped a UTC epoch second, so on a UTC+5:30
+  terminal every command was refused as `future-dated command (19800s ahead)` and the
+  dashboard was silently inert. v1.3.0 derives the stamp through
+  `time.localtime()`/`calendar.timegm()` so it tracks the host's offset, DST included,
+  and `tests/test_commands.py` pins it against the EA's own comparison.
 * **A sync client is a workaround, not a transport.** Syncing the folder both ways adds
   latency to a 1-second control loop and can surface conflict copies mid-rename.
 
@@ -135,8 +148,10 @@ charon_bridge/
   schema.py              the wire contract + the verb whitelist
   state.py               reads the snapshot, decides live / stale / offline
   commands.py            atomic writes, FIFO names, audit trail
+  symbols.py             broker name <-> display label, symbol resolution
+  reconcile.py           which open positions no live chart accounts for
   logs.py                ring buffer behind the SSE tail
-  mt5_adapter.py         optional read-only terminal diagnostic
+  mt5_adapter.py         optional read-only terminal diagnostic + account listing
 src/
   input.css              Tailwind source, compiled into static/tailwind.css
 static/
@@ -144,7 +159,7 @@ static/
   app.js                 rendering; never computes a price
   favicon.svg            the obol mark, high contrast at 16px
   tailwind.css           prebuilt - no CDN, works offline
-tests/                   168 pytest tests
+tests/                   232 pytest tests + a DOM harness for the client
   conftest.py            synthetic EA snapshot in the real wire format
   fake_ea.py             stand-in EA: drains the inbox like CCharonBridge
   test_integration.py    real uvicorn + fake EA across the file bridge

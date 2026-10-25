@@ -9,12 +9,11 @@ bridge copies them through untouched.
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 from charon_bridge import commands
 from charon_bridge.schema import Snapshot, build_order_intent
-from tests.fake_ea import SCHEMA, FakeEA
+from tests.fake_ea import SCHEMA, FakeEA, local_epoch
 
 
 
@@ -88,7 +87,7 @@ def test_ea_refuses_a_ticket_the_bridge_forgot_to_validate(common_dir: Path) -> 
         "id": "hand-edited",
         "verb": "order_open",
         "symbol": ea.symbol,
-        "issued": int(time.time()),
+        "issued": local_epoch(),
         "side": "BUY",
         "order_type": "MARKET",
         "block_top": 1.25,          # inverted for a BUY
@@ -106,7 +105,7 @@ def test_ea_refuses_an_order_verb_with_an_unknown_side(common_dir: Path) -> None
     ea = FakeEA(common_dir)
     (ea.inbox / "00000000000000000002-000002-bad.json").write_text(json.dumps({
         "schema": SCHEMA, "id": "no-side", "verb": "order_cancel",
-        "symbol": ea.symbol, "issued": int(time.time()), "ticket": 5,
+        "symbol": ea.symbol, "issued": local_epoch(), "ticket": 5,
         "side": "LONG",
     }), encoding="utf-8")
     verdict = ea.poll()

@@ -7,6 +7,90 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
+## [1.3.0] - 2026-10-25
+
+A correctness release with two features on top. The headline is a bug that made the
+dashboard silently inert on any host whose clock is not UTC: **every** command was
+refused by the EA, and nothing in the panel said so.
+
+No wire-format change — `SCHEMA_VERSION` stays `2` — but the file *layout* changes, in a
+way that keeps a v1.2.0 EA working. See Notes.
+
+### Fixed
+
+- **`issued` was a UTC epoch second while the EA compares against `TimeLocal()`.** The
+  two differ by the host's UTC offset, so on a UTC+5:30 machine every `arm`, `trail_mode`,
+  `order_*` and `order_cancel` was stamped 19800 s in the past relative to the EA's clock
+  — 330× the 60 s tolerance. The EA retired each one as
+  `rejected_… future-dated command (19800s ahead)`, so the panel reported "queued", the
+  inbox emptied, and nothing happened. `commands.local_epoch()` now derives the stamp
+  through `time.localtime()` → `calendar.timegm()`, which follows the host's offset
+  including DST crossings and needs no `tm_gmtoff`.
+- **The EA stand-in in the test-suite compared against UTC too**, which is why the bug
+  shipped green. `tests/fake_ea.py` now mirrors `TimeLocal()`, and
+  `test_submitted_issued_is_accepted_by_the_eas_clock` re-derives the EA's verdict from
+  the written file. On a UTC host the bug is unobservable; on this one the test fails by
+  exactly 19800 s.
+
+### Added
+
+- **Per-symbol command inboxes.** `commands\<SYMBOL>\` and its `processed\`. Before this,
+  every chart on a terminal drained one shared folder: a chart that picked up a command
+  meant for another chart did not apply it (the `symbol` field stopped that) but had
+  already retired it into `processed\`, so the rightful chart never saw it. The MQL5 side
+  creates the folder in `Init()`; `SafeName()` mirrors `paths.sanitize_symbol()` exactly,
+  and `tests/test_symbol_names.py` parses the EA self-test's own fixtures so the two
+  cannot drift.
+- **Searchable symbol picker** (`GET /api/symbols`, `charon_bridge/symbols.py`). Merges the
+  charts the EA is publishing with the instruments the terminal lists, and shows a short
+  label while sending the exact broker name. `resolve()` returns `None` on ambiguity
+  rather than guessing between two broker names that collapse to one label.
+  `CHARON_SYMBOL_PREFIX` / `CHARON_SYMBOL_SUFFIX` configure the decoration; they are
+  display-only by construction.
+- **Unmanaged-position detection** (`GET /api/unmanaged`, `charon_bridge/reconcile.py`).
+  Lists open positions no live Charon chart accounts for, with two verdicts:
+  `not_tracked_by_ea` (a live chart on that symbol is publishing, and the ticket is absent
+  from its legs — needs 3 consecutive confirmations) and `no_charon_on_symbol` (nothing is
+  publishing that symbol, so it can never be managed — reported immediately).
+- **`422` pre-flight on `POST /api/order` and `/api/order/modify`.** A ticket for a symbol
+  with no live snapshot is refused before it is written, instead of queueing a file no
+  chart can drain. Shape errors are still reported first, because "risk_pct must be
+  positive" is more actionable than "no chart".
+- **Read-only account listing in `mt5_adapter`.** `symbols()` and `positions()` back the two
+  new endpoints, both behind one module-level lock because the MetaTrader5 package is not
+  thread-safe — and `describe()` now takes the same lock, closing a race that already
+  existed. The permitted `_mt5.*` calls are a closed allow-list a test enforces, rather
+  than a blocklist of four forbidden names that a novel call would slip past.
+
+
+### Changed
+
+- **`/api/commands` reads the union of both layouts.** Without that, every command queued
+  by a v1.2.0 EA would vanish from the panel the moment the bridge was upgraded, and stay
+  invisible until something drained it.
+- **The UI's unmanaged panel is deliberately independent of the transport banner.** The
+  banner reports whether the bridge is talking; the panel reports whether the account
+  holds something Charon is not managing. Sharing one would let a healthy transport cover
+  for an unmanaged position.
+
+### Notes
+
+- **Upgrading is safe in either order.** The bridge writes to the flat inbox until that
+  chart's subfolder exists, so a v1.2.0 EA keeps working with a v1.3.0 bridge. The
+  subfolder is created by the EA and never by the bridge: if the bridge created it, its
+  own probe would always succeed and every command for an un-upgraded EA would be routed
+  into a folder nothing reads.
+- **`summary.state` is not a boolean.** `ok` means every chart was checked; `unknown`
+  means a chart is stale or still starting, so an absence proves nothing; `unavailable`
+  means nothing could be checked at all. Only `ok` with no rows is an all-clear, and a
+  starting EA's empty legs array is treated as *absent* rather than as "no positions" —
+  otherwise a terminal restart would fire alerts about Charon's own trades.
+- **`InpMagicFilter = 0` still adopts every position on the chart's symbol.** The
+  unmanaged panel cannot see those, because the EA does treat them as its own. Use a
+  specific magic on a busy account.
+- Existing charts keep their saved `InpBridgeEnable`; a chart attached before v1.2.0 still
+  needs its inputs touched once.
+
 ## [1.2.0] - 2026-10-25
 
 A single-default release. No calculation, no wire format and no `SCHEMA_VERSION` (`2`) moves:

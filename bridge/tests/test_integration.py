@@ -30,11 +30,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from tests.fake_ea import SCHEMA, FakeEA
+from tests.fake_ea import SCHEMA, FakeEA, local_epoch
 
 BRIDGE_DIR = Path(__file__).resolve().parent.parent
 
@@ -97,9 +98,9 @@ def ea(common_dir: Path) -> FakeEA:
     return fake
 
 
-@pytest.fixture()
-def bridge(common_dir: Path, ea: FakeEA):
-    """A real uvicorn process, pointed at the throwaway Common\\\\Files tree."""
+@contextmanager
+def _serve(common_dir: Path):
+    """A real uvicorn process, pointed at a throwaway Common\\Files tree."""
     port = _free_port()
     process = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "main:app",
@@ -121,6 +122,25 @@ def bridge(common_dir: Path, ea: FakeEA):
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             process.kill()
+
+
+@pytest.fixture()
+def bridge(common_dir: Path, ea: FakeEA):
+    """A real uvicorn process, pointed at the throwaway Common\\\\Files tree."""
+    with _serve(common_dir) as client:
+        yield client
+
+
+@pytest.fixture()
+def bare_bridge(common_dir: Path):
+    """The same server, with **no** v1.3.0 EA having touched the tree.
+
+    Needed to simulate a pre-v1.3.0 install: the only thing that distinguishes
+    a new EA from an old one is the existence of ``commands\\<SYMBOL>``, so a
+    fixture that pre-creates it would make every such test meaningless.
+    """
+    with _serve(common_dir) as client:
+        yield client
 
 
 #+------------------------------------------------------------------+
@@ -160,6 +180,81 @@ def test_disarm_travels_the_loop_and_cancels_the_arm(bridge: Client, ea: FakeEA)
     verdicts = ea.drain(limit=1)
     assert [v["accepted"] for v in verdicts] == [True]
     assert ea.armed is False
+
+
+#+------------------------------------------------------------------+
+#| Upgrading one half at a time                                     |
+#|                                                                  |
+#|  The v1.3.0 layout moves commands into per-symbol folders. The    |
+#|  risk is a half-upgraded install where the bridge writes somewhere |
+#|  the running EA never looks -- which fails silently, exactly like  |
+#|  the clock bug. These pin both orders.                             |
+#+------------------------------------------------------------------+
+def test_a_v1_2_ea_still_receives_commands_from_a_v1_3_bridge(
+    bare_bridge: Client, common_dir: Path,
+) -> None:
+    """A pre-v1.3.0 EA only drains the flat inbox. It must keep working."""
+    legacy = FakeEA(common_dir, legacy=True)
+    legacy.publish()
+
+    status, body = bare_bridge.post("/api/pyramid/arm")
+    assert status == 200, body
+
+    # --- it landed where the old EA actually looks
+    assert (legacy.inbox / body["command"]["file"]).is_file()
+
+    verdicts = legacy.drain(limit=1)
+    assert [v["accepted"] for v in verdicts] == [True], verdicts
+    assert legacy.armed is True
+
+    # --- and the dashboard reports it, reading the legacy archive too
+    status, commands = bare_bridge.get("/api/commands")
+    assert status == 200
+    accepted = [e for e in commands["processed"] if e["verdict"] == "accepted"]
+    assert accepted, "the legacy EA's verdict vanished from /api/commands"
+
+
+def test_a_v1_3_ea_receives_commands_in_its_own_folder(
+    bridge: Client, common_dir: Path,
+) -> None:
+    """Once the EA has made its inbox, commands go there and nowhere else."""
+    scoped = FakeEA(common_dir)          # Init() creates commands\<SYMBOL>
+    scoped.publish()
+
+    status, body = bridge.post("/api/pyramid/arm")
+    assert status == 200, body
+    name = body["command"]["file"]
+
+    assert (scoped.inbox / name).is_file()
+    assert not (common_dir / "Charon" / "commands" / name).exists(), (
+        "the command was also left in the flat inbox, where another chart could "
+        "retire it"
+    )
+
+    verdicts = scoped.drain(limit=1)
+    assert [v["accepted"] for v in verdicts] == [True], verdicts
+    assert scoped.armed is True
+
+
+def test_commands_queued_before_the_upgrade_are_still_listed(
+    bridge: Client, ea: FakeEA, common_dir: Path,
+) -> None:
+    """The union read: old flat-inbox work must not disappear from the panel.
+
+    Without it an upgrade *looks* like it lost the queue, and the operator
+    has no way to tell that from the commands having been consumed.
+    """
+    flat = common_dir / "Charon" / "commands"
+    flat.mkdir(parents=True, exist_ok=True)
+    (flat / "00000000000000000001-000001-old.json").write_text(json.dumps({
+        "schema": SCHEMA, "id": "pre-upgrade", "verb": "arm", "symbol": "EURUSD",
+        "issued": local_epoch(),
+    }), encoding="utf-8")
+
+    status, commands = bridge.get("/api/commands")
+    assert status == 200
+    assert "00000000000000000001-000001-old.json" in commands["pending"]
+
 
 
 def test_trail_mode_command_changes_the_ea_mode(bridge: Client, ea: FakeEA) -> None:
@@ -208,7 +303,7 @@ def test_backdated_command_is_rejected_and_logged(bridge: Client, ea: FakeEA) ->
         "id": "stale-command",
         "verb": "arm",
         "symbol": ea.symbol,
-        "issued": int(time.time()) - 600,      # ten minutes old
+        "issued": local_epoch() - 600,      # ten minutes old
     }), encoding="utf-8")
 
     verdicts = ea.drain(limit=1)
@@ -227,7 +322,7 @@ def test_backdated_command_is_rejected_and_logged(bridge: Client, ea: FakeEA) ->
 def test_future_dated_command_is_rejected(ea: FakeEA) -> None:
     (ea.inbox / "00000000000000000002-000002-future.json").write_text(json.dumps({
         "schema": SCHEMA, "id": "future", "verb": "arm", "symbol": ea.symbol,
-        "issued": int(time.time()) + 600,
+        "issued": local_epoch() + 600,
     }), encoding="utf-8")
 
     verdict = ea.poll()
@@ -241,7 +336,7 @@ def test_wrong_symbol_command_is_rejected(ea: FakeEA) -> None:
     """The EA targets exactly one symbol: its own."""
     (ea.inbox / "00000000000000000003-000003-eurusd.json").write_text(json.dumps({
         "schema": SCHEMA, "id": "wrong-symbol", "verb": "arm", "symbol": "EURUSD",
-        "issued": int(time.time()),
+        "issued": local_epoch(),
     }), encoding="utf-8")
 
     verdict = ea.poll()
@@ -256,7 +351,7 @@ def test_poison_command_does_not_block_the_inbox(ea: FakeEA) -> None:
         "{ this is not json", encoding="utf-8")
     (ea.inbox / "00000000000000000009-000009-arm.json").write_text(json.dumps({
         "schema": SCHEMA, "id": "good", "verb": "arm", "symbol": ea.symbol,
-        "issued": int(time.time()),
+        "issued": local_epoch(),
     }), encoding="utf-8")
 
     first = ea.poll()

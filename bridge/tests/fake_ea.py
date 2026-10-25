@@ -15,11 +15,16 @@ obvious place to land here too:
 
 * ``NextPending()``     -> oldest name by a case-insensitive lexicographic sort.
 * ``ReadCommandFile()`` -> verb whitelist, symbol check, schema check, then the
-                           +/-60s anti-replay window.
+                           +/-60s anti-replay window **against the local
+                           clock**, because ``Poll()`` compares ``issued`` to
+                           ``(long)TimeLocal()``.
 * ``Poll()``            -> read, **retire before applying**, one per call,
                            invalid files retired too (no head-of-line block).
 * ``Retire()``          -> rename into ``processed/`` prefixed ``ok_`` or
                            ``rejected_``.
+* ``Init()``            -> creates ``commands\\<SYMBOL>`` and drains only that
+                           folder; ``legacy=True`` keeps the pre-v1.3.0 flat
+                           inbox instead, for the routing tests.
 
 What it is not
 --------------
@@ -30,6 +35,7 @@ proves the *plumbing*, and the CHANGELOG says so plainly.
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import time
@@ -39,6 +45,20 @@ from typing import Any
 # --- mirrors CHARON_BRIDGE_SCHEMA / CHARON_BRIDGE_CMD_MAX_AGE in CharonBridge.mqh
 SCHEMA = 2
 CMD_MAX_AGE = 60
+
+
+def local_epoch(now: float | None = None) -> int:
+    """``(long)TimeLocal()`` -- the clock ``ReadCommandFile`` compares against.
+
+    Not ``time.time()``. ``TimeLocal`` is the terminal host's wall clock,
+    while ``time.time()`` is UTC; on a UTC+5:30 terminal the two differ by
+    19800 seconds, which is 330 times the 60-second tolerance. A harness
+    that used the UTC epoch would accept every command the real EA rejects,
+    and this file exists precisely so that gap cannot hide.
+    """
+    seconds = time.time() if now is None else now
+    return calendar.timegm(time.localtime(seconds))
+
 
 # --- mirrors CCharonBridge::VerbAllowed(). Adding one is a security decision.
 ALLOWED_VERBS = ("arm", "disarm", "trail_mode", "ping",
@@ -58,16 +78,24 @@ TRAIL_MODE_NAMES = {
 class FakeEA:
     """Drains the command inbox the way the EA does, and publishes state."""
 
-    def __init__(self, common_dir: Path, symbol: str = "GBPUSD") -> None:
+    def __init__(self, common_dir: Path, symbol: str = "GBPUSD",
+                 legacy: bool = False) -> None:
         self.common_dir = Path(common_dir)
         self.symbol = symbol
+        self.legacy = legacy
 
         # --- mirrored from CHARON_BRIDGE_ROOT / _CMD_DIR / _DONE_DIR
         self.root = self.common_dir / "Charon"
-        self.inbox = self.root / "commands"
+        self.commands_root = self.root / "commands"
+        # --- a v1.3.0 EA drains commands\<SYMBOL> and nothing else; the
+        # --- pre-v1.3.0 one drained the flat folder. ``legacy`` selects the
+        # --- old behaviour so the routing handshake can be tested.
+        self.inbox = self.commands_root if legacy else self.commands_root / symbol
         self.processed = self.inbox / "processed"
         self.state_file = self.root / f"state_{symbol}.json"
 
+        # --- mirror Init(): the EA creates its own inbox. The bridge treats
+        # --- this folder's existence as "this EA speaks per-symbol".
         self.processed.mkdir(parents=True, exist_ok=True)
 
         # --- the EA's own view of the world, changed only by applied commands
@@ -136,7 +164,7 @@ class FakeEA:
         issued = document.get("issued")
         if not isinstance(issued, (int, float)):
             return document, False, "missing issued timestamp"
-        age = int(time.time()) - int(issued)
+        age = local_epoch() - int(issued)
         if age > CMD_MAX_AGE:
             return document, False, f"stale command ({age}s old)"
         if age < -CMD_MAX_AGE:

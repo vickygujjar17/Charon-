@@ -58,6 +58,14 @@
           Attended execution. The EA derives every stop, size and R multiple.
         </p>
       </div>
+
+      <!-- Symbol chooser. Shown only once there is more than one symbol to
+           choose between: a one-option dropdown is pure noise. The value is
+           always the exact broker name, never the display label. -->
+      <div id="symbolPicker" class="hidden items-baseline gap-2">
+        <label for="symbolSelect" class="label">Chart</label>
+        <select id="symbolSelect" class="ticket-field"></select>
+      </div>
     </div>
 
     <!-- Status cluster: receipts about the transport, not about the market. -->
@@ -152,6 +160,18 @@
       </div>
 
       <div class="grid gap-3 px-4 py-3 md:grid-cols-4">
+        <label class="block">
+          <span class="label">Symbol</span>
+          <!-- The datalist offers the known names but does not restrict the
+               field: a broker can list an instrument the bridge cannot see,
+               and refusing a typo-free name would be worse than accepting it.
+               Whatever is typed here is sent verbatim -- it is the exact
+               broker name, not a display label. -->
+          <input id="orderSymbol" list="symbolOptions" placeholder="exact broker name"
+                 class="ticket-field mt-1" autocomplete="off" spellcheck="false" />
+          <datalist id="symbolOptions"></datalist>
+        </label>
+
         <label class="block">
           <span class="label">Direction</span>
           <select id="orderSide" class="ticket-field mt-1">
@@ -254,6 +274,46 @@
         <button id="orderCancelBtn" class="btn-danger">Cancel ticket</button>
       </div>
       <div class="px-4 pb-3 text-[11px] text-shade-400" id="orderMsg"></div>
+    </section>
+
+    <!-- ================= UNMANAGED POSITIONS =================
+         Deliberately its own block, not the transport banner. The banner
+         reports whether the *bridge* is talking; this reports whether the
+         *account* contains something Charon is not managing. Sharing a
+         banner would mean a healthy transport silently covers for an
+         unmanaged position, which is exactly the case worth shouting about.
+
+         Three states, and the difference is the whole point:
+           ok          - checked and clean, or a confirmed list
+           unknown     - some chart is stale/starting, so absence proves nothing
+           unavailable - no charts, or the MT5 package is not installed
+         Only "ok" with no rows may ever read as all clear. -->
+    <section id="unmanagedPanel" class="panel mt-4 hidden">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2.5">
+        <div class="flex items-center gap-2">
+          <h2 class="mark">Unmanaged positions</h2>
+          <span id="unmanagedBadge" class="pill bg-ink-700 text-shade-300">checking</span>
+        </div>
+        <span id="unmanagedSummary" class="text-[11px] text-shade-400"></span>
+      </div>
+      <div id="unmanagedBody" class="px-4 py-3 text-[11px] text-shade-400">
+        Nothing reported yet.
+      </div>
+      <div class="hidden overflow-x-auto px-4 pb-3" id="unmanagedTableWrap">
+        <table class="w-full text-left text-[11px]">
+          <thead class="text-shade-400">
+            <tr>
+              <th class="py-1 pr-3 font-semibold">Ticket</th>
+              <th class="py-1 pr-3 font-semibold">Symbol</th>
+              <th class="py-1 pr-3 font-semibold">Side</th>
+              <th class="py-1 pr-3 font-semibold">Lots</th>
+              <th class="py-1 pr-3 font-semibold">P/L</th>
+              <th class="py-1 pr-3 font-semibold">Why</th>
+            </tr>
+          </thead>
+          <tbody id="unmanagedRows"></tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ================= ARM + TRAIL ================= -->

@@ -27,6 +27,7 @@ import hmac
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,7 @@ from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from charon_bridge import commands, mt5_adapter, paths, state
+from charon_bridge import commands, mt5_adapter, paths, reconcile, state, symbols
 from charon_bridge.logs import LOG
 from charon_bridge.schema import (
     ALLOWED_VERBS,
@@ -48,6 +49,19 @@ from charon_bridge.schema import (
 from charon_bridge.version import BRIDGE_VERSION, SCHEMA_VERSION
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# --- How long a reconciliation answer may be reused. The EA republishes
+# --- about once a second and the terminal read costs a real initialize()
+# --- round trip, so this is deliberately short: long enough to keep a
+# --- polling dashboard from hammering MT5, short enough that an alert is
+# --- never more than a moment out of date.
+UNMANAGED_TTL_SECONDS = 2.0
+
+# --- Confirmation counters live for the life of the process. See
+# --- ``reconcile.Tracker``: the count is a debounce, not a record.
+_TRACKER = reconcile.Tracker()
+_reconcile_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+
 
 # --- optional shared secret. Unset means "loopback trust": acceptable for
 # --- a single-user desktop, and the README says exactly that.
@@ -278,8 +292,144 @@ def terminal() -> dict[str, Any]:
 
 
 #+------------------------------------------------------------------+
+#| Symbols                                                          |
+#+------------------------------------------------------------------+
+@app.get("/api/symbols", dependencies=[Depends(require_token)])
+def list_symbols() -> dict[str, Any]:
+    """Instruments the dashboard can address, with their display labels.
+
+    Two sources, merged: the symbols the EA is publishing snapshots for
+    (live and actionable) and the instruments the terminal lists (a superset,
+    but only meaningful when the MetaTrader5 package is installed).
+
+    ``symbol`` is the exact broker name -- that is what a command must
+    carry. ``label`` is the short form for display and search. The two are
+    never interchangeable, and ``sources`` says which one can actually be
+    driven right now: a broker-only entry has no chart to receive a
+    command, so the UI must not pretend otherwise.
+    """
+    chart = state.discover_symbols()
+    broker = mt5_adapter.symbols()
+    entries = symbols.catalogue(chart=chart, broker=broker)
+    return {
+        "symbols": [entry.as_dict() for entry in entries],
+        "charts": chart,
+        "broker_available": mt5_adapter.available(),
+        "broker_count": len(broker),
+    }
+
+
+#+------------------------------------------------------------------+
+#| Unmanaged positions                                              |
+#+------------------------------------------------------------------+
+def _snapshot_for(symbol: str) -> Any:
+    """A parsed snapshot for ``symbol``, or ``None`` if it is not usable.
+
+    A stale or unreadable snapshot is not evidence of anything, so it
+    becomes ``None`` here rather than being passed on as an empty one.
+    """
+    try:
+        reading = state.read_snapshot(symbol)
+    except state.StateUnavailable:
+        return None
+    # --- ``Reading.stale`` is measured from the file's mtime, not from the
+    # --- EA's clock, so a skewed terminal clock cannot make an old snapshot
+    # --- look current. Beyond that it cannot be trusted at all.
+    if reading.stale:
+        return None
+    return reading.snapshot
+
+
+@app.get("/api/unmanaged", dependencies=[Depends(require_token)])
+def unmanaged() -> dict[str, Any]:
+    """Open positions no live Charon chart accounts for.
+
+    This is a **read-only** report. It cannot close, modify or size
+    anything -- it exists so an operator can see a position Charon is not
+    managing, which is otherwise invisible because the dashboard only ever
+    shows what the EA published.
+
+    The three-way distinction in ``summary.state`` is the point:
+
+    * ``ok``          -- every chart was checked and the answer is complete;
+    * ``unknown``     -- some chart is stale or starting, so an absence
+                         proves nothing;
+    * ``unavailable`` -- no chart is publishing at all, or the MT5 package
+                         is not installed.
+
+    Only ``ok`` may ever be rendered as "all clear". The result is cached
+    for :data:`UNMANAGED_TTL_SECONDS` because each call costs a terminal
+    round trip.
+    """
+    now = time.monotonic()
+    cached = _reconcile_cache["payload"]
+    if cached is not None and now - float(_reconcile_cache["at"]) < UNMANAGED_TTL_SECONDS:
+        return cached
+
+    charts = state.discover_symbols()
+    snapshots = {symbol: _snapshot_for(symbol) for symbol in charts}
+    account = mt5_adapter.positions()
+
+    if not mt5_adapter.available():
+        payload: dict[str, Any] = {
+            "symbols": [],
+            "positions": [],
+            "pending": [],
+            "summary": {
+                "state": reconcile.STATE_UNAVAILABLE,
+                "confirmed": 0,
+                "pending": 0,
+                "clean": False,
+                "confirmations": reconcile.CONFIRMATIONS,
+            },
+            "reason": (
+                "the MetaTrader5 package is not installed, so the account "
+                "cannot be listed. Install MetaTrader5 or read positions "
+                "from the chart itself."
+            ),
+        }
+    else:
+        payload = reconcile.classify(
+            account, snapshots, _TRACKER, now=time.time()
+        )
+
+    _reconcile_cache["at"] = now
+    _reconcile_cache["payload"] = payload
+    return payload
+
+
+def _require_live_chart(symbol: str) -> None:
+    """Refuse a trade-affecting command for a symbol with no live chart.
+
+    Without this the ticket is written, queued, and silently never
+    collected -- a v1.2.0 EA only drains the flat inbox, and a chart that is
+    not running cannot drain anything at all. The operator sees "queued"
+    and believes something is about to happen.
+
+    ``unknown`` is treated as a refusal, not a pass: an order is exactly the
+    action that must not proceed on a guess. The message names the symbol
+    and where the bridge looked, so the usual cause -- a typo, or the wrong
+    terminal -- is obvious.
+    """
+    snapshot = _snapshot_for(symbol)
+    if snapshot is None:
+        where = state.locate()
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"no live Charon snapshot for {symbol!r} in "
+                f"{where['bridge_root']}. A command can only be honoured by "
+                "an EA publishing that exact symbol; check the name against "
+                "GET /api/symbols, and that InpBridgeEnable is true on that "
+                "chart."
+            ),
+        )
+
+
+#+------------------------------------------------------------------+
 #| Commands (never orders)                                          |
 #+------------------------------------------------------------------+
+
 @app.post("/api/pyramid/arm", dependencies=[Depends(require_token)])
 def arm(symbol: str | None = Query(default=None)) -> dict[str, Any]:
     """Arm the MANUAL pyramid trigger -- exactly what the arm hotkey does."""
@@ -362,7 +512,10 @@ def place_order(ticket: "OrderTicket") -> dict[str, Any]:
 
     Refusals here are all *shape* refusals (bad side, inverted block, a
     LIMIT entry outside its block, a risk figure that is not a positive
-    number). Anything about money or market state is the EA's answer.
+    number) plus one liveness check: a symbol with no live snapshot has no
+    chart that could act on this ticket, so it is refused up front rather
+    than queued into silence. Anything about money or market state is the
+    EA's answer.
     """
     resolved = _symbol_or_404(ticket.symbol)
     try:
@@ -376,6 +529,11 @@ def place_order(ticket: "OrderTicket") -> dict[str, Any]:
             trail_trigger=ticket.trail_trigger,
             rung=ticket.rung,
         )
+        # --- shape first, liveness second: a malformed ticket is wrong
+        # --- regardless of which charts are up, and telling the operator
+        # --- that is more useful than "no chart". Both refuse before
+        # --- anything is written.
+        _require_live_chart(resolved)
         sent = commands.submit("order_open", resolved, order=intent)
     except (SchemaError, commands.CommandError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -412,6 +570,7 @@ def modify_order(ticket: "OrderTicket", position: int = Query(gt=0)) -> dict[str
             trail_trigger=ticket.trail_trigger,
             rung=ticket.rung,
         )
+        _require_live_chart(resolved)
         sent = commands.submit("order_modify", resolved, order=intent, ticket=position)
     except (SchemaError, commands.CommandError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

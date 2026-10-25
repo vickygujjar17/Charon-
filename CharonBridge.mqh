@@ -30,7 +30,7 @@
 //|  nothing here is required for trading, risk or stops.             |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.02"
+#property version   "1.03"
 
 #ifndef __CHARON_BRIDGE__
 #define __CHARON_BRIDGE__
@@ -46,7 +46,7 @@
 //---       ticket it only partially understands.
 #define CHARON_BRIDGE_SCHEMA      2
 #define CHARON_BRIDGE_ROOT        "Charon"
-#define CHARON_BRIDGE_CMD_DIR     "Charon\\commands"
+#define CHARON_BRIDGE_CMD_DIR     "Charon\\commands"    //--- legacy, read by pre-1.3.0 EAs
 #define CHARON_BRIDGE_DONE_DIR    "Charon\\commands\\processed"
 
 //--- a command older or newer than this many seconds is refused, which
@@ -202,6 +202,8 @@ private:
    bool              m_lastOk;
    string            m_lastNote;
    string            m_stateFile;
+   string            m_cmdDir;      //--- Charon\commands\<SYMBOL>
+   string            m_doneDir;     //--- ...\processed
 
    bool              WriteStateFile(const string payload);
    bool              ReadCommandFile(const string name, SCharonBridgeCommand &cmd);
@@ -214,6 +216,7 @@ public:
 
    bool              Enabled(void) const { return (m_symbol != ""); }
    string            Symbol(void) const { return m_symbol; }
+   string            CommandDir(void) const { return m_cmdDir; }
    string            Note(void) const { return m_lastNote; }
    ulong             Sequence(void) const { return m_seq; }
 
@@ -227,12 +230,61 @@ public:
 
    //--- static helpers, exposed so the self-test can cover them
    static string     JsonEscape(const string text);
+   static string     SafeName(const string text);
    static bool       ReadJsonString(const string json, const string key, string &out);
    static bool       ReadJsonNumber(const string json, const string key, double &out);
    static bool       VerbAllowed(const string verb);
    static bool       OrderVerb(const string verb);
    static bool       TrailModeValid(const int mode);
   };
+
+//+------------------------------------------------------------------+
+//| Make a symbol safe to embed in a file or folder name             |
+//|                                                                  |
+//|  Mirrors paths.sanitize_symbol() in the Python bridge **exactly**. |
+//|  The two processes address the same folders, so a disagreement    |
+//|  here does not produce an error -- it produces two different      |
+//|  folders, and commands that are written to one and read from the  |
+//|  other. bridge/tests/test_symbol_names.py pins the two together    |
+//|  against a shared fixture; change one and that test fails.        |
+//|                                                                  |
+//|  Rule: keep [A-Za-z0-9._-], replace every other character with    |
+//|  '_', then trim leading and trailing '.', '_' and '-'. An empty   |
+//|  result becomes "UNKNOWN" so the path is never a bare separator.  |
+//+------------------------------------------------------------------+
+string CCharonBridge::SafeName(const string text)
+  {
+   string cleaned = "";
+   int length = StringLen(text);
+   for(int i = 0; i < length; i++)
+     {
+      ushort ch = StringGetCharacter(text, i);
+      bool keep = ((ch >= '0' && ch <= '9') ||
+                   (ch >= 'A' && ch <= 'Z') ||
+                   (ch >= 'a' && ch <= 'z') ||
+                   ch == '.' || ch == '_' || ch == '-');
+      cleaned += (keep ? ShortToString(ch) : "_");
+     }
+
+   //--- trim from both ends, the way Python's strip("._-") does
+   int left = 0, right = StringLen(cleaned) - 1;
+   while(left <= right)
+     {
+      ushort ch = StringGetCharacter(cleaned, left);
+      if(ch == '.' || ch == '_' || ch == '-') left++;
+      else break;
+     }
+   while(right >= left)
+     {
+      ushort ch = StringGetCharacter(cleaned, right);
+      if(ch == '.' || ch == '_' || ch == '-') right--;
+      else break;
+     }
+
+   if(right < left)
+      return "UNKNOWN";
+   return StringSubstr(cleaned, left, right - left + 1);
+  }
 
 //+------------------------------------------------------------------+
 CCharonBridge::CCharonBridge(void)
@@ -242,6 +294,8 @@ CCharonBridge::CCharonBridge(void)
    m_lastOk    = false;
    m_lastNote  = "";
    m_stateFile = "";
+   m_cmdDir    = "";
+   m_doneDir   = "";
   }
 
 //+------------------------------------------------------------------+
@@ -251,7 +305,37 @@ void CCharonBridge::Init(const string symbol)
    m_seq       = 0;
    m_lastOk    = false;
    m_lastNote  = "";
-   m_stateFile = "Charon\\state_" + symbol + ".json";
+
+   //--- v1.3.0: every chart owns its own inbox. Before this, two charts on
+   //--- one terminal drained the same folder and each read the other's
+   //--- commands: the symbol field stopped them *applying* it, but they had
+   //--- already retired it into processed/ -- so the rightful chart never
+   //--- saw it again. One folder per symbol removes the race entirely.
+   //---
+   //--- The bridge detects this folder to decide where to write, so it must
+   //--- be created here and nowhere else. If Python made it, the probe would
+   //--- always succeed and commands for an older EA would be routed into a
+   //--- folder nothing reads.
+   //---
+   //--- An empty symbol means the bridge is disabled (CharonEngine passes ""
+   //--- for InpBridgeEnable=false). That path must stay inert: creating
+   //--- commands\UNKNOWN on every chart that opted out would be a new side
+   //--- effect on a setting that promises none.
+   if(symbol == "")
+     {
+      m_cmdDir    = "";
+      m_doneDir   = "";
+      m_stateFile = "";
+      return;
+     }
+
+   string safe = SafeName(symbol);
+   m_cmdDir    = "Charon\\commands\\" + safe;
+   m_doneDir   = m_cmdDir + "\\processed";
+   m_stateFile = "Charon\\state_" + safe + ".json";
+
+   FolderCreate(m_cmdDir, FILE_COMMON);
+   FolderCreate(m_doneDir, FILE_COMMON);
   }
 
 //+------------------------------------------------------------------+
@@ -437,8 +521,8 @@ bool CCharonBridge::TrailModeValid(const int mode)
 bool CCharonBridge::WriteStateFile(const string payload)
   {
    FolderCreate(CHARON_BRIDGE_ROOT, FILE_COMMON);
-   FolderCreate(CHARON_BRIDGE_CMD_DIR, FILE_COMMON);
-   FolderCreate(CHARON_BRIDGE_DONE_DIR, FILE_COMMON);
+   FolderCreate(m_cmdDir, FILE_COMMON);
+   FolderCreate(m_doneDir, FILE_COMMON);
 
    string tmp = m_stateFile + ".tmp";
    ResetLastError();
@@ -605,7 +689,7 @@ string CCharonBridge::NextPending(void)
   {
    ResetLastError();
    string name = "";
-   long handle = FileFindFirst(CHARON_BRIDGE_CMD_DIR + "\\*.json", name, FILE_COMMON);
+   long handle = FileFindFirst(m_cmdDir + "\\*.json", name, FILE_COMMON);
    if(handle == INVALID_HANDLE)
       return "";
 
@@ -648,7 +732,7 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
    cmd.rung          = 0;
    cmd.ticket        = 0;
 
-   string path = CHARON_BRIDGE_CMD_DIR + "\\" + name;
+   string path = m_cmdDir + "\\" + name;
    ResetLastError();
    int h = FileOpen(path, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
    if(h == INVALID_HANDLE)
@@ -914,10 +998,10 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
 //+------------------------------------------------------------------+
 bool CCharonBridge::Retire(const string name, const SCharonBridgeCommand &cmd)
   {
-   string from = CHARON_BRIDGE_CMD_DIR + "\\" + name;
+   string from = m_cmdDir + "\\" + name;
    //--- prefix the archived file with the verdict so the trail is readable
    string tag  = (cmd.valid ? "ok" : "rejected");
-   string dest = CHARON_BRIDGE_DONE_DIR + "\\" + tag + "_" + name;
+   string dest = m_doneDir + "\\" + tag + "_" + name;
 
    ResetLastError();
    if(FileMove(from, FILE_COMMON, dest, FILE_COMMON | FILE_REWRITE))

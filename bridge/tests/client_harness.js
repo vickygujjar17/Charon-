@@ -62,6 +62,7 @@ class Element {
       if (attr[1] && this.tagName !== attr[1].toUpperCase()) return false;
       return String(this.dataset[attr[2]] ?? "") === attr[3];
     }
+    // --- case-insensitive tag match, so "option" finds an <option>
     return this.tagName === selector.toUpperCase();
   }
   querySelectorAll(selector) {
@@ -94,7 +95,12 @@ const IDS = ["banner", "statusPill", "ageLabel", "latencyLabel", "lastGoodLabel"
   "tagline", "orderStatus", "orderSide", "orderType", "orderEntry", "orderRisk",
   "orderBlockTop", "orderBlockBottom", "orderTrail", "orderRung",
   "orderLots", "orderEntryPx", "orderStop", "orderRiskMoney", "orderTicket",
-  "orderVerdict", "orderPlaceBtn", "orderModifyBtn", "orderCancelBtn", "orderMsg"];
+  "orderVerdict", "orderPlaceBtn", "orderModifyBtn", "orderCancelBtn", "orderMsg",
+  // --- symbol picker + unmanaged panel (v1.3.0)
+  "symbolPicker", "symbolSelect", "orderSymbol", "symbolOptions",
+  "unmanagedPanel", "unmanagedBadge", "unmanagedSummary", "unmanagedBody",
+  "unmanagedTableWrap", "unmanagedRows"];
+
 for (const id of IDS) {
   const el = new Element(id === "legRows" ? "tbody" : "div");
   el.id = id;
@@ -129,22 +135,47 @@ const snapshot = {
 
 function fetchStub(url) {
   calls.push(url);
-  const body = url.includes("/api/health")
-    ? {
-        ok: true,
-        bridge_version: "1.0.4",
-        schema: 1,
-        // --- the real /api/health always carries this; the client renders
-        // --- the resolved path from it, so the stub must not omit it.
-        locations: {
-          common_files: "/tmp/common/Files",
-          bridge_root: "/tmp/common/Files/Charon",
-          common_exists: "yes",
-          root_exists: "yes",
-        },
-        symbols: ["GBPUSD"],
-      }
-    : snapshot;
+  let body;
+  if (url.includes("/api/health")) {
+    body = {
+      ok: true,
+      bridge_version: "1.0.4",
+      schema: 1,
+      // --- the real /api/health always carries this; the client renders
+      // --- the resolved path from it, so the stub must not omit it.
+      locations: {
+        common_files: "/tmp/common/Files",
+        bridge_root: "/tmp/common/Files/Charon",
+        common_exists: "yes",
+        root_exists: "yes",
+      },
+      symbols: ["GBPUSD"],
+    };
+  } else if (url.includes("/api/symbols")) {
+    body = {
+      symbols: [
+        { symbol: "GBPUSD", label: "GBPUSD", sources: ["chart"] },
+        { symbol: "EURUSD.a", label: "EURUSD", sources: ["chart", "broker"] },
+        { symbol: "AUDUSD", label: "AUDUSD", sources: ["broker"] },
+      ],
+      charts: ["GBPUSD", "EURUSD.a"],
+      broker_available: true,
+      broker_count: 3,
+    };
+  } else if (url.includes("/api/unmanaged")) {
+    body = {
+      symbols: [{ symbol: "GBPUSD", state: "ok", reason: "", legs: 1, age_seconds: 0.4 }],
+      positions: [{
+        ticket: 900, symbol: "USDJPY", side: "SELL", volume: 0.2, profit: -3.5,
+        magic: 0, verdict: "no_charon_on_symbol", seen: 1, confirmed: true,
+        unmanaged_for: 0, reason: "no Charon chart is publishing USDJPY",
+      }],
+      pending: [],
+      summary: { state: "ok", confirmed: 1, pending: 0, clean: false, confirmations: 3 },
+    };
+  } else {
+    body = snapshot;
+  }
   return Promise.resolve({
     ok: true,
     status: 200,
@@ -235,6 +266,59 @@ setTimeout(() => {
   // --- the ticket form must not be pre-filled with a computed price
   if (registry.get("orderBlockTop").value !== "") {
     problems.push("the block top box was pre-filled by the client");
+  }
+
+  // --- symbol picker: two charts means a chooser, and its values must be
+  // --- the exact broker names rather than the display labels
+  if (!calls.some((url) => url.includes("/api/symbols"))) {
+    problems.push("the client never requested /api/symbols");
+  }
+  const picker = registry.get("symbolPicker");
+  if (picker.className.includes("hidden")) {
+    problems.push("the symbol picker stayed hidden with two charts on offer");
+  }
+  const pickerOptions = registry.get("symbolSelect").children.length;
+  if (pickerOptions !== 2) {
+    problems.push(
+      `the picker offered ${pickerOptions} charts, expected 2 (broker-only must not be listed)`
+    );
+  }
+  const firstPick = registry.get("symbolSelect").children[0];
+  if (!firstPick || firstPick.value !== "GBPUSD") {
+    problems.push("the picker's value is not the exact broker name");
+  }
+
+  // --- the datalist must actually be populated, not left as a text node
+  const suggestions = registry.get("symbolOptions").children;
+  if (suggestions.length !== 3) {
+    problems.push(`the symbol datalist has ${suggestions.length} options, expected 3`);
+  }
+  if (suggestions.some((node) => node.tagName !== "OPTION")) {
+    problems.push("the datalist contains something other than <option> elements");
+  }
+  // --- and the order field starts on the chart being shown
+  if (registry.get("orderSymbol").value !== "GBPUSD") {
+    problems.push(
+      `the order symbol defaulted to ${JSON.stringify(registry.get("orderSymbol").value)}`
+    );
+  }
+
+  // --- unmanaged panel: a confirmed orphan must be rendered, and the badge
+  // --- must never read as an all-clear while one is listed
+  if (!calls.some((url) => url.includes("/api/unmanaged"))) {
+    problems.push("the client never requested /api/unmanaged");
+  }
+  const unmanagedBadge = registry.get("unmanagedBadge").textContent;
+  if (unmanagedBadge === "all clear") {
+    problems.push("the unmanaged badge said \"all clear\" with an orphan listed");
+  }
+  if (registry.get("unmanagedRows").children.length !== 1) {
+    problems.push(
+      `the unmanaged table has ${registry.get("unmanagedRows").children.length} rows, expected 1`
+    );
+  }
+  if (registry.get("unmanagedPanel").className.includes("hidden")) {
+    problems.push("the unmanaged panel stayed hidden with a finding to show");
   }
 
   console.log("requests issued:");

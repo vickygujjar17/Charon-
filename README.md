@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.2.0**
+Current release: **v1.3.0**
 
 ---
 
@@ -131,7 +131,15 @@ angle include and angle includes resolve against `MQL5\Include`:
 3. Open `Charon.mq5` in MetaEditor and press **F7** (Compile).
 4. Attach `Charon` to a chart. One instance manages one symbol.
 
-Charon only touches positions whose symbol matches the chart symbol.
+Charon only touches positions whose symbol matches the chart symbol. Run it on as many
+charts as you like: since v1.3.0 each instance has its own command inbox
+(`commands\<SYMBOL>\`), so one chart can no longer consume another's commands. The
+dashboard lists every chart it can see and lets you pick which one to drive.
+
+A position on a symbol with **no** Charon chart is invisible to the EA by construction.
+`GET /api/unmanaged` exists for exactly that case: it lists open positions no live chart
+accounts for, and says plainly when it cannot check rather than reporting a false
+all-clear.
 
 > **The split is not optional.** `Charon.mq5` and `CharonSelfTest.mq5` include their
 > modules with angle brackets (`#include <Charon\CharonDefines.mqh>`), and MQL5
@@ -183,7 +191,8 @@ Charon measures risk and sizes scale-ins; it does not open your first position.
 ### [0] General
 | Input | Default | Meaning |
 |---|---|---|
-| `InpMagicFilter` | `0` | `0` = manage every position on the symbol (manual trades). Otherwise only this magic. |
+| `InpMagicFilter` | `0` | `0` = manage every position on the symbol (manual trades). Otherwise only this magic. **With `0`, an unrelated position on the chart's symbol is adopted as a Charon leg** — so on a busy account prefer a specific magic, or treat the unmanaged-position panel as the authoritative list. |
+
 | `InpMagic` | `20261024` | Magic stamped on Charon's own scale-in legs. |
 | `InpVerbose` | `true` | Log every stop/trail/tier decision. |
 | `InpShowDashboard` | `true` | Chart-corner status panel. |
@@ -394,8 +403,9 @@ URL allow-listing, so there is no security setting to weaken.
 
 ```
 state_<SYMBOL>.json          EA writes once per timer tick, Python reads
-commands\*.json              Python writes, EA consumes
-commands\processed\*.json    EA renames each consumed file here (ok_* / rejected_*)
+commands\<SYMBOL>\*.json     Python writes, that chart's EA consumes
+commands\<SYMBOL>\processed\ EA renames each consumed file here (ok_* / rejected_*)
+commands\*.json              legacy flat inbox, still read by pre-v1.3.0 EAs
 ```
 
 Both directions write a temp file and rename it into place, so neither side can ever
@@ -414,7 +424,22 @@ refused outright.
 | Cancel a pending ticket or flatten a position | Act on a ticket the EA has not adjudicated |
 | Arm / disarm the MANUAL pyramid trigger | Override any risk gate |
 | Select the trailing mode | Move a stop directly |
+| Pick which chart to drive, and search symbols | Send a display label as a symbol name |
+| List positions no live chart accounts for (`/api/unmanaged`) | Close, size or modify any of them |
 | Tail the bridge log | Substitute for the Experts log |
+
+### Symbol names and the picker
+
+A broker rarely names EURUSD the way a trader does: it may be `EURUSD.a`,
+`EURUSDm` or `mEURUSD`. The dashboard shows a short label and sends the exact broker
+name — the two are never interchangeable, and no code path can invent a name that the
+EA is not publishing. `CHARON_SYMBOL_PREFIX` / `CHARON_SYMBOL_SUFFIX` (see
+`bridge\.env.example`) tell the picker which part of a name is decoration; they affect
+**display only**, so a wrong value makes labels noisy, never wrong-targeted.
+
+`POST /api/order` pre-flight refuses (`422`) a ticket for a symbol with no live snapshot.
+Sending one would queue a file that no chart could ever drain — the operator would see
+"queued" and believe something was about to happen.
 
 The command vocabulary is seven verbs: four state-only (`arm`, `disarm`, `trail_mode`,
 `ping`) and three for attended execution (`order_open`, `order_modify`, `order_cancel`).
@@ -489,11 +514,11 @@ compiled as if it were whole.
 
 `integration_check.ps1` is the one gate that exercises both halves at once. It starts an
 actual uvicorn process against a throwaway `Common\Files` tree and drives the full loop —
-`POST /api/pyramid/arm` → `commands\*.json` → the stand-in EA drains it →
-`commands\processed\ok_*.json` → `GET /api/commands` reports `accepted`. The bridge, the
-HTTP surface and every file crossing the filesystem are real; only the EA's side of the
-handshake is simulated, because CI has no MetaTrader terminal. Nothing there touches the
-network beyond `127.0.0.1` or writes to your real terminal folder.
+`POST /api/pyramid/arm` → `commands\<SYMBOL>\*.json` → the stand-in EA drains it →
+`commands\<SYMBOL>\processed\ok_*.json` → `GET /api/commands` reports `accepted`. The
+bridge, the HTTP surface and every file crossing the filesystem are real; only the EA's
+side of the handshake is simulated, because CI has no MetaTrader terminal. Nothing there
+touches the network beyond `127.0.0.1` or writes to your real terminal folder.
 
 `bridge_check.ps1` is deliberately offline: it never installs a package or downloads a
 wheel. Besides linting and running the tests, it asserts three things that are easy to

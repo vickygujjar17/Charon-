@@ -208,6 +208,54 @@ def test_mt5_adapter_never_references_an_order_call() -> None:
         )
 
 
+def test_mt5_adapter_reads_are_an_explicit_allow_list() -> None:
+    """The read-only guarantee is a closed list, not an absence of bad names.
+
+    ``FORBIDDEN_CALLS`` catches the obvious mistake, but it would not catch
+    a novel modifying call added under a name nobody thought to forbid --
+    ``history_add`` or ``positions_modify_by`` would sail through. Pinning
+    the exact set of ``_mt5.*`` attributes this module may touch turns any
+    new terminal interaction into a deliberate, reviewable line in a diff.
+
+    v1.3.0 adds ``symbols_get`` and ``positions_get``, both reads. Neither
+    can change an account, which is the only thing this module is allowed
+    to be part of.
+    """
+    import ast
+
+    allowed = {
+        "initialize", "shutdown", "last_error",
+        "terminal_info", "account_info", "symbol_info",
+        "symbols_get", "positions_get",
+    }
+
+    source = Path(mt5_adapter.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    reached = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "_mt5"
+    }
+
+    unexpected = reached - allowed
+    assert not unexpected, (
+        f"mt5_adapter reaches for {sorted(unexpected)}, which is not on the "
+        "read-only allow-list. Adding a call here is a security decision."
+    )
+    # --- and the reads the module claims to make must actually be there,
+    # --- so this test cannot pass by the code being deleted
+    assert {"symbols_get", "positions_get"} <= reached
+
+
+def test_mt5_adapter_degrades_to_empty_lists_without_the_package() -> None:
+    """No package means no data, never an exception and never an invention."""
+    assert mt5_adapter.symbols() == []
+    assert mt5_adapter.positions() == []
+
+
 def test_mt5_adapter_is_importable_without_the_package() -> None:
     """The bridge must work on a machine that has no MetaTrader5 package."""
     assert hasattr(mt5_adapter, "available")
@@ -236,8 +284,11 @@ def _ticket(**overrides: object) -> dict[str, object]:
     return body
 
 
-def test_order_endpoint_queues_a_ticket(client: TestClient, common_dir: Path) -> None:
+def test_order_endpoint_queues_a_ticket(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    write_snapshot()          # --- the gate demands a live chart for this symbol
     response = client.post("/api/order", json=_ticket())
+
     assert response.status_code == 200
     body = response.json()
     assert body["queued"] is True
@@ -256,8 +307,10 @@ def test_order_endpoint_queues_a_ticket(client: TestClient, common_dir: Path) ->
 
 
 def test_order_endpoint_defaults_to_market_without_an_entry(
-        client: TestClient, common_dir: Path) -> None:
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    write_snapshot()
     response = client.post("/api/order", json=_ticket(order_type="MARKET", entry=None))
+
     assert response.status_code == 200
     inbox = common_dir / "Charon" / "commands"
     sent = json.loads(next(inbox.glob("*.json")).read_text(encoding="utf-8"))
@@ -294,8 +347,11 @@ def test_order_endpoint_writes_nothing_when_it_refuses(
     assert list(inbox.glob("*.json")) == []
 
 
-def test_order_modify_needs_a_position_ticket(client: TestClient) -> None:
+def test_order_modify_needs_a_position_ticket(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    write_snapshot()
     response = client.post("/api/order/modify", params={"position": 0}, json=_ticket())
+
     assert response.status_code == 422
 
     queued = client.post("/api/order/modify", params={"position": 42}, json=_ticket())
@@ -319,6 +375,168 @@ def test_trade_endpoint_points_at_the_order_endpoint(client: TestClient) -> None
     body = client.post("/api/trade").json()
     assert "order_open" in body["allowed_verbs"]
     assert "open" not in body["allowed_verbs"]
+
+
+#+------------------------------------------------------------------+
+#| The liveness gate on trade-affecting verbs                       |
+#+------------------------------------------------------------------+
+def test_order_is_refused_for_a_symbol_with_no_live_chart(
+        client: TestClient, common_dir: Path) -> None:
+    """A ticket for a symbol nothing publishes can only be queued into silence."""
+    response = client.post("/api/order", json=_ticket(symbol="EURUSD"))
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "EURUSD" in detail
+    assert "snapshot" in detail
+    # --- and nothing was written: a refusal must not leave a file behind
+    inbox = common_dir / "Charon" / "commands"
+    assert list(inbox.glob("*.json")) == [] if inbox.is_dir() else True
+
+
+def test_order_modify_is_refused_for_a_symbol_with_no_live_chart(
+        client: TestClient, common_dir: Path) -> None:
+    response = client.post(
+        "/api/order/modify", params={"position": 42}, json=_ticket(symbol="EURUSD")
+    )
+    assert response.status_code == 422
+    assert "EURUSD" in response.json()["detail"]
+
+
+def test_a_stale_snapshot_does_not_satisfy_the_gate(
+        client: TestClient, write_snapshot) -> None:
+    """Queued work for a chart that stopped publishing is lost work."""
+    write_snapshot(age_seconds=60.0)
+    response = client.post("/api/order", json=_ticket())
+    assert response.status_code == 422
+    assert "no live Charon snapshot" in response.json()["detail"]
+
+
+def test_shape_refusals_come_before_the_liveness_check(client: TestClient) -> None:
+    """A malformed ticket is wrong whatever is running, and must say so.
+
+    Both refuse, but the order matters for the operator: "risk_pct must be
+    positive" is actionable, while "no chart" would send them off checking
+    the terminal for a problem that is actually in the request.
+    """
+    body = client.post("/api/order", json=_ticket(risk_pct=0, symbol="EURUSD")).json()
+    assert "risk_pct" in body["detail"]
+    assert "snapshot" not in body["detail"]
+
+
+#+------------------------------------------------------------------+
+#| GET /api/symbols                                                 |
+#+------------------------------------------------------------------+
+def test_symbols_lists_live_charts_with_both_name_and_label(
+        client: TestClient, write_snapshot) -> None:
+    write_snapshot()
+    body = client.get("/api/symbols").json()
+
+    assert body["charts"] == ["GBPUSD"]
+    entry = body["symbols"][0]
+    assert entry["symbol"] == "GBPUSD", "the command argument must be exact"
+    assert entry["label"] == "GBPUSD"
+    assert entry["sources"] == ["chart"]
+    # --- the package is absent in CI; the endpoint must still answer
+    assert body["broker_available"] is False
+    assert body["broker_count"] == 0
+
+
+def test_symbols_merges_the_broker_list(client: TestClient, write_snapshot,
+                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    """A listed symbol with no chart is offered, but only as broker-sourced."""
+    write_snapshot()
+    monkeypatch.setattr(main.mt5_adapter, "symbols", lambda: ["EURUSD", "GBPUSD"])
+
+    entries = {item["symbol"]: item for item in client.get("/api/symbols").json()["symbols"]}
+    assert entries["GBPUSD"]["sources"] == ["chart", "broker"]
+    assert entries["EURUSD"]["sources"] == ["broker"]
+
+
+def test_symbols_is_empty_and_honest_with_no_charts(client: TestClient) -> None:
+    body = client.get("/api/symbols").json()
+    assert body["symbols"] == []
+    assert body["charts"] == []
+
+
+#+------------------------------------------------------------------+
+#| GET /api/unmanaged                                               |
+#+------------------------------------------------------------------+
+@pytest.fixture()
+def _fresh_cache(monkeypatch: pytest.MonkeyPatch):
+    """Each test starts with an empty reconcile cache and a zeroed tracker."""
+    monkeypatch.setattr(main, "_TRACKER", main.reconcile.Tracker())
+    monkeypatch.setattr(main, "_reconcile_cache", {"at": 0.0, "payload": None})
+    return None
+
+
+def test_unmanaged_reports_unavailable_without_the_mt5_package(
+        client: TestClient, common_dir: Path, write_snapshot, _fresh_cache) -> None:
+    """No package means no account listing, which is not "all clear"."""
+    write_snapshot()
+    body = client.get("/api/unmanaged").json()
+
+    assert body["summary"]["state"] == main.reconcile.STATE_UNAVAILABLE
+    assert body["summary"]["clean"] is False
+    assert "MetaTrader5" in body["reason"]
+
+
+def test_unmanaged_reports_unknown_when_a_snapshot_is_stale(
+        client: TestClient, write_snapshot, monkeypatch: pytest.MonkeyPatch,
+        _fresh_cache) -> None:
+    write_snapshot(age_seconds=60.0)
+    monkeypatch.setattr(main.mt5_adapter, "available", lambda: True)
+    monkeypatch.setattr(main.mt5_adapter, "positions", lambda: [])
+
+    body = client.get("/api/unmanaged").json()
+    assert body["summary"]["state"] == main.reconcile.STATE_UNKNOWN
+    assert body["summary"]["clean"] is False
+    assert body["symbols"][0]["symbol"] == "GBPUSD"
+
+
+def test_unmanaged_reports_a_confirmed_orphan(
+        client: TestClient, write_snapshot, monkeypatch: pytest.MonkeyPatch,
+        _fresh_cache) -> None:
+    """A position on a symbol with no chart is reported, not hidden."""
+    write_snapshot()
+    monkeypatch.setattr(main.mt5_adapter, "available", lambda: True)
+    monkeypatch.setattr(main.mt5_adapter, "positions", lambda: [
+        main.mt5_adapter.Position(
+            ticket=900, symbol="USDJPY", side="SELL", volume=0.2,
+            price_open=150.0, profit=-3.5, magic=0, comment="manual",
+        )
+    ])
+
+    body = client.get("/api/unmanaged").json()
+    assert body["summary"]["state"] == main.reconcile.STATE_OK
+    assert [item["ticket"] for item in body["positions"]] == [900]
+    assert body["positions"][0]["verdict"] == main.reconcile.NO_CHARON
+    assert body["summary"]["clean"] is False
+
+
+def test_unmanaged_is_cached_for_the_ttl(
+        client: TestClient, write_snapshot, monkeypatch: pytest.MonkeyPatch,
+        _fresh_cache) -> None:
+    """The terminal round trip is expensive; a polling UI must not repeat it."""
+    write_snapshot()
+    calls: list[int] = []
+
+    def counting_positions():
+        calls.append(1)
+        return []
+
+    monkeypatch.setattr(main.mt5_adapter, "available", lambda: True)
+    monkeypatch.setattr(main.mt5_adapter, "positions", counting_positions)
+
+    first = client.get("/api/unmanaged").json()
+    second = client.get("/api/unmanaged").json()
+
+    assert len(calls) == 1, "the second call should have been served from cache"
+    assert first == second
+
+    # --- once the window passes, the account is read again
+    monkeypatch.setattr(main.time, "monotonic", lambda: 1e9)
+    client.get("/api/unmanaged")
+    assert len(calls) == 2
 
 
 def test_startup_warns_on_the_console_when_nothing_is_publishing(

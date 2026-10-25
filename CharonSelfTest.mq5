@@ -9,7 +9,7 @@
 //|  Run it on any chart. The verdict line is "SELFTEST RESULT: ..." |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.02"
+#property version   "1.03"
 #property script_show_inputs
 
 //--- Same angle-include contract as Charon.mq5: headers live in Include\Charon\.
@@ -432,6 +432,42 @@ void TestBridgeJson(void)
 //+------------------------------------------------------------------+
 //| Script entry point                                               |
 //+------------------------------------------------------------------+
+//| Bridge: file-name sanitising                                     |
+//|                                                                  |
+//|  SafeName() must match paths.sanitize_symbol() character for      |
+//|  character: the EA and the bridge address the same folders, so a  |
+//|  disagreement silently splits the queue in two.                   |
+//|                                                                  |
+//|  The cases below are duplicated verbatim in                      |
+//|  bridge/tests/test_symbol_names.py::FIXTURE. Add to both or the  |
+//|  cross-language test fails on the Python side.                    |
+//+------------------------------------------------------------------+
+void TestBridgeSafeName(void)
+  {
+   Check(CCharonBridge::SafeName("EURUSD") == "EURUSD", "name: plain symbol untouched");
+   Check(CCharonBridge::SafeName("EURUSD.a") == "EURUSD.a", "name: dot suffix kept");
+   Check(CCharonBridge::SafeName("EURUSD_pro") == "EURUSD_pro", "name: underscore kept");
+   Check(CCharonBridge::SafeName("EURUSD-1") == "EURUSD-1", "name: hyphen kept");
+
+   //--- characters that would escape the folder
+   Check(CCharonBridge::SafeName("EU\\RUSD") == "EU_RUSD", "name: backslash replaced");
+   Check(CCharonBridge::SafeName("EU/RUSD") == "EU_RUSD", "name: slash replaced");
+   Check(CCharonBridge::SafeName("EU:RUSD") == "EU_RUSD", "name: colon replaced");
+   Check(CCharonBridge::SafeName("EU RUSD") == "EU_RUSD", "name: space replaced");
+   Check(CCharonBridge::SafeName("#EURUSD") == "EURUSD", "name: hash replaced then trimmed");
+
+   //--- trimming strips T._- from both ends, so a traversal cannot survive
+   Check(CCharonBridge::SafeName("..\\..")  == "UNKNOWN", "name: traversal collapses to UNKNOWN");
+   Check(CCharonBridge::SafeName("__EURUSD__") == "EURUSD", "name: surrounding underscores trimmed");
+   Check(CCharonBridge::SafeName(".") == "UNKNOWN", "name: lone dot is UNKNOWN");
+
+   //--- non-ASCII is replaced, because Python's rule is ASCII-only
+   string accent = ShortToString((ushort)233);          // e-acute
+   Check(CCharonBridge::SafeName("EUR" + accent) == "EUR",
+         "name: trailing non-ASCII replaced then trimmed");
+  }
+
+//+------------------------------------------------------------------+
 void OnStart(void)
   {
    PrintFormat("==================================================");
@@ -449,6 +485,7 @@ void OnStart(void)
    TestArmGating();
    TestBridgeVerbs();
    TestBridgeJson();
+   TestBridgeSafeName();
 
    PrintFormat("==================================================");
    PrintFormat("passed: %d   failed: %d", g_pass, g_fail);

@@ -27,6 +27,12 @@ const $ = (id) => document.getElementById(id);
 let eventSource = null;
 let lastLogSeq = 0;        // highest seq rendered, so replays never duplicate
 
+// --- The symbol whose snapshot is on screen. Every command that has to name
+// --- a chart uses this, so the panel and the buttons can never disagree
+// --- about which chart is being driven. It is the EXACT broker name.
+let activeSymbol = null;
+
+
 //+------------------------------------------------------------------+
 //| Formatting helpers                                               |
 //+------------------------------------------------------------------+
@@ -242,8 +248,10 @@ function render(payload) {
   const snap = payload.snapshot;
   const digits = snap.digits ?? 5;
 
+  activeSymbol = snap.symbol;
   $("symbolLabel").textContent = snap.symbol;
   $("eaVersion").textContent = snap.ea_version ? "EA " + snap.ea_version : "";
+
 
   $("equity").textContent = money(snap.equity, snap.currency);
   $("balance").textContent = money(snap.balance, snap.currency);
@@ -435,10 +443,12 @@ async function fetchStatus() {
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   const started = performance.now();
   try {
-    const response = await fetch("/api/status", {
-      cache: "no-store",
-      signal: controller.signal,
-    });
+    const response = await fetch(
+      "/api/status" +
+        (activeSymbol ? "?symbol=" + encodeURIComponent(activeSymbol) : ""),
+      { cache: "no-store", signal: controller.signal }
+    );
+
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       const error = new Error(body.detail || "HTTP " + response.status);
@@ -552,7 +562,11 @@ function renderOrder(order, digits, currency) {
 // --- anything empty becomes null and the server decides whether that is
 // --- acceptable (a MARKET ticket may have no entry; a LIMIT may not).
 function readTicket() {
-  const symbol = $("symbolLabel").textContent;
+  // --- prefer what the operator typed; fall back to the chart on screen.
+  // --- The value is the exact broker name either way -- the display label
+  // --- above it is never sent.
+  const typed = $("orderSymbol").value.trim();
+  const symbol = typed || activeSymbol;
   const entryRaw = $("orderEntry").value.trim();
   const type = $("orderType").value;
   return {
@@ -647,11 +661,11 @@ function wireOrderPanel() {
       message.textContent = "No ticket to cancel yet.";
       return;
     }
-    const symbol = $("symbolLabel").textContent;
+    const symbol = activeSymbol;
     const path =
       "/api/order/cancel?position=" +
       encodeURIComponent(ticket.slice(1)) +
-      (symbol && symbol !== "\u2014" ? "&symbol=" + encodeURIComponent(symbol) : "");
+      (symbol ? "&symbol=" + encodeURIComponent(symbol) : "");
     message.className = "mt-2 text-[11px] text-shade-400";
     message.textContent = "sending\u2026";
     try {
@@ -713,6 +727,7 @@ function wireCommands() {
   $("armBtn").addEventListener("click", () =>
     postCommand("/api/pyramid/arm", $("armMsg"), "Arm"));
 
+
   $("disarmBtn").addEventListener("click", () =>
     postCommand("/api/pyramid/disarm", $("armMsg"), "Disarm"));
 
@@ -720,6 +735,191 @@ function wireCommands() {
     const mode = event.target.value;
     postCommand("/api/trail?mode=" + encodeURIComponent(mode), $("trailMsg"), "Trail mode");
   });
+
+  // --- choosing a chart re-points the poll, and with it every panel. The
+  // --- order field follows only while it is empty: once the operator has
+  // --- typed a different symbol, this must not overwrite it.
+  $("symbolSelect").addEventListener("change", (event) => {
+    activeSymbol = event.target.value || null;
+    if (!$("orderSymbol").value.trim()) {
+      $("orderSymbol").value = activeSymbol || "";
+    }
+    refresh();
+  });
+}
+
+//+------------------------------------------------------------------+
+//| Symbol picker                                                    |
+//|                                                                  |
+//|  Two independent things are going on and conflating them is how   |
+//|  orders reach the wrong chart:                                    |
+//|                                                                   |
+//|  * which chart's snapshot is on screen  -- the picker;            |
+//|  * which symbol an order ticket names   -- its own field.          |
+//|                                                                   |
+//|  The ticket field defaults to the chart on screen but stays       |
+//|  editable, so a trader can queue for another chart without losing  |
+//|  the readout they are watching.                                    |
+//+------------------------------------------------------------------+
+function paintSymbolOptions(catalogue) {
+  // --- a datalist's children are <option> elements, so they are built with
+  // --- createElement rather than innerHTML: the latter would insert text,
+  // --- and the browser would have nothing to offer as a suggestion.
+  const list = $("symbolOptions");
+  const options = [];
+  for (const entry of catalogue) {
+    const option = document.createElement("option");
+    option.value = entry.symbol;                  // what gets sent
+    option.label = entry.label || entry.symbol;   // what gets shown
+    options.push(option);
+  }
+  list.replaceChildren(...options);
+}
+
+function paintSymbolPicker(catalogue) {
+  const charts = catalogue.filter(
+    (entry) => (entry.sources || []).indexOf("chart") !== -1
+  );
+  const picker = $("symbolPicker");
+
+  if (charts.length < 2) {
+    picker.className = "hidden";        // one chart needs no chooser
+    return;
+  }
+  picker.className = "ml-1 flex flex-col gap-1 border-l border-ink-700 pl-3";
+
+  const select = $("symbolSelect");
+  const options = charts.map((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.symbol;
+    option.textContent = entry.label || entry.symbol;
+    return option;
+  });
+  select.replaceChildren(...options);
+  // --- keep the choice across repaints: a 1 s refresh that reset the
+  // --- dropdown would make a multi-chart terminal unusable
+  select.value = activeSymbol || charts[0].symbol;
+}
+
+async function loadSymbols() {
+  try {
+    const response = await fetch("/api/symbols", { cache: "no-store" });
+    if (!response.ok) return;
+    const body = await response.json();
+    const catalogue = body.symbols || [];
+    paintSymbolOptions(catalogue);
+    paintSymbolPicker(catalogue);
+  } catch {
+    /* the picker is a convenience; the status poll is what matters */
+  }
+}
+
+//+------------------------------------------------------------------+
+//| Unmanaged positions                                              |
+//|                                                                  |
+//|  The rule this block exists to enforce: never render an unknown or |
+//|  unavailable answer as "all clear". A green badge on a check that  |
+//|  did not happen is worse than no badge at all.                     |
+//+------------------------------------------------------------------+
+const UNMANAGED_TONE = {
+  ok: "pill bg-live/15 text-live",
+  unknown: "pill bg-stale/15 text-stale",
+  unavailable: "pill bg-ink-700 text-shade-300",
+};
+
+function unmanagedRowNodes(rows) {
+  return rows.map((row) => {
+    const tr = document.createElement("tr");
+    const cells = [
+      "#" + row.ticket,
+      row.symbol,
+      row.side,
+      Number(row.volume).toFixed(2),
+      Number(row.profit).toFixed(2),
+      row.verdict === "no_charon_on_symbol"
+        ? "no Charon chart on this symbol"
+        : "absent from the chart's legs",
+    ];
+    for (const text of cells) {
+      const cell = document.createElement("td");
+      cell.className = "py-1 pr-3";
+      cell.textContent = text;
+      tr.append(cell);
+    }
+    return tr;
+  });
+}
+
+function renderUnmanaged(body) {
+  const summary = body.summary || {};
+  const state = summary.state || "unavailable";
+  const rows = body.positions || [];
+  const pending = body.pending || [];
+
+  $("unmanagedPanel").className = "panel mt-4";
+  const badge = $("unmanagedBadge");
+  badge.className = UNMANAGED_TONE[state] || UNMANAGED_TONE.unavailable;
+
+  if (rows.length > 0) {
+    badge.textContent = rows.length === 1 ? "1 unmanaged" : rows.length + " unmanaged";
+  } else if (state === "ok") {
+    badge.textContent = "all clear";
+  } else if (state === "unknown") {
+    badge.textContent = "unknown";
+  } else {
+    badge.textContent = "unavailable";
+  }
+
+  $("unmanagedRows").replaceChildren(...unmanagedRowNodes(rows));
+  $("unmanagedTableWrap").className = rows.length
+    ? "overflow-x-auto px-4 pb-3"
+    : "hidden overflow-x-auto px-4 pb-3";
+
+  const detail = $("unmanagedBody");
+  if (rows.length) {
+    detail.className = "px-4 py-2 text-[11px] text-shade-400";
+    detail.textContent = pending.length
+      ? pending.length + " further position(s) not yet confirmed."
+      : "Open, but no live Charon chart accounts for them.";
+  } else if (state === "ok") {
+    detail.className = "px-4 py-3 text-[11px] text-shade-400";
+    detail.textContent = "Checked every live chart: nothing unmanaged.";
+  } else if (state === "unknown") {
+    // --- the sentence that must never become "all clear"
+    detail.className = "px-4 py-3 text-[11px] text-stale";
+    detail.textContent =
+      "A chart is stale or still starting, so its positions cannot be " +
+      "checked. This is not an all-clear.";
+  } else {
+    detail.className = "px-4 py-3 text-[11px] text-shade-400";
+    detail.textContent =
+      body.reason || "No Charon chart is publishing, so nothing can be reconciled.";
+  }
+
+  $("unmanagedSummary").textContent =
+    pending.length ? pending.length + " pending" : "";
+}
+
+async function loadUnmanaged() {
+  try {
+    const response = await fetch("/api/unmanaged", { cache: "no-store" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      // --- an HTTP error is not a clean account
+      renderUnmanaged({
+        summary: { state: "unavailable" },
+        reason:
+          typeof body.detail === "string" ? body.detail : "HTTP " + response.status,
+      });
+      return;
+    }
+    renderUnmanaged(body);
+  } catch (error) {
+    renderUnmanaged({
+      summary: { state: "unavailable" },
+      reason: "cannot reach the bridge: " + error.message,
+    });
+  }
 }
 
 //+------------------------------------------------------------------+
@@ -821,17 +1021,34 @@ async function loadHealth() {
   }
 }
 
+// --- the order field starts on the chart being shown, so the common case
+// --- needs no typing. Kept as its own function because boot() is checked
+// --- for only calling declared helpers, and "$" is a const arrow.
+function defaultOrderSymbol() {
+  if (!$("orderSymbol").value.trim() && activeSymbol) {
+    $("orderSymbol").value = activeSymbol;
+  }
+}
+
 async function boot() {
   wireCommands();
   setLastGood(0);
   await loadHealth();
+  await loadSymbols();
   startLog();
   await refresh();
+  defaultOrderSymbol();
+  await loadUnmanaged();
   setInterval(refresh, REFRESH_MS);
+  // --- reconciliation costs a terminal round trip, so it polls on its own
+  // --- slower cadence rather than riding the 1 s status loop
+  setInterval(loadUnmanaged, REFRESH_MS * 3);
 
   // --- the health block is static for a process, but a bridge restart
   // --- during a long session should be visible without a page reload
   setInterval(loadHealth, REFRESH_MS * 30);
+  // --- charts attach and detach; the picker has to keep up
+  setInterval(loadSymbols, REFRESH_MS * 10);
 }
 
 boot();
