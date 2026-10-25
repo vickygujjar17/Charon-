@@ -143,6 +143,9 @@ def test_catalogue_carries_both_the_exact_name_and_the_label(
         "symbol": "EURUSD.a",
         "label": "EURUSD",
         "sources": [symbols.SOURCE_BROKER],
+        # --- v1.4.0: a grouping heading for the picker, derived from the
+        # --- canonical name. Advisory only -- see symbols.asset_class.
+        "asset_class": symbols.ASSET_FOREX,
     }
 
 
@@ -156,3 +159,53 @@ def test_catalogue_drops_blank_and_duplicate_names() -> None:
 
 def test_catalogue_of_nothing_is_empty() -> None:
     assert symbols.catalogue() == []
+
+
+#+------------------------------------------------------------------+
+#| asset_class() -- a grouping label, never a filter                 |
+#+------------------------------------------------------------------+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("EURUSD", symbols.ASSET_FOREX),
+        ("GBPJPY", symbols.ASSET_FOREX),
+        ("USDCAD", symbols.ASSET_FOREX),
+        ("XAUUSD", symbols.ASSET_METALS),
+        ("XAGUSD", symbols.ASSET_METALS),
+        ("US30.cash", symbols.ASSET_INDEX),
+        ("NAS100", symbols.ASSET_INDEX),
+        ("DE40", symbols.ASSET_INDEX),
+        ("SPX500", symbols.ASSET_INDEX),
+        ("USOIL", symbols.ASSET_ENERGY),
+        ("WTIUSD", symbols.ASSET_ENERGY),
+        ("BTCUSD", symbols.ASSET_CRYPTO),
+        ("ETH/USD", symbols.ASSET_CRYPTO),
+    ],
+)
+def test_asset_class_recognises_the_common_names(name: str, expected: str) -> None:
+    assert symbols.asset_class(name) == expected
+
+
+def test_asset_class_strips_the_broker_suffix_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deployment-configured suffix must not change what an instrument *is*."""
+    monkeypatch.setenv(symbols.SUFFIX_ENV, ".a")
+    assert symbols.asset_class("XAUUSD.a") == symbols.ASSET_METALS
+
+
+def test_asset_class_prefers_energy_over_forex() -> None:
+    """``USOIL`` contains no currency pair but ``USD`` alone; check the order."""
+    assert symbols.asset_class("USOIL") == symbols.ASSET_ENERGY
+    assert symbols.asset_class("USDJPY") == symbols.ASSET_FOREX
+
+
+@pytest.mark.parametrize("name", ["FOOBAR", "AAPL", "", "   ", "???", "12345"])
+def test_asset_class_never_rejects_an_unknown_name(name: str) -> None:
+    """The whole point: an unrecognised symbol is still offered, under Other."""
+    assert symbols.asset_class(name) == symbols.ASSET_OTHER
+
+
+def test_asset_class_is_purely_derived_from_the_name() -> None:
+    """Two calls with the same input must agree -- it is a label, not state."""
+    assert symbols.asset_class("EURUSD") == symbols.asset_class("EURUSD")

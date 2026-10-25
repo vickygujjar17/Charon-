@@ -283,6 +283,10 @@ function render(payload) {
 
   renderLadder($("ladder"), snap.basket.ladder);
 
+  // --- working orders. Rendered before the pyramid block so a LIMIT ticket
+  // --- is visible even when pyramiding is disabled.
+  renderPending(snap.pending, digits, snap.currency);
+
   // --- pyramid
   const pyr = snap.pyramid;
   const armState = $("armState");
@@ -353,7 +357,7 @@ function legRow(leg) {
 
   // --- the ladder cell keeps its own small stack of rungs
   const tdLadder = document.createElement("td");
-  tdLadder.className = "py-2 pr-4";
+  tdLadder.className = "py-2 pr-3";
   const box = document.createElement("div");
   box.className = "space-y-1";
   box.dataset.role = "leg-ladder";
@@ -361,7 +365,32 @@ function legRow(leg) {
   tdLadder.append(box);
   tr.append(tdLadder);
 
+  // --- per-row actions. These act on THIS row's ticket, which is the whole
+  // --- point: v1.3.0's buttons only ever addressed whatever the last verdict
+  // --- happened to name.
+  const tdActions = document.createElement("td");
+  tdActions.className = "py-2 pr-4";
+  const actions = document.createElement("div");
+  actions.className = "flex gap-1";
+  actions.append(rowButton("modify", "Modify", "btn-ghost", leg.ticket));
+  actions.append(rowButton("cancel", "Close", "btn-danger", leg.ticket));
+  tdActions.append(actions);
+  tr.append(tdActions);
+
   return tr;
+}
+
+// --- one small per-row button. Kept as a helper so every row is built the
+// --- same way and the handler receives the ticket from the button itself
+// --- rather than from whatever is currently on screen.
+function rowButton(action, label, variant, ticket) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = variant + " px-2 py-0.5 text-[10px]";
+  button.dataset.rowAction = action;
+  button.dataset.ticket = String(ticket);
+  button.textContent = label;
+  return button;
 }
 
 function fillLegRow(tr, leg, digits) {
@@ -431,7 +460,103 @@ function renderLegs(legs, digits) {
 
 
 //+------------------------------------------------------------------+
-//| Polling                                                          |
+//| Working orders                                                   |
+//|                                                                  |
+//| A pending order is not a position, so it cannot live in the legs  |
+//| table: it has no entry, no progress and no 1R until it fills. It  |
+//| gets its own table because the one thing an operator needs from a |
+//| working order is the ability to cancel it.                        |
+//+------------------------------------------------------------------+
+function pendingRow(order) {
+  const tr = document.createElement("tr");
+  tr.className = "border-b border-ink-800 transition-colors hover:bg-ink-800/40";
+  tr.dataset.ticket = String(order.ticket);
+  for (let index = 0; index < 7; index += 1) {
+    const td = document.createElement("td");
+    td.className = index === 0 ? "py-2 pl-4 pr-3" : "py-2 pr-3";
+    td.dataset.cell = String(index);
+    tr.append(td);
+  }
+  return tr;
+}
+
+function fillPendingRow(tr, order, digits) {
+  const cells = [
+    { text: "#" + order.ticket, cls: "text-shade-300" },
+    {
+      text: order.side || "\u2014",
+      cls: order.side === "BUY" ? "font-semibold text-live" : "font-semibold text-offline",
+    },
+    { text: order.order_type || "\u2014", cls: "text-shade-300" },
+    { text: price(order.price, digits), cls: "" },
+    // --- a pending order without a stop is a broker-side hazard, so it says
+    // --- so rather than showing a tidy 0.00000
+    { text: price(order.sl, digits), cls: order.sl > 0 ? "" : "text-offline" },
+    { text: order.lot === null ? "\u2014" : Number(order.lot).toFixed(2), cls: "" },
+  ];
+
+  const tdNodes = tr.querySelectorAll("td[data-cell]");
+  for (let index = 0; index < cells.length; index += 1) {
+    const td = tdNodes[index];
+    if (!td) continue;
+    td.className =
+      (index === 0 ? "py-2 pl-4 pr-3 " : "py-2 pr-3 ") + cells[index].cls;
+    td.textContent = cells[index].text;
+  }
+
+  const tdActions = tdNodes[6];
+  if (tdActions) {
+    tdActions.className = "py-2 pr-4";
+    // --- rebuilt on every paint rather than diffed: the pending table is
+    // --- tiny and a stale handler would keep acting on a dead ticket.
+    while (tdActions.firstChild) tdActions.removeChild(tdActions.firstChild);
+    const actions = document.createElement("div");
+    actions.className = "flex gap-1";
+    actions.append(rowButton("cancel", "Cancel", "btn-danger", order.ticket));
+    tdActions.append(actions);
+  }
+}
+
+function renderPending(orders, digits, currency) {
+  const rows = Array.isArray(orders) ? orders : [];
+  const tbody = $("pendingRows");
+  const existing = new Map();
+  for (const tr of tbody.children) {
+    existing.set(tr.dataset.ticket, tr);
+  }
+
+  for (const order of rows) {
+    const key = String(order.ticket);
+    let tr = existing.get(key);
+    if (tr) {
+      existing.delete(key);
+    } else {
+      tr = pendingRow(order);
+    }
+    fillPendingRow(tr, order, digits);
+    tbody.append(tr);
+  }
+  for (const tr of existing.values()) {
+    tr.remove();
+  }
+
+  $("pendingBadge").textContent = String(rows.length);
+  $("noPending").classList.toggle("hidden", rows.length > 0);
+  $("pendingTableWrap").classList.toggle("hidden", rows.length === 0);
+
+  // --- volume is the one number worth summarising: it is what is committed
+  // --- to the book even though nothing has filled yet.
+  let volume = 0;
+  for (const order of rows) {
+    if (typeof order.lot === "number") volume += order.lot;
+  }
+  $("pendingSummary").textContent = rows.length
+    ? rows.length + " working \u00b7 " + volume.toFixed(2) + " lots committed"
+    : "nothing working";
+}
+
+
+
 //|                                                                  |
 //| A slow bridge is not an outage, but a hung one is: every poll has |
 //| a deadline, and a failure of any kind is reported as an error     |
@@ -535,6 +660,10 @@ function renderOrder(order, digits, currency) {
       : "\u2014";
   $("orderTicket").textContent =
     order && order.ticket ? "#" + order.ticket : "\u2014";
+  // --- the tag the EA copied into the broker comment. Not the note: the note
+  // --- lives in the bridge's journal and is shown in the journal list.
+  $("orderJournalTag").textContent =
+    order && order.journal_tag ? order.journal_tag : "\u2014";
 
   const verdict = $("orderVerdict");
   if (!order || status === "idle") {
@@ -569,17 +698,78 @@ function readTicket() {
   const symbol = typed || activeSymbol;
   const entryRaw = $("orderEntry").value.trim();
   const type = $("orderType").value;
-  return {
+  const unit = $("orderRiskUnit").value;
+  const riskValue = Number($("orderRisk").value);
+
+  // --- risk is stated ONCE. The server refuses a ticket carrying both, so the
+  // --- unused field is omitted rather than sent as zero: a zero would read as
+  // --- a real budget and would be rejected as "not positive".
+  const ticket = {
     symbol: symbol && symbol !== "\u2014" ? symbol : null,
     side: $("orderSide").value,
     order_type: type,
     entry: entryRaw === "" ? null : Number(entryRaw),
     block_top: Number($("orderBlockTop").value),
     block_bottom: Number($("orderBlockBottom").value),
-    risk_pct: Number($("orderRisk").value),
     trail_trigger: Number($("orderTrail").value),
     rung: Number($("orderRung").value),
   };
+  if (unit === "money") {
+    ticket.risk_money = riskValue;
+  } else {
+    ticket.risk_pct = riskValue;
+  }
+
+  // --- optional, and only sent when actually filled in: an empty box means
+  // --- "use the chart setting", which is what the EA does with an absent key.
+  const trailStart = optionalNumber("orderTrailStart");
+  if (trailStart !== null) {
+    ticket.trail_start_rr = trailStart;
+  }
+  const ceiling = optionalNumber("orderBasketCeiling");
+  if (ceiling !== null) {
+    ticket.basket_risk_ceiling_pct = ceiling;
+  }
+
+  const stages = readStages();
+  if (stages.length > 0) {
+    ticket.stages = stages;
+  }
+
+  const journal = $("orderJournal").value.trim();
+  if (journal !== "") {
+    ticket.journal = journal;
+  }
+  return ticket;
+}
+
+// --- an empty input is "not stated", which is different from zero. Sending 0
+// --- would ask the EA for a threshold it would then have to ignore.
+function optionalNumber(id) {
+  const raw = $(id).value.trim();
+  if (raw === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+// --- collect the pyramid stage rows that have a trigger filled in. A row with
+// --- an empty trigger is "not used" rather than an error, so an operator can
+// --- leave stage 3 blank instead of having to delete it.
+function readStages() {
+  const rows = $("stageRows").children;
+  const stages = [];
+  for (const row of rows) {
+    const trigger = Number(row.querySelector("[data-stage='trigger']").value);
+    const kind = row.querySelector("[data-stage='kind']").value;
+    const multRaw = row.querySelector("[data-stage='mult']").value.trim();
+    if (!Number.isFinite(trigger) || trigger <= 0) continue;
+    stages.push({
+      kind: kind,
+      trigger: trigger,
+      lots_mult: multRaw === "" ? 1 : Number(multRaw),
+    });
+  }
+  return stages;
 }
 
 async function postOrder(path, label) {
@@ -591,12 +781,21 @@ async function postOrder(path, label) {
   // --- a blank box is not zero: catch it here rather than sending NaN,
   // --- which JSON turns into null and the server rejects with a message
   // --- far less useful than this one.
-  for (const key of ["block_top", "block_bottom", "risk_pct"]) {
+  for (const key of ["block_top", "block_bottom"]) {
     if (!Number.isFinite(ticket[key]) || ticket[key] <= 0) {
       message.className = "mt-2 text-[11px] text-offline";
       message.textContent = key.replace("_", " ") + " must be a positive number.";
       return;
     }
+  }
+  // --- whichever unit is selected, exactly one risk figure is sent, and it
+  // --- has to be positive before it leaves the browser.
+  const riskKey = ticket.risk_money !== undefined ? "risk_money" : "risk_pct";
+  if (!Number.isFinite(ticket[riskKey]) || ticket[riskKey] <= 0) {
+    message.className = "mt-2 text-[11px] text-offline";
+    message.textContent =
+      riskKey.replace("_", " ") + " must be a positive number.";
+    return;
   }
   if (ticket.order_type === "LIMIT" && !Number.isFinite(ticket.entry)) {
     message.className = "mt-2 text-[11px] text-offline";
@@ -631,6 +830,92 @@ async function postOrder(path, label) {
   }
 }
 
+// --- build the three pyramid stage rows once, at wiring time. Three is
+// --- MAX_STAGES on the server; the HTML never hard-codes a fourth because the
+// --- bridge would refuse it.
+function buildStageRows() {
+  const host = $("stageRows");
+  for (let index = 1; index <= 3; index += 1) {
+    const cell = document.createElement("div");
+    cell.className = "rounded border border-ink-700 bg-ink-800/40 p-2";
+
+    const label = document.createElement("div");
+    label.className = "label";
+    label.textContent = "Stage " + index;
+    cell.append(label);
+
+    const kind = document.createElement("select");
+    kind.className = "ticket-field mt-1 text-[11px]";
+    kind.dataset.stage = "kind";
+    const rrOption = document.createElement("option");
+    rrOption.value = "rr";
+    rrOption.textContent = "trigger at R";
+    const priceOption = document.createElement("option");
+    priceOption.value = "price";
+    priceOption.textContent = "trigger at price";
+    kind.append(rrOption, priceOption);
+    cell.append(kind);
+
+    const trigger = document.createElement("input");
+    trigger.type = "number";
+    trigger.step = "0.00001";
+    trigger.dataset.stage = "trigger";
+    trigger.placeholder = "not used";
+    trigger.className = "ticket-field mt-1 text-[11px]";
+    cell.append(trigger);
+
+    const mult = document.createElement("input");
+    mult.type = "number";
+    mult.step = "0.05";
+    mult.min = "0";
+    mult.dataset.stage = "mult";
+    mult.placeholder = "size x1.0";
+    mult.className = "ticket-field mt-1 text-[11px]";
+    cell.append(mult);
+
+    host.append(cell);
+  }
+}
+
+// --- per-row Modify / Cancel. One delegated listener on the document, because
+// --- the rows are rebuilt on every poll: attaching a handler per button would
+// --- leak one per repaint. The ticket comes from the button, so a row can
+// --- never act on a different position by mistake.
+function wireRowActions() {
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-row-action]");
+    if (!button) return;
+    event.preventDefault();
+
+    const ticket = button.dataset.ticket;
+    const action = button.dataset.rowAction;
+    if (!ticket || !action) return;
+
+    if (action === "cancel") {
+      // --- a close is irreversible and closes real money, so it asks first.
+      const ok = window.confirm(
+        "Cancel #" + ticket + "? This removes the pending order or closes the position."
+      );
+      if (!ok) return;
+      await cancelTicket(ticket, $("orderMsg"));
+      return;
+    }
+
+    if (action === "modify") {
+      // --- Modify re-uses the form's block geometry against THIS ticket, so
+      // --- the operator types the new block once and clicks the row it
+      // --- belongs to. It does not silently resend the last verdict's ticket.
+      await postOrder(
+        "/api/order/modify?position=" + encodeURIComponent(ticket),
+        "Modify #" + ticket
+      );
+    }
+  });
+}
+
+
+// --- the order form itself. Every handler here edits a field or posts the
+// --- whole ticket; none of them derives a price, a volume or an R multiple.
 function wireOrderPanel() {
   $("orderType").addEventListener("change", (event) => {
     const isLimit = event.target.value === "LIMIT";
@@ -638,6 +923,51 @@ function wireOrderPanel() {
     $("orderEntry").placeholder = isLimit ? "price inside the block" : "market";
   });
   $("orderEntry").disabled = true;
+
+  // --- the risk unit changes the label, not the field: the operator keeps one
+  // --- box and the ticket carries exactly one figure.
+  $("orderRiskUnit").addEventListener("change", (event) => {
+    const money = event.target.value === "money";
+    $("orderRiskLabel").textContent = money ? "Risk (account ccy)" : "Risk %";
+    $("orderRisk").step = money ? "1" : "0.01";
+    $("orderRisk").placeholder = money ? "amount" : "percent";
+  });
+
+  // --- the direction wording, because a short is not a mistake to be nudged
+  // --- away from -- it is a choice this panel must support explicitly.
+  $("orderSide").addEventListener("change", (event) => {
+    $("orderSideHint").textContent = event.target.value === "BUY" ? "long" : "short";
+  });
+
+  // --- the symbol field's own hint tracks what is typed, and the filter box
+  // --- narrows the browser's suggestion list without ever touching the value
+  // --- that will be sent.
+  $("orderSymbol").addEventListener("input", paintSymbolHint);
+  $("orderSymbolFilter").addEventListener("input", () => {
+    const needle = $("orderSymbolFilter").value.trim().toLowerCase();
+    if (needle === "") {
+      paintSymbolOptions(symbolAll);
+      return;
+    }
+    const filtered = symbolAll.filter((entry) => {
+      const haystack =
+        (entry.symbol || "") + " " + (entry.label || "") + " " + assetLabel(entry.asset_class);
+      return haystack.toLowerCase().indexOf(needle) !== -1;
+    });
+    paintSymbolOptions(filtered);
+  });
+
+  // --- a stage's trigger means something different per kind, so the
+  // --- placeholder says which. Nothing is converted: the operator states a
+  // --- number and the EA interprets it against the kind.
+  $("stageRows").addEventListener("change", (event) => {
+    const target = event.target;
+    if (target.dataset.stage !== "kind") return;
+    const trigger = target.parentElement.querySelector("[data-stage='trigger']");
+    if (trigger) {
+      trigger.placeholder = target.value === "price" ? "price level" : "R multiple";
+    }
+  });
 
   $("orderPlaceBtn").addEventListener("click", () =>
     postOrder("/api/order", "Place"));
@@ -661,31 +991,49 @@ function wireOrderPanel() {
       message.textContent = "No ticket to cancel yet.";
       return;
     }
-    const symbol = activeSymbol;
-    const path =
-      "/api/order/cancel?position=" +
-      encodeURIComponent(ticket.slice(1)) +
-      (symbol ? "&symbol=" + encodeURIComponent(symbol) : "");
+    await cancelTicket(ticket.slice(1), message);
+  });
+}
+
+// --- cancel one ticket, whichever table it lives in. Shared by the verdict
+// --- buttons, the leg rows and the pending rows so the request, the wording
+// --- and the refusal handling cannot drift apart.
+async function cancelTicket(ticketNumber, message) {
+  const symbol = activeSymbol;
+  const path =
+    "/api/order/cancel?position=" +
+    encodeURIComponent(ticketNumber) +
+    (symbol ? "&symbol=" + encodeURIComponent(symbol) : "");
+  if (message) {
     message.className = "mt-2 text-[11px] text-shade-400";
     message.textContent = "sending\u2026";
-    try {
-      const response = await fetch(path, { method: "POST" });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
+  }
+  try {
+    const response = await fetch(path, { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (message) {
         message.className = "mt-2 text-[11px] text-offline";
         message.textContent =
           typeof body.detail === "string" ? body.detail : "HTTP " + response.status;
-        return;
       }
+      return false;
+    }
+    if (message) {
       message.className = "mt-2 text-[11px] text-accent";
-      message.textContent = "Cancel queued \u2014 the EA applies it on its next tick.";
-      appendLocalLog("command", "order: cancel queued from the dashboard");
-      refresh();
-    } catch (error) {
+      message.textContent =
+        "Cancel queued for #" + ticketNumber + " \u2014 the EA applies it on its next tick.";
+    }
+    appendLocalLog("command", "order: cancel queued for #" + ticketNumber);
+    refresh();
+    return true;
+  } catch (error) {
+    if (message) {
       message.className = "mt-2 text-[11px] text-offline";
       message.textContent = "failed: " + error.message;
     }
-  });
+    return false;
+  }
 }
 
 
@@ -723,6 +1071,8 @@ async function postCommand(path, messageEl, label) {
 
 function wireCommands() {
   wireOrderPanel();
+  wireRowActions();
+  buildStageRows();
 
   $("armBtn").addEventListener("click", () =>
     postCommand("/api/pyramid/arm", $("armMsg"), "Arm"));
@@ -761,6 +1111,36 @@ function wireCommands() {
 //|  editable, so a trader can queue for another chart without losing  |
 //|  the readout they are watching.                                    |
 //+------------------------------------------------------------------+
+// --- the classifier's headings, in the order the bridge states. A class the
+// --- bridge did not name still renders under its raw key rather than being
+// --- dropped: an instrument must never disappear from the picker because the
+// --- client did not recognise a heading.
+const ASSET_LABELS = {
+  forex: "Forex",
+  metals: "Metals",
+  indices: "Indices",
+  energy: "Energy",
+  crypto: "Crypto",
+  stocks: "Stocks",
+  other: "Other",
+};
+
+function assetLabel(key) {
+  return ASSET_LABELS[key] || key || "Other";
+}
+
+// --- the picker offers the known names grouped by asset class. The grouping
+// --- is a heading, never a filter: every entry is offered regardless of what
+// --- the bridge thinks it is, because a broker names things the textbook does
+// --- not.
+// ---
+// --- Two lists on purpose: ``symbolAll`` is everything the bridge reported and
+// --- is what the filter searches; ``symbolCatalogue`` is what is currently on
+// --- offer. Collapsing them into one would make a filtered paint overwrite the
+// --- source, so clearing the filter could never restore the full list.
+let symbolAll = [];
+let symbolCatalogue = [];
+
 function paintSymbolOptions(catalogue) {
   // --- a datalist's children are <option> elements, so they are built with
   // --- createElement rather than innerHTML: the latter would insert text,
@@ -770,10 +1150,44 @@ function paintSymbolOptions(catalogue) {
   for (const entry of catalogue) {
     const option = document.createElement("option");
     option.value = entry.symbol;                  // what gets sent
-    option.label = entry.label || entry.symbol;   // what gets shown
+    // --- the class rides along in the label so the browser's own suggestion
+    // --- list reads as a grouped menu even though a datalist cannot nest
+    option.label = (entry.label || entry.symbol) + " \u00b7 " + assetLabel(entry.asset_class);
     options.push(option);
   }
   list.replaceChildren(...options);
+  symbolCatalogue = catalogue;
+  paintSymbolHint();
+}
+
+// --- the hint under the field names the exact broker symbol that will be
+// --- sent, and what the bridge thinks it is. It never rewrites the field: a
+// --- typed name is authoritative.
+function paintSymbolHint() {
+  const hint = $("orderSymbolHint");
+  if (!hint) return;
+  const typed = $("orderSymbol").value.trim();
+  if (typed === "") {
+    hint.textContent = symbolCatalogue.length
+      ? symbolCatalogue.length + " instruments known to the bridge"
+      : "";
+    return;
+  }
+  const match = symbolCatalogue.find(
+    (entry) => (entry.symbol || "").toLowerCase() === typed.toLowerCase()
+  );
+  if (match) {
+    hint.textContent =
+      assetLabel(match.asset_class) +
+      " \u00b7 " +
+      ((match.sources || []).indexOf("chart") !== -1
+        ? "live chart, can be driven now"
+        : "listed by the terminal, no chart yet");
+    return;
+  }
+  // --- not in the catalogue is not an error: the bridge may simply not be
+  // --- able to enumerate this broker's list. Saying so is honest.
+  hint.textContent = "not in the bridge's list \u2014 it will be sent exactly as typed";
 }
 
 function paintSymbolPicker(catalogue) {
@@ -807,6 +1221,7 @@ async function loadSymbols() {
     if (!response.ok) return;
     const body = await response.json();
     const catalogue = body.symbols || [];
+    symbolAll = catalogue;
     paintSymbolOptions(catalogue);
     paintSymbolPicker(catalogue);
   } catch {

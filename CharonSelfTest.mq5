@@ -9,7 +9,7 @@
 //|  Run it on any chart. The verdict line is "SELFTEST RESULT: ..." |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.03"
+#property version   "1.04"
 #property script_show_inputs
 
 //--- Same angle-include contract as Charon.mq5: headers live in Include\Charon\.
@@ -427,7 +427,107 @@ void TestBridgeJson(void)
    string verb2 = "";
    Check(CCharonBridge::ReadJsonString(tricky, "verb", verb2), "json: field after escape found");
    Check(verb2 == "ping", "json: parsing survives an embedded escape");
+
+   //--- v1.4.0: \uXXXX must decode. Before the fix the four hex digits were
+   //--- copied verbatim, so an accented character arrived as "u00e9" -- a
+   //--- mangled note that looked like the operator's typo, not a parser bug.
+   string accented = "{\"tag\":\"caf\\u00e9\"}";
+   string tag = "";
+   Check(CCharonBridge::ReadJsonString(accented, "tag", tag), "json: \\u escape parsed");
+   Check(tag == "caf" + ShortToString((ushort)0x00E9), "json: \\u escape decoded",
+         StringFormat("got '%s'", tag));
+
+   //--- upper-case hex is equally valid JSON
+   string upper = "{\"tag\":\"\\u00E9\"}";
+   string upperTag = "";
+   Check(CCharonBridge::ReadJsonString(upper, "tag", upperTag), "json: upper-case hex parsed");
+   Check(upperTag == ShortToString((ushort)0x00E9), "json: upper-case hex decoded");
+
+   //--- a truncated escape is refused rather than half-decoded: guessing
+   //--- would invent characters that were never sent.
+   string broken = "{\"tag\":\"ab\\u12\"}";
+   string brokenTag = "unchanged";
+   Check(!CCharonBridge::ReadJsonString(broken, "tag", brokenTag),
+         "json: short \\u escape is refused");
+
+   //--- non-hex digits are refused for the same reason
+   string nonHex = "{\"tag\":\"\\uZZZZ\"}";
+   string nonHexTag = "";
+   Check(!CCharonBridge::ReadJsonString(nonHex, "tag", nonHexTag),
+         "json: non-hex \\u escape is refused");
   }
+
+//+------------------------------------------------------------------+
+//| Bridge: the v1.4.0 ticket helpers                                |
+//+------------------------------------------------------------------+
+void TestBridgeTicketHelpers(void)
+  {
+   Check(CHARON_BRIDGE_MAX_STAGES == 3, "ticket: three pyramid stages");
+   Check(CHARON_BRIDGE_SCHEMA == 3, "ticket: the wire revision is 3");
+
+   //--- the journal tag is what rides in a broker comment, so it must be
+   //--- printable ASCII and nothing else.
+   Check(CCharonBridge::TagIsAscii("LONDON-BREAK"), "tag: plain ASCII accepted");
+   Check(CCharonBridge::TagIsAscii(""), "tag: empty is inert but valid");
+   Check(!CCharonBridge::TagIsAscii("caf" + ShortToString((ushort)0x00E9)),
+         "tag: an accented byte is refused");
+   Check(!CCharonBridge::TagIsAscii("a" + ShortToString((ushort)9) + "b"),
+         "tag: a tab is refused");
+
+   //--- stages: absent means "use the chart inputs", not an error
+   SCharonBridgeStage none[];
+   ArrayResize(none, CHARON_BRIDGE_MAX_STAGES);
+   int count = 7;
+   string err = "";
+   Check(CCharonBridge::ReadStages("{\"verb\":\"order_open\"}", count, none, err),
+         "stages: an absent array is not an error");
+   Check(count == 0, "stages: absent leaves the count at zero");
+
+   string one = "{\"stages\":[{\"kind\":\"rr\",\"trigger\":2.0,\"lots_mult\":0.5}]}";
+   Check(CCharonBridge::ReadStages(one, count, none, err), "stages: one stage parsed", err);
+   Check(count == 1, "stages: count is 1", StringFormat("got %d", count));
+   Check(none[0].kind == (int)CHARON_STAGE_RR, "stages: kind rr");
+   Check(Near(none[0].trigger, 2.0, 1e-9), "stages: trigger parsed");
+   Check(Near(none[0].lotsMult, 0.5, 1e-9), "stages: multiplier parsed");
+
+   string price = "{\"stages\":[{\"kind\":\"price\",\"trigger\":1.265}]}";
+   Check(CCharonBridge::ReadStages(price, count, none, err), "stages: price stage parsed", err);
+   Check(none[0].kind == (int)CHARON_STAGE_PRICE, "stages: kind price");
+   Check(Near(none[0].lotsMult, 1.0, 1e-9), "stages: an absent multiplier defaults to 1");
+
+   string bad = "{\"stages\":[{\"kind\":\"atr\",\"trigger\":2.0}]}";
+   Check(!CCharonBridge::ReadStages(bad, count, none, err), "stages: unknown kind refused");
+
+   string noTrigger = "{\"stages\":[{\"kind\":\"rr\"}]}";
+   Check(!CCharonBridge::ReadStages(noTrigger, count, none, err),
+         "stages: a stage without a trigger is refused");
+
+   //--- direction. A BUY block runs 1.25 -> 1.27; stages must climb past it.
+   SCharonBridgeStage up[];
+   ArrayResize(up, CHARON_BRIDGE_MAX_STAGES);
+   Check(CCharonBridge::ReadStages(one, count, up, err) &&
+         CCharonBridge::StagesAdvance(up, count, true, 1.27000, 1.25000),
+         "stages: 2R advances for a BUY");
+   Check(!CCharonBridge::StagesAdvance(up, count, false, 1.27000, 1.25000),
+         "stages: a BUY plan is refused for a SELL");
+
+   //--- a price stage must sit beyond the block, on the profit side
+   Check(CCharonBridge::ReadStages(price, count, up, err) &&
+         CCharonBridge::StagesAdvance(up, count, true, 1.27000, 1.25000),
+         "stages: a price beyond the block advances");
+   string inside = "{\"stages\":[{\"kind\":\"price\",\"trigger\":1.26000}]}";
+   Check(CCharonBridge::ReadStages(inside, count, up, err) &&
+         !CCharonBridge::StagesAdvance(up, count, true, 1.27000, 1.25000),
+         "stages: a price inside the block is refused");
+
+   //--- and like kinds must be monotonic, so no stage can be unreachable
+   string backwards = "{\"stages\":[{\"kind\":\"rr\",\"trigger\":3.0},"
+                      "{\"kind\":\"rr\",\"trigger\":2.0}]}";
+   Check(CCharonBridge::ReadStages(backwards, count, up, err) &&
+         !CCharonBridge::StagesAdvance(up, count, true, 1.27000, 1.25000),
+         "stages: a retreating R ladder is refused");
+  }
+
 
 //+------------------------------------------------------------------+
 //| Script entry point                                               |
@@ -485,6 +585,7 @@ void OnStart(void)
    TestArmGating();
    TestBridgeVerbs();
    TestBridgeJson();
+   TestBridgeTicketHelpers();
    TestBridgeSafeName();
 
    PrintFormat("==================================================");

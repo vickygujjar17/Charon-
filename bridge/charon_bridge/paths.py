@@ -211,6 +211,18 @@ def state_path(symbol: str) -> Path:
     return bridge_root() / f"state_{safe}.json"
 
 
+def journal_path(symbol: str) -> Path:
+    """Journal sidecar for one symbol.
+
+    Kept beside the snapshot, not inside it: the journal is the bridge's
+    own record of what the operator *meant*, and the EA never reads or
+    writes this file. Filing it per symbol keeps two charts from
+    interleaving their notes.
+    """
+    safe = sanitize_symbol(symbol)
+    return bridge_root() / f"journal_{safe}.json"
+
+
 def sanitize_symbol(symbol: str) -> str:
     """Make a symbol safe to embed in a file name.
 
@@ -268,6 +280,7 @@ __all__ = [
     "inboxes",
     "inbox_for",
     "iter_commands",
+    "journal_path",
     "mark_inbox",
     "processed_dir",
     "processed_dirs",

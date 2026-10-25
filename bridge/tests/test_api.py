@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 import main
 from charon_bridge import mt5_adapter
 from charon_bridge.version import SCHEMA_VERSION
+from tests.conftest import make_snapshot
 
 
 @pytest.fixture()
@@ -409,6 +410,115 @@ def test_a_stale_snapshot_does_not_satisfy_the_gate(
     response = client.post("/api/order", json=_ticket())
     assert response.status_code == 422
     assert "no live Charon snapshot" in response.json()["detail"]
+
+
+#+------------------------------------------------------------------+
+#| v1.4.0: the revision pre-flight                                  |
+#+------------------------------------------------------------------+
+def _semantic_ticket(**overrides: object) -> dict[str, object]:
+    """A ticket carrying something only a v1.4.0 EA can honour."""
+    body = _ticket()
+    # --- risk is exclusive, so a money ticket has to drop the percentage.
+    # --- Sending both is itself a refusal, which would hide what is being
+    # --- tested here.
+    if "risk_money" in overrides:
+        body.pop("risk_pct", None)
+    body.update(overrides)
+    return body
+
+
+def test_a_v14_ticket_is_refused_against_a_schema_2_ea(
+        client: TestClient, write_snapshot, common_dir: Path) -> None:
+    """The EA would ignore the new fields and trade anyway -- refuse first."""
+    write_snapshot(make_snapshot(schema=2))
+    response = client.post("/api/order", json=_semantic_ticket(risk_money=250.0))
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    # --- the message names the field and the fix, not just "wrong schema"
+    assert "money-denominated risk" in detail
+    assert "schema 2" in detail
+    # --- and nothing was queued: the refusal is not advisory
+    inbox = common_dir / "Charon" / "commands"
+    assert list(inbox.glob("*.json")) == [] if inbox.is_dir() else True
+
+
+def test_a_plain_ticket_still_works_against_a_schema_2_ea(
+        client: TestClient, write_snapshot) -> None:
+    """An un-upgraded chart must stay usable for the ticket it does understand."""
+    write_snapshot(make_snapshot(schema=2))
+    response = client.post("/api/order", json=_ticket())
+    assert response.status_code == 200
+    assert response.json()["queued"] is True
+
+
+def test_a_v14_ticket_is_accepted_against_a_schema_3_ea(
+        client: TestClient, write_snapshot, common_dir: Path) -> None:
+    write_snapshot(make_snapshot(schema=SCHEMA_VERSION))
+    response = client.post("/api/order", json=_semantic_ticket(risk_money=250.0))
+    assert response.status_code == 200
+    inbox = common_dir / "Charon" / "commands"
+    sent = json.loads(next(inbox.glob("*.json")).read_text(encoding="utf-8"))
+    assert sent["risk_money"] == 250.0
+    assert "risk_pct" not in sent
+
+
+def test_status_reports_both_revisions(client: TestClient, write_snapshot) -> None:
+    """The UI needs both numbers to explain a refusal."""
+    write_snapshot(make_snapshot(schema=2))
+    body = client.get("/api/status", params={"symbol": "GBPUSD"}).json()
+    assert body["bridge_schema"] == SCHEMA_VERSION
+    assert body["snapshot"]["schema"] == 2
+
+
+#+------------------------------------------------------------------+
+#| v1.4.0: journal and pending orders over HTTP                      |
+#+------------------------------------------------------------------+
+def test_a_journal_note_is_kept_and_rekeyed_onto_the_ticket(
+        client: TestClient, write_snapshot) -> None:
+    """The note is written at queue time, then claimed when a ticket exists."""
+    # --- a journal is a v1.4.0 field, so this needs a v1.4.0 EA publishing.
+    write_snapshot(make_snapshot(schema=SCHEMA_VERSION))
+    posted = client.post("/api/order", json=_semantic_ticket(
+        journal="London break - retest of VWAP"))
+    assert posted.status_code == 200
+
+    # --- not yet attributable: no verdict has named a position ticket
+    body = client.get("/api/status", params={"symbol": "GBPUSD"}).json()
+    assert body["journal"] == []
+
+    # --- the EA accepts the ticket and reports #555
+    write_snapshot(make_snapshot(schema=SCHEMA_VERSION, order={
+        "status": "accepted", "reason": "filled", "side": "BUY", "lots": 0.2,
+        "entry": 1.26, "stop": 1.25, "risk_money": 20.0, "risk_pct": 0.2,
+        "rung": 1, "ticket": 555, "journal_tag": "LONDON-BREAK-RETEST-OF-VWAP",
+    }))
+    body = client.get("/api/status", params={"symbol": "GBPUSD"}).json()
+    assert [row["ticket"] for row in body["journal"]] == [555]
+    assert body["journal"][0]["note"] == "London break - retest of VWAP"
+    # --- the EA echoes the short tag, never the note
+    assert body["snapshot"]["order"]["journal_tag"] == "LONDON-BREAK-RETEST-OF-VWAP"
+
+
+def test_pending_orders_are_published_with_the_positions(
+        client: TestClient, write_snapshot) -> None:
+    write_snapshot(make_snapshot(pending=[
+        {"ticket": 900, "side": "BUY", "order_type": "LIMIT", "price": 1.25,
+         "sl": 1.24, "lot": 0.20, "placed_at": 1_760_000_000},
+    ]))
+    body = client.get("/api/positions", params={"symbol": "GBPUSD"}).json()
+    assert [row["ticket"] for row in body["pending"]] == [900]
+    assert body["pending"][0]["order_type"] == "LIMIT"
+
+
+def test_symbols_offer_an_asset_class_for_each_instrument(
+        client: TestClient, write_snapshot) -> None:
+    write_snapshot()
+    body = client.get("/api/symbols").json()
+    assert body["symbols"], "no instruments offered at all"
+    for entry in body["symbols"]:
+        assert entry["asset_class"]
+    # --- the grouping order is the bridge's, so the client cannot drift
+    assert body["asset_classes"][0] == "forex"
 
 
 def test_shape_refusals_come_before_the_liveness_check(client: TestClient) -> None:

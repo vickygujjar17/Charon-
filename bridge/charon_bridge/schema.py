@@ -20,7 +20,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from .version import SCHEMA_VERSION
+from .version import SCHEMA_VERSION, SUPPORTED_SNAPSHOT_SCHEMAS
 
 
 class SchemaError(ValueError):
@@ -70,6 +70,28 @@ MAX_RISK_PCT: float = 100.0
 # --- levels (InpRrLadderA/B/C), so 0 means "no rung" and 1..3 index them.
 # --- Must match CHARON_BRIDGE_MAX_RUNG in CharonBridge.mqh.
 MAX_RUNG: int = 3
+
+# --- pyramid stages a ticket may carry. Tier 1 is the primary leg, so three
+# --- further stages reach CHARON_MAX_TIERS (4) exactly.
+# --- Must match CHARON_BRIDGE_MAX_STAGES in CharonBridge.mqh.
+MAX_STAGES: int = 3
+
+# --- how a pyramid stage decides it may fire.
+# --- ``rr``    -- the basket must have reached ``trigger`` R multiples;
+# --- ``price`` -- the market must have traded through ``price``.
+TRIGGER_KINDS: tuple[str, ...] = ("rr", "price")
+
+# --- the journal is human text, so it is bounded rather than rejected: the
+# --- EA stores a short ASCII tag beside the ticket and the bridge keeps the
+# --- full note. Byte-for-byte equality is not promised across the wire --
+# --- see ``journal_tag``.
+MAX_JOURNAL_LEN: int = 500
+MAX_JOURNAL_TAG_LEN: int = 24
+
+# --- hard bound on a ticket's basket-wide risk ceiling. 0 means "do not
+# --- attach a ceiling"; anything above this is refused as a typo rather than
+# --- quietly clamped, because a ceiling is a safety input.
+MAX_BASKET_CEILING_PCT: float = 100.0
 
 TRAIL_MODE_NAMES: dict[int, str] = {
     0: "OFF",
@@ -287,13 +309,14 @@ class Order:
     risk_pct: float | None
     rung: int | None
     ticket: int | None
+    journal_tag: str | None = None
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> "Order":
         if not isinstance(raw, dict):
             return cls(status="idle", reason=None, side=None, lots=None, entry=None,
                        stop=None, risk_money=None, risk_pct=None, rung=None,
-                       ticket=None)
+                       ticket=None, journal_tag=None)
         status = _text(raw, "status")
         side = _text(raw, "side")
         rung = raw.get("rung")
@@ -309,7 +332,70 @@ class Order:
             risk_pct=_number(raw, "risk_pct"),
             rung=rung if isinstance(rung, int) else None,
             ticket=ticket if isinstance(ticket, int) and ticket > 0 else None,
+            journal_tag=_text(raw, "journal_tag"),
         )
+
+
+@dataclass(frozen=True)
+class Pending:
+    """One working pending order as the EA publishes it.
+
+    Pending orders are invisible to the position list -- they are orders, not
+    positions -- so without this a LIMIT ticket could only be cancelled by
+    remembering its number. ``order`` reports the last verdict; this reports
+    what is still working.
+
+    ``None`` means "the EA did not report it", never zero, for the same reason
+    it does everywhere else in this module.
+    """
+
+    ticket: int
+    side: str
+    order_type: str | None
+    price: float | None
+    stop: float | None
+    lot: float | None
+    placed_at: int | None
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any]) -> "Pending":
+        ticket = raw.get("ticket")
+        if not isinstance(ticket, int) or ticket <= 0:
+            raise SchemaError(f"pending order has a non-positive ticket: {ticket!r}")
+        side = _text(raw, "side")
+        if side not in SIDES:
+            raise SchemaError(f"pending order {ticket} has no usable side")
+        placed = raw.get("placed_at")
+        return cls(
+            ticket=ticket,
+            side=side,
+            order_type=_text(raw, "order_type"),
+            price=_number(raw, "price"),
+            stop=_number(raw, "sl"),
+            lot=_number(raw, "lot"),
+            placed_at=placed if isinstance(placed, int) else None,
+        )
+
+
+def _pendings(raw: Any) -> tuple[Pending, ...]:
+    """Parse a ``pending`` array, skipping anything unusable.
+
+    One malformed entry must not hide the rest: a pending order the operator
+    cannot see is one they cannot cancel, so partial knowledge still beats
+    none. An entry whose *ticket* is unusable is dropped, because a row with
+    no ticket cannot be acted on at all.
+    """
+    if not isinstance(raw, list):
+        return ()
+    parsed: list[Pending] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            parsed.append(Pending.from_json(item))
+        except SchemaError:
+            continue
+    return tuple(parsed)
 
 
 @dataclass(frozen=True)
@@ -332,6 +418,7 @@ class Snapshot:
     pyramid: Pyramid
     legs: tuple[Leg, ...] = field(default_factory=tuple)
     order: Order = field(default_factory=lambda: Order.from_json(None))
+    pending: tuple[Pending, ...] = field(default_factory=tuple)
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> "Snapshot":
@@ -339,9 +426,16 @@ class Snapshot:
             raise SchemaError("snapshot is not a JSON object")
 
         schema = raw.get("schema")
-        if schema != SCHEMA_VERSION:
+        # --- tolerant on the way in, strict on the way out. A v1.4.0 bridge
+        # --- must still render a schema-2 EA (every new field is additive),
+        # --- but it must never *command* one -- ``build_command`` stamps
+        # --- SCHEMA_VERSION and the EA refuses a mismatch, which is the
+        # --- guard that stops a half-upgraded install from trading on a
+        # --- ticket whose constraints the old EA would silently drop.
+        if schema not in SUPPORTED_SNAPSHOT_SCHEMAS:
             raise SchemaError(
-                f"snapshot schema {schema!r} does not match bridge schema {SCHEMA_VERSION}"
+                f"snapshot schema {schema!r} is not one this bridge renders "
+                f"(it understands {SUPPORTED_SNAPSHOT_SCHEMAS})"
             )
 
         symbol = _text(raw, "symbol")
@@ -358,7 +452,11 @@ class Snapshot:
         digits = raw.get("digits")
 
         return cls(
-            schema=SCHEMA_VERSION,
+            # --- the revision actually read, not ours. The pre-flight in
+            # --- main.py compares this against SCHEMA_VERSION to refuse a
+            # --- ticket the EA cannot fully understand; recording our own
+            # --- number here would make that check vacuous.
+            schema=schema,
             seq=seq if isinstance(seq, int) else 0,
             ea_version=_text(raw, "ea_version"),
             symbol=symbol,
@@ -374,6 +472,7 @@ class Snapshot:
             pyramid=Pyramid.from_json(raw.get("pyramid")),
             legs=legs,
             order=Order.from_json(raw.get("order")),
+            pending=_pendings(raw.get("pending")),
         )
 
 
@@ -396,9 +495,23 @@ class OrderIntent:
     entry: float | None
     block_top: float
     block_bottom: float
-    risk_pct: float
+    risk_pct: float | None
     trail_trigger: int
     rung: int
+    # --- v1.4.0 additions. Every one has a meaningful "absent" form, so a
+    # --- ticket written by an older bridge still validates and still means
+    # --- exactly what it used to mean.
+    risk_money: float | None = None
+    basket_risk_ceiling_pct: float | None = None
+    trail_start_rr: float | None = None
+    trail_start_points: float | None = None
+    stages: tuple[Stage, ...] = ()
+    journal: str | None = None
+
+    @property
+    def risk_mode(self) -> str:
+        """Which risk figure the ticket actually stated: ``pct`` or ``money``."""
+        return "money" if self.risk_money is not None else "pct"
 
     def to_doc(self) -> dict[str, Any]:
         doc: dict[str, Any] = {
@@ -406,13 +519,84 @@ class OrderIntent:
             "order_type": self.order_type,
             "block_top": self.block_top,
             "block_bottom": self.block_bottom,
-            "risk_pct": self.risk_pct,
             "trail_trigger": self.trail_trigger,
             "rung": self.rung,
         }
         if self.entry is not None:
             doc["entry"] = self.entry
+        # --- exactly one of these is ever present; ``build_order_intent``
+        # --- enforces the exclusivity, so the EA never has to arbitrate
+        # --- between two contradictory budgets.
+        if self.risk_pct is not None:
+            doc["risk_pct"] = self.risk_pct
+        if self.risk_money is not None:
+            doc["risk_money"] = self.risk_money
+        if self.basket_risk_ceiling_pct is not None:
+            doc["basket_risk_ceiling_pct"] = self.basket_risk_ceiling_pct
+        if self.trail_start_rr is not None:
+            doc["trail_start_rr"] = self.trail_start_rr
+        if self.trail_start_points is not None:
+            doc["trail_start_points"] = self.trail_start_points
+        if self.stages:
+            doc["stages"] = [stage.to_doc() for stage in self.stages]
+        if self.journal:
+            doc["journal"] = self.journal
+            # --- the short form the EA puts in the broker comment. Sent as
+            # --- its own key so the EA never has to transliterate anything:
+            # --- Python guarantees printable ASCII here, and the full note
+            # --- stays on this side of the wire.
+            doc["journal_tag"] = journal_tag(self.journal)
         return doc
+
+
+@dataclass(frozen=True)
+class Stage:
+    """One pyramid stage, as the operator stated it.
+
+    ``trigger`` is interpreted according to ``kind``:
+
+    * ``rr``    -- a multiple of the primary leg's 1R;
+    * ``price`` -- an absolute price the market must trade through.
+
+    ``lots_mult`` multiplies the *primary leg's solved volume*. It is not a
+    volume: the EA still owns the arithmetic, and a multiplier cannot express
+    an absolute size. A stage is therefore never a way to smuggle a lot value
+    past the risk model.
+    """
+
+    kind: str
+    trigger: float
+    lots_mult: float
+
+    def to_doc(self) -> dict[str, Any]:
+        return {"kind": self.kind, "trigger": self.trigger, "lots_mult": self.lots_mult}
+
+
+def journal_tag(text: str | None) -> str:
+    """The short ASCII tag that rides in the broker comment.
+
+    The full note lives in the journal sidecar, keyed by ticket, because a
+    broker comment is size-limited and CPython's JSON writer is not the only
+    party that has to read it: ``CCharonBridge::ReadJsonString`` decodes
+    ``\\uXXXX`` escapes only partially (pre-1.4.0 it produced ``u00e9`` for
+    ``\\u00e9``). Rather than depend on that being fixed, the wire form stays
+    inside printable ASCII.
+
+    What survives is deliberately lossy: alphanumerics and a few separators,
+    upper-cased, truncated. That is all a comment can honestly carry -- the
+    note itself is never reconstructed from it.
+    """
+    if not text:
+        return ""
+    cleaned = "".join(
+        char if (char.isascii() and (char.isalnum() or char in "-_.+")) else "-"
+        for char in text.strip()
+    )
+    # --- collapse the runs the substitution above can create
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned.strip("-")[:MAX_JOURNAL_TAG_LEN].upper()
+
 
 
 def _finite(raw: Any, what: str) -> float:
@@ -433,6 +617,74 @@ def _finite(raw: Any, what: str) -> float:
 
 
 
+def _positive(raw: Any, what: str) -> float:
+    """A positive, finite number -- ``NaN``/``inf``/bools refused."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise SchemaError(f"{what} must be a number, got {raw!r}")
+    value = float(raw)
+    if not math.isfinite(value) or value <= 0.0:
+        raise SchemaError(f"{what} must be a positive finite number, got {raw!r}")
+    return value
+
+
+def _stages(raw: Any, side: str, entry: float | None) -> tuple[Stage, ...]:
+    """Validate the pyramid ladder a ticket carries.
+
+    The ordering rule is directional, not cosmetic: the EA only ever adds
+    exposure once the basket is *winning* (``Evaluate`` refuses a tier below
+    its R trigger), so a stage placed on the losing side of the entry could
+    never fire and would silently turn a three-stage plan into a one-stage
+    one. Refusing it here says so out loud.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise SchemaError(f"stages must be a list, got {type(raw).__name__}")
+    if len(raw) > MAX_STAGES:
+        raise SchemaError(f"a ticket may carry at most {MAX_STAGES} pyramid stages")
+
+    built: list[Stage] = []
+    for position, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise SchemaError(f"stage {position} is not an object")
+        kind = item.get("kind", "rr")
+        if kind not in TRIGGER_KINDS:
+            raise SchemaError(
+                f"stage {position} kind must be one of {TRIGGER_KINDS}, got {kind!r}"
+            )
+        trigger = _positive(item.get("trigger"), f"stage {position} trigger")
+        lots_mult = _positive(item.get("lots_mult", 1.0), f"stage {position} lots_mult")
+        built.append(Stage(kind=kind, trigger=trigger, lots_mult=lots_mult))
+
+    # --- monotonic within each kind. Mixing kinds is allowed; comparing an R
+    # --- multiple against a price would be meaningless, so only like pairs
+    # --- are ordered against each other.
+    for kind in TRIGGER_KINDS:
+        ordered = [stage.trigger for stage in built if stage.kind == kind]
+        ascending = side == "BUY"
+        for earlier, later in zip(ordered, ordered[1:]):
+            ahead = later > earlier if ascending else later < earlier
+            if not ahead:
+                raise SchemaError(
+                    f"stages of kind {kind!r} must advance in the {side} direction "
+                    f"(stage {earlier!r} then {later!r})"
+                )
+
+    # --- and on the profit side of a known entry, for the price kind only:
+    # --- an R trigger is already measured from the entry.
+    if entry is not None:
+        for position, stage in enumerate(built, start=1):
+            if stage.kind != "price":
+                continue
+            ahead = stage.trigger > entry if side == "BUY" else stage.trigger < entry
+            if not ahead:
+                raise SchemaError(
+                    f"stage {position} triggers at {stage.trigger!r}, which is not "
+                    f"beyond the entry {entry!r} for a {side}"
+                )
+    return tuple(built)
+
+
 def build_order_intent(
     *,
     side: Any,
@@ -440,15 +692,25 @@ def build_order_intent(
     entry: Any,
     block_top: Any,
     block_bottom: Any,
-    risk_pct: Any,
+    risk_pct: Any = None,
     trail_trigger: Any = 0,
     rung: Any = 0,
+    risk_money: Any = None,
+    basket_risk_ceiling_pct: Any = None,
+    trail_start_rr: Any = None,
+    trail_start_points: Any = None,
+    stages: Any = None,
+    journal: Any = None,
 ) -> OrderIntent:
     """Validate an order ticket before it is allowed near the inbox.
 
     This is a shape check, not a risk check. The EA is still the only party
     that decides whether a trade happens; refusing malformed intent here
     just keeps obvious garbage out of the command folder.
+
+    Risk is stated **once**, as either a percentage or an amount of money.
+    Both would be two answers to one question, and the EA would have to pick
+    a winner -- so the ticket is refused instead of silently preferring one.
     """
     if side not in SIDES:
         raise SchemaError(f"side must be one of {SIDES}, got {side!r}")
@@ -475,11 +737,49 @@ def build_order_intent(
         if order_type == "LIMIT" and not (low < entry_price < high):
             raise SchemaError("a LIMIT entry must sit strictly inside the block")
 
-    if isinstance(risk_pct, bool) or not isinstance(risk_pct, (int, float)):
-        raise SchemaError(f"risk_pct must be a number, got {risk_pct!r}")
-    risk = float(risk_pct)
-    if not math.isfinite(risk) or not (0.0 < risk <= MAX_RISK_PCT):
-        raise SchemaError(f"risk_pct must be in (0, {MAX_RISK_PCT}], got {risk_pct!r}")
+    # --- exactly one risk statement. ``risk_pct`` keeps its v1.1.0 bound; a
+    # --- money figure can only be sanity-checked here, because the account
+    # --- is the EA's to know -- it clamps against MaxAllowedRiskMoney().
+    if risk_pct is None and risk_money is None:
+        raise SchemaError("a ticket needs either risk_pct or risk_money")
+    if risk_pct is not None and risk_money is not None:
+        raise SchemaError("state risk as risk_pct or risk_money, not both")
+
+    risk: float | None = None
+    money: float | None = None
+    if risk_pct is not None:
+        if isinstance(risk_pct, bool) or not isinstance(risk_pct, (int, float)):
+            raise SchemaError(f"risk_pct must be a number, got {risk_pct!r}")
+        risk = float(risk_pct)
+        if not math.isfinite(risk) or not (0.0 < risk <= MAX_RISK_PCT):
+            raise SchemaError(f"risk_pct must be in (0, {MAX_RISK_PCT}], got {risk_pct!r}")
+    else:
+        money = _positive(risk_money, "risk_money")
+
+    # --- the basket ceiling is a whole-basket gate, enforced by the EA's
+    # --- ChPyramidRiskAccepts before any stage fires. It is not a second
+    # --- sizing input, so a ceiling below the primary leg's own risk is a
+    # --- contradiction and is refused rather than clamped.
+    ceiling: float | None = None
+    if basket_risk_ceiling_pct is not None:
+        ceiling = _positive(basket_risk_ceiling_pct, "basket_risk_ceiling_pct")
+        if ceiling > MAX_BASKET_CEILING_PCT:
+            raise SchemaError(
+                f"basket_risk_ceiling_pct must be at most {MAX_BASKET_CEILING_PCT}, "
+                f"got {basket_risk_ceiling_pct!r}"
+            )
+        if risk is not None and risk > ceiling:
+            raise SchemaError(
+                f"risk_pct {risk!r} already exceeds the basket ceiling {ceiling!r}"
+            )
+
+    start_rr: float | None = None
+    if trail_start_rr is not None:
+        start_rr = _positive(trail_start_rr, "trail_start_rr")
+
+    start_points: float | None = None
+    if trail_start_points is not None:
+        start_points = _positive(trail_start_points, "trail_start_points")
 
     if isinstance(trail_trigger, bool) or trail_trigger not in TRAIL_MODE_NAMES:
         raise SchemaError(
@@ -491,6 +791,18 @@ def build_order_intent(
     if not (0 <= rung <= MAX_RUNG):
         raise SchemaError(f"rung must be in [0, {MAX_RUNG}], got {rung!r}")
 
+    note: str | None = None
+    if journal is not None:
+        if not isinstance(journal, str):
+            raise SchemaError(f"journal must be text, got {type(journal).__name__}")
+        # --- whitespace-only is "no note", not an error: an empty textarea
+        # --- is how the operator says nothing.
+        note = journal.strip() or None
+        if note is not None and len(note) > MAX_JOURNAL_LEN:
+            raise SchemaError(
+                f"journal is {len(note)} characters; the limit is {MAX_JOURNAL_LEN}"
+            )
+
     return OrderIntent(
         side=side,
         order_type=order_type,
@@ -500,6 +812,12 @@ def build_order_intent(
         risk_pct=risk,
         trail_trigger=int(trail_trigger),
         rung=rung,
+        risk_money=money,
+        basket_risk_ceiling_pct=ceiling,
+        trail_start_rr=start_rr,
+        trail_start_points=start_points,
+        stages=_stages(stages, side, entry_price),
+        journal=note,
     )
 
 
@@ -548,22 +866,30 @@ def build_command(verb: str, issued: int, *, symbol: str, command_id: str,
 __all__ = [
     "ALLOWED_VERBS",
     "FORBIDDEN_VERBS",
+    "MAX_BASKET_CEILING_PCT",
+    "MAX_JOURNAL_LEN",
+    "MAX_JOURNAL_TAG_LEN",
     "MAX_RISK_PCT",
     "MAX_RUNG",
+    "MAX_STAGES",
     "ORDER_TYPES",
     "ORDER_VERBS",
     "SIDES",
     "TRAIL_MODE_NAMES",
+    "TRIGGER_KINDS",
     "Basket",
     "Leg",
     "Model",
     "Order",
     "OrderIntent",
+    "Pending",
     "Pyramid",
     "SchemaError",
     "Snapshot",
+    "Stage",
     "Trail",
     "build_command",
     "build_order_intent",
+    "journal_tag",
 ]
 

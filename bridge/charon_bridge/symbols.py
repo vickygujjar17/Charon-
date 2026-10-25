@@ -82,6 +82,112 @@ def canonical(symbol: str) -> str:
     return text.upper()
 
 
+# --- how a picker groups instruments. Advisory only: this is a display label,
+# --- never a filter. A symbol whose class cannot be determined is ASSET_OTHER
+# --- and is still offered -- a broker calls things the textbook does not.
+ASSET_FOREX = "forex"
+ASSET_METALS = "metals"
+ASSET_INDEX = "indices"
+ASSET_ENERGY = "energy"
+ASSET_CRYPTO = "crypto"
+ASSET_STOCK = "stocks"
+ASSET_OTHER = "other"
+
+ASSET_CLASSES: tuple[str, ...] = (
+    ASSET_FOREX,
+    ASSET_METALS,
+    ASSET_INDEX,
+    ASSET_ENERGY,
+    ASSET_CRYPTO,
+    ASSET_STOCK,
+    ASSET_OTHER,
+)
+
+# --- token lists, matched against the canonical (suffix-stripped) name.
+# --- Deliberately short and unambiguous: the goal is a useful heading on a
+# --- picker, and a wrong guess here must never cost an operator a symbol.
+_METAL_TOKENS = frozenset({
+    "XAU", "XAG", "XPT", "XPD", "GOLD", "SILVER", "PLATINUM", "PALLADIUM",
+})
+_INDEX_TOKENS = frozenset({
+    "US30", "US500", "US100", "NAS100", "SPX500", "GER30", "GER40", "UK100",
+    "JP225", "AUS200", "FRA40", "HK50", "DE30", "DE40", "EU50", "US2000",
+    "DJ30", "NDX", "SPX", "DAX", "FTSE", "NIKKEI",
+})
+_ENERGY_TOKENS = frozenset({
+    "WTI", "BRENT", "USOIL", "UKOIL", "NGAS", "NATGAS", "GAS", "OIL",
+})
+_CRYPTO_TOKENS = frozenset({
+    "BTC", "ETH", "XRP", "LTC", "BCH", "ADA", "SOL", "DOGE", "DOT", "AVAX",
+    "LINK", "XLM", "TRX", "BNB", "MATIC",
+})
+# --- currencies that appear in a six-letter pair. Kept as a set of the ones a
+# --- retail broker actually lists, plus the majors' crosses.
+_CURRENCIES = frozenset({
+    "USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD", "SEK", "NOK",
+    "DKK", "SGD", "HKD", "ZAR", "MXN", "TRY", "PLN", "CZK", "HUF", "CNH",
+    "RMB", "INR", "RUB", "BRL", "THB", "KRW",
+})
+
+
+def asset_class(name: str) -> str:
+    """A best-effort instrument class for ``name``, for grouping only.
+
+    The rule that must not be relaxed: **this never rejects or rewrites a
+    symbol.** Everything it cannot classify comes back as
+    :data:`ASSET_OTHER`, which the picker still shows under its own heading.
+    A broker suffix (``.a``, ``m``, ``#``) is already stripped by
+    :func:`canonical`, so ``XAUUSD.a`` classifies like ``XAUUSD``.
+
+    Detection order matters. Metals, indices, energy and crypto are matched by
+    token because those names are distinctive; forex is matched structurally
+    (two known currencies in a row) and only afterwards, so ``USDJPY`` is forex
+    while ``USOIL`` is not.
+    """
+    text = canonical(name)
+    if not text:
+        return ASSET_OTHER
+
+    # --- split on the usual separators so BTCUSD, BTC/USD and BTC-USD all
+    # --- reduce to the same tokens.
+    tokens = [token for token in text.replace("-", "/").replace("_", "/").replace(".", "/").split("/") if token]
+    if len(tokens) > 1:
+        for token in tokens:
+            found = _classify_token(token)
+            if found != ASSET_OTHER:
+                return found
+
+    found = _classify_token(text)
+    return found
+
+
+def _classify_token(token: str) -> str:
+    """Classify one already-uppercased token.
+
+    Prefix matching is used where the instrument's name *starts* with the
+    marker (``BTCUSD``, ``XAUUSD``, ``WTIUSD``); exact matching is used for
+    index names, where a prefix test would collide with unrelated symbols.
+    Structural forex comes last so ``USOIL`` is never read as a currency pair.
+    """
+    if not token:
+        return ASSET_OTHER
+    for prefix in _METAL_TOKENS:
+        if token.startswith(prefix):
+            return ASSET_METALS
+    for prefix in _ENERGY_TOKENS:
+        if token.startswith(prefix):
+            return ASSET_ENERGY
+    for prefix in _CRYPTO_TOKENS:
+        if token.startswith(prefix):
+            return ASSET_CRYPTO
+    if token in _INDEX_TOKENS:
+        return ASSET_INDEX
+    if len(token) == 6 and token.isalpha():
+        if token[:3] in _CURRENCIES and token[3:] in _CURRENCIES:
+            return ASSET_FOREX
+    return ASSET_OTHER
+
+
 @dataclass(frozen=True)
 class Entry:
     """One instrument, as offered to the picker."""
@@ -100,6 +206,8 @@ class Entry:
             "symbol": self.name,
             "label": self.canonical,
             "sources": list(self.sources),
+            # --- a heading for the picker, never a filter. See asset_class().
+            "asset_class": asset_class(self.name),
         }
 
 
@@ -201,11 +309,20 @@ def resolve(hint: str, known: Sequence[str]) -> str | None:
 
 
 __all__ = [
+    "ASSET_CLASSES",
+    "ASSET_CRYPTO",
+    "ASSET_ENERGY",
+    "ASSET_FOREX",
+    "ASSET_INDEX",
+    "ASSET_METALS",
+    "ASSET_OTHER",
+    "ASSET_STOCK",
     "PREFIX_ENV",
     "SOURCE_BROKER",
     "SOURCE_CHART",
     "SUFFIX_ENV",
     "Entry",
+    "asset_class",
     "canonical",
     "catalogue",
     "matches",

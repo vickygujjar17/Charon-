@@ -37,14 +37,18 @@ from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from charon_bridge import commands, mt5_adapter, paths, reconcile, state, symbols
+from charon_bridge import commands, journal, mt5_adapter, paths, reconcile, state, symbols
 from charon_bridge.logs import LOG
 from charon_bridge.schema import (
     ALLOWED_VERBS,
     FORBIDDEN_VERBS,
+    MAX_JOURNAL_LEN,
+    MAX_STAGES,
     TRAIL_MODE_NAMES,
     SchemaError,
+    Stage,
     build_order_intent,
+    journal_tag,
 )
 from charon_bridge.version import BRIDGE_VERSION, SCHEMA_VERSION
 
@@ -187,6 +191,21 @@ def health() -> dict[str, Any]:
     }
 
 
+def journal_for(symbol: str, snapshot: Any) -> list[dict[str, Any]]:
+    """The notes for ``symbol``, with any unfiled note moved onto its ticket.
+
+    A note is written when the ticket is queued, before a position exists, so
+    it is stored under ticket 0. Once the EA reports an accepted verdict the
+    real ticket is known and the note is re-filed against it -- this is the
+    only moment that fact becomes available, so it happens on read rather than
+    on a timer.
+    """
+    order = snapshot.order
+    if order.ticket and order.status in ("accepted", "pending"):
+        journal.rekey(symbol, 0, order.ticket)
+    return journal.for_symbol(symbol)
+
+
 @app.get("/api/status", dependencies=[Depends(require_token)])
 def status(symbol: str | None = Query(default=None)) -> dict[str, Any]:
     """The snapshot, plus its age and a verdict the UI can colour."""
@@ -202,9 +221,16 @@ def status(symbol: str | None = Query(default=None)) -> dict[str, Any]:
         "age_seconds": round(reading.age_seconds, 2),
         "stale_after": state.STALE_AFTER_SECONDS,
         "offline_after": state.OFFLINE_AFTER_SECONDS,
+        # --- the revision this bridge speaks, next to the revision the EA
+        # --- published below. They differ on a half-upgraded install, and the
+        # --- UI needs both to explain why a ticket was refused.
+        "bridge_schema": SCHEMA_VERSION,
+        "journal": journal_for(resolved, snap),
         "snapshot": {
             "symbol": snap.symbol,
             "seq": snap.seq,
+            # --- the EA's own revision, not ours
+            "schema": snap.schema,
             "ea_version": snap.ea_version,
             "server_time": snap.server_time,
             "ready": snap.ready,
@@ -249,6 +275,37 @@ def status(symbol: str | None = Query(default=None)) -> dict[str, Any]:
                 "next_tier": snap.pyramid.next_tier,
                 "progress_rr": snap.pyramid.progress_rr,
             },
+            # --- the EA's verdict on the last ticket. ``journal_tag`` is the
+            # --- short ASCII tag the ticket carried; the note itself is in the
+            # --- sidecar above, keyed by ticket.
+            "order": {
+                "status": snap.order.status,
+                "reason": snap.order.reason,
+                "side": snap.order.side,
+                "lots": snap.order.lots,
+                "entry": snap.order.entry,
+                "stop": snap.order.stop,
+                "risk_money": snap.order.risk_money,
+                "risk_pct": snap.order.risk_pct,
+                "rung": snap.order.rung,
+                "ticket": snap.order.ticket,
+                "journal_tag": snap.order.journal_tag,
+            },
+            # --- orders that are still working. A LIMIT ticket is invisible in
+            # --- ``legs`` until it fills, so this is the only way it can be
+            # --- shown and cancelled.
+            "pending": [
+                {
+                    "ticket": order.ticket,
+                    "side": order.side,
+                    "order_type": order.order_type,
+                    "price": order.price,
+                    "sl": order.stop,
+                    "lot": order.lot,
+                    "placed_at": order.placed_at,
+                }
+                for order in snap.pending
+            ],
             "legs": [
                 {
                     "ticket": leg.ticket,
@@ -282,6 +339,10 @@ def positions(symbol: str | None = Query(default=None)) -> dict[str, Any]:
         "symbol": snap["symbol"],
         "basket": snap["basket"],
         "legs": snap["legs"],
+        # --- working orders travel with the positions: a caller that renders
+        # --- one without the other can only show half the book.
+        "pending": snap["pending"],
+        "journal": payload["journal"],
     }
 
 
@@ -314,6 +375,9 @@ def list_symbols() -> dict[str, Any]:
     return {
         "symbols": [entry.as_dict() for entry in entries],
         "charts": chart,
+        # --- the picker's grouping order. The bridge states it so the client
+        # --- never has to keep a second copy in step with this module.
+        "asset_classes": list(symbols.ASSET_CLASSES),
         "broker_available": mt5_adapter.available(),
         "broker_count": len(broker),
     }
@@ -398,7 +462,7 @@ def unmanaged() -> dict[str, Any]:
     return payload
 
 
-def _require_live_chart(symbol: str) -> None:
+def _require_live_chart(symbol: str) -> Any:
     """Refuse a trade-affecting command for a symbol with no live chart.
 
     Without this the ticket is written, queued, and silently never
@@ -410,6 +474,9 @@ def _require_live_chart(symbol: str) -> None:
     action that must not proceed on a guess. The message names the symbol
     and where the bridge looked, so the usual cause -- a typo, or the wrong
     terminal -- is obvious.
+
+    Returns the parsed snapshot so a caller that needs to inspect the EA's
+    revision does not have to read the file twice.
     """
     snapshot = _snapshot_for(symbol)
     if snapshot is None:
@@ -424,6 +491,57 @@ def _require_live_chart(symbol: str) -> None:
                 "chart."
             ),
         )
+    return snapshot
+
+
+# --- v1.4.0 fields an older EA would accept and then ignore. Listing them
+# --- explicitly (rather than testing "is this a v1.4 ticket") keeps the
+# --- refusal tied to the field that is actually unhonourable, so the message
+# --- can name it.
+_SEMANTIC_FIELDS: tuple[tuple[str, str], ...] = (
+    ("risk_money", "a money-denominated risk"),
+    ("basket_risk_ceiling_pct", "a basket-wide risk ceiling"),
+    ("trail_start_rr", "a per-ticket trail activation"),
+    ("trail_start_points", "a per-ticket trail activation"),
+    ("stages", "pyramid stages"),
+    ("journal", "a journal note"),
+)
+
+
+def _require_semantic_capable(symbol: str, intent: Any, where: str) -> None:
+    """Refuse a v1.4.0 ticket aimed at an EA that cannot honour it.
+
+    ``CCharonBridge::ReadCommandFile`` ignores keys it does not know, and the
+    EA refuses a schema mismatch by design. So a schema-3 ticket against a
+    schema-2 EA is already safe from *trading wrongly* -- it is refused on
+    the chart. But that refusal is only visible in the Experts log, while the
+    dashboard has just said "queued". This turns it into a synchronous,
+    readable answer naming both the field and the fix.
+
+    A ticket that carries none of the v1.4.0 semantics is deliberately
+    allowed through: an operator with no upgraded charts can still place a
+    plain block-and-risk ticket, and the EA will accept it exactly as before.
+    """
+    snapshot = _require_live_chart(symbol)
+    if snapshot.schema >= SCHEMA_VERSION:
+        return
+
+    offending = [label for field, label in _SEMANTIC_FIELDS if getattr(intent, field, None)]
+    if not offending:
+        return
+
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            f"{where} needs a v{SCHEMA_VERSION} EA, but the chart publishing "
+            f"{symbol!r} speaks schema {snapshot.schema}. It would read this "
+            f"ticket, ignore {', '.join(sorted(set(offending)))}, and trade "
+            "anyway. Either drop that part of the ticket, or install the "
+            f"v{SCHEMA_VERSION} EA (version {snapshot.ea_version or 'unknown'} "
+            "is running) and recompile that chart."
+        ),
+    )
+
 
 
 #+------------------------------------------------------------------+
@@ -482,6 +600,10 @@ class OrderTicket(BaseModel):
     architecture forbids.
 
     ``entry`` may be omitted for a MARKET ticket; ``LIMIT`` requires it.
+
+    Risk is stated **once** -- ``risk_pct`` or ``risk_money`` -- and the
+    exclusivity is enforced in ``build_order_intent`` so both the API and any
+    future caller share one rule.
     """
 
     symbol: str | None = Field(
@@ -493,9 +615,59 @@ class OrderTicket(BaseModel):
     entry: float | None = Field(default=None, description="Required for LIMIT")
     block_top: float = Field(description="Upper structural boundary")
     block_bottom: float = Field(description="Lower structural boundary")
-    risk_pct: float = Field(description="Risk as a percent of account")
+    risk_pct: float | None = Field(
+        default=None, description="Risk as a percent of account (or use risk_money)"
+    )
+    risk_money: float | None = Field(
+        default=None, description="Risk as an amount of account currency"
+    )
+    basket_risk_ceiling_pct: float | None = Field(
+        default=None,
+        ge=0,
+        description="Hard whole-basket risk ceiling enforced before any stage fires",
+    )
     trail_trigger: int = Field(default=0, ge=0, le=4, description="TrailMode rung")
+    trail_start_rr: float | None = Field(
+        default=None, description="Per-ticket trail activation in R"
+    )
+    trail_start_points: float | None = Field(
+        default=None, description="Per-ticket trail activation in points"
+    )
     rung: int = Field(default=0, ge=0, le=3, description="RR rung to report against")
+    stages: list[Stage] | None = Field(
+        default=None,
+        max_length=MAX_STAGES,
+        description="Pyramid stages: trigger kind, trigger value, volume multiplier",
+    )
+    journal: str | None = Field(
+        default=None,
+        max_length=MAX_JOURNAL_LEN,
+        description="Free-text trade note; the bridge keeps it, the EA gets a short tag",
+    )
+
+
+def _intent_from(ticket: "OrderTicket") -> Any:
+    """Validate a submitted ticket into an :class:`OrderIntent`.
+
+    Both order endpoints funnel through here, so a rule added to
+    ``build_order_intent`` cannot apply to one path and not the other.
+    """
+    return build_order_intent(
+        side=ticket.side,
+        order_type=ticket.order_type,
+        entry=ticket.entry,
+        block_top=ticket.block_top,
+        block_bottom=ticket.block_bottom,
+        risk_pct=ticket.risk_pct,
+        risk_money=ticket.risk_money,
+        basket_risk_ceiling_pct=ticket.basket_risk_ceiling_pct,
+        trail_trigger=ticket.trail_trigger,
+        trail_start_rr=ticket.trail_start_rr,
+        trail_start_points=ticket.trail_start_points,
+        rung=ticket.rung,
+        stages=[stage.to_doc() for stage in ticket.stages] if ticket.stages else None,
+        journal=ticket.journal,
+    )
 
 
 
@@ -519,30 +691,27 @@ def place_order(ticket: "OrderTicket") -> dict[str, Any]:
     """
     resolved = _symbol_or_404(ticket.symbol)
     try:
-        intent = build_order_intent(
-            side=ticket.side,
-            order_type=ticket.order_type,
-            entry=ticket.entry,
-            block_top=ticket.block_top,
-            block_bottom=ticket.block_bottom,
-            risk_pct=ticket.risk_pct,
-            trail_trigger=ticket.trail_trigger,
-            rung=ticket.rung,
-        )
+        intent = _intent_from(ticket)
         # --- shape first, liveness second: a malformed ticket is wrong
         # --- regardless of which charts are up, and telling the operator
         # --- that is more useful than "no chart". Both refuse before
         # --- anything is written.
-        _require_live_chart(resolved)
+        _require_semantic_capable(resolved, intent, "this ticket")
         sent = commands.submit("order_open", resolved, order=intent)
     except (SchemaError, commands.CommandError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     LOG.command(
         f"order_open queued for {resolved}: {intent.side} {intent.order_type} "
-        f"risk={intent.risk_pct}% block={intent.block_bottom}-{intent.block_top} "
-        f"({sent['file']})"
+        f"risk={intent.risk_pct if intent.risk_pct is not None else str(intent.risk_money) + ' ccy'}"
+        f" block={intent.block_bottom}-{intent.block_top} ({sent['file']})"
     )
+    # --- the note is filed against the ticket the EA will report. Until the
+    # --- verdict arrives there is no position ticket, so it is keyed by 0 and
+    # --- re-keyed by ``_sync_journal`` as soon as the snapshot carries one.
+    # --- Written *after* the command, so a failed submit leaves no orphan note.
+    if intent.journal:
+        journal.note(resolved, 0, intent.journal, tag=journal_tag(intent.journal))
     return {
         "queued": True,
         "verb": "order_open",
@@ -560,17 +729,8 @@ def modify_order(ticket: "OrderTicket", position: int = Query(gt=0)) -> dict[str
     """
     resolved = _symbol_or_404(ticket.symbol)
     try:
-        intent = build_order_intent(
-            side=ticket.side,
-            order_type=ticket.order_type,
-            entry=ticket.entry,
-            block_top=ticket.block_top,
-            block_bottom=ticket.block_bottom,
-            risk_pct=ticket.risk_pct,
-            trail_trigger=ticket.trail_trigger,
-            rung=ticket.rung,
-        )
-        _require_live_chart(resolved)
+        intent = _intent_from(ticket)
+        _require_semantic_capable(resolved, intent, "modifying a stop")
         sent = commands.submit("order_modify", resolved, order=intent, ticket=position)
     except (SchemaError, commands.CommandError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

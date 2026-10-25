@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 # --- mirrors CHARON_BRIDGE_SCHEMA / CHARON_BRIDGE_CMD_MAX_AGE in CharonBridge.mqh
-SCHEMA = 2
+SCHEMA = 3
 CMD_MAX_AGE = 60
 
 
@@ -65,6 +65,8 @@ ALLOWED_VERBS = ("arm", "disarm", "trail_mode", "ping",
                  "order_open", "order_modify", "order_cancel")
 ORDER_VERBS = ("order_open", "order_modify", "order_cancel")
 MAX_RUNG = 3
+MAX_STAGES = 3
+TRIGGER_KINDS = ("rr", "price")
 
 TRAIL_MODE_NAMES = {
     0: "OFF",
@@ -109,8 +111,13 @@ class FakeEA:
         self.order: dict[str, Any] = {
             "status": "idle", "reason": "", "side": "", "lots": 0.0,
             "entry": 0.0, "stop": 0.0, "risk_money": 0.0, "risk_pct": 0.0,
-            "rung": 0, "ticket": 0,
+            "rung": 0, "ticket": 0, "journal_tag": "",
         }
+        # --- working pending orders, as CollectPending would report them.
+        # --- Tests that need one append a row rather than relying on a
+        # --- default, because a pending ticket is something the dashboard
+        # --- offers to cancel.
+        self.pending: list[dict[str, Any]] = []
 
     #+----------------------------------------------------------------+
     #| Inbox                                                         |
@@ -225,10 +232,84 @@ class FakeEA:
             return "a LIMIT order needs an entry price"
 
         risk = doc.get("risk_pct")
-        if not isinstance(risk, (int, float)) or isinstance(risk, bool):
-            return "order ticket without risk_pct"
-        if not 0 < risk <= 100:
-            return f"risk {risk}% is outside the permitted range"
+        money = doc.get("risk_money")
+        # --- exactly one risk statement, mirroring the MQL5 parser
+        if risk is not None and money is not None:
+            return "order ticket states risk_pct and risk_money; send one"
+        if risk is None and money is None:
+            return "order ticket without risk_pct or risk_money"
+        if risk is not None:
+            if not isinstance(risk, (int, float)) or isinstance(risk, bool):
+                return "order ticket without risk_pct"
+            if not 0 < risk <= 100:
+                return f"risk {risk}% is outside the permitted range"
+        if money is not None:
+            if not isinstance(money, (int, float)) or isinstance(money, bool) or money <= 0:
+                return f"risk money {money} is not positive"
+
+        ceiling = doc.get("basket_risk_ceiling_pct")
+        if ceiling is not None:
+            if not isinstance(ceiling, (int, float)) or isinstance(ceiling, bool):
+                return "basket ceiling is not a number"
+            if not 0 <= ceiling <= 100:
+                return f"basket ceiling {ceiling}% is outside [0, 100]"
+            if risk is not None and ceiling > 0 and risk > ceiling:
+                return "risk_pct already exceeds the basket ceiling"
+
+        for key in ("trail_start_rr", "trail_start_points"):
+            start = doc.get(key)
+            if start is None:
+                continue
+            if not isinstance(start, (int, float)) or isinstance(start, bool) or start < 0:
+                return f"{key} is not positive"
+
+        tag = doc.get("journal_tag")
+        if tag is not None:
+            if not isinstance(tag, str):
+                return "journal tag is not text"
+            if len(tag) > 24:
+                return "journal tag is too long"
+            if not tag.isascii() or any(ord(c) < 32 or ord(c) > 126 for c in tag):
+                return "journal tag carries characters a broker comment cannot hold"
+
+        stages = doc.get("stages")
+        if stages is not None:
+            if not isinstance(stages, list):
+                return "stages is not an array"
+            if len(stages) > MAX_STAGES:
+                return f"a ticket may carry at most {MAX_STAGES} pyramid stages"
+            last_rr = None
+            last_price = None
+            for stage in stages:
+                if not isinstance(stage, dict):
+                    return "a pyramid stage is not an object"
+                kind = stage.get("kind", "rr")
+                if kind not in TRIGGER_KINDS:
+                    return f"stage kind '{kind}' is not supported"
+                trigger = stage.get("trigger")
+                if not isinstance(trigger, (int, float)) or isinstance(trigger, bool) or trigger <= 0:
+                    return "a pyramid stage has no positive trigger"
+                mult = stage.get("lots_mult", 1.0)
+                if not isinstance(mult, (int, float)) or isinstance(mult, bool) or mult <= 0:
+                    return "a pyramid stage has a non-positive volume multiplier"
+                if kind == "price":
+                    if side == "BUY" and trigger <= top:
+                        return "pyramid stages do not advance in the trade's direction"
+                    if side == "SELL" and trigger >= bottom:
+                        return "pyramid stages do not advance in the trade's direction"
+                    if last_price is not None:
+                        if side == "BUY" and trigger <= last_price:
+                            return "pyramid stages do not advance in the trade's direction"
+                        if side == "SELL" and trigger >= last_price:
+                            return "pyramid stages do not advance in the trade's direction"
+                    last_price = trigger
+                else:
+                    if last_rr is not None:
+                        if side == "BUY" and trigger <= last_rr:
+                            return "pyramid stages do not advance in the trade's direction"
+                        if side == "SELL" and trigger >= last_rr:
+                            return "pyramid stages do not advance in the trade's direction"
+                    last_rr = trigger
 
         trigger = doc.get("trail_trigger", 0)
         if int(trigger) not in TRAIL_MODE_NAMES:
@@ -299,9 +380,16 @@ class FakeEA:
             # --- ticket's budget, never taken from the command, which is
             # --- exactly the property the tests below assert.
             side = document["side"]
-            risk_pct = float(document["risk_pct"])
+            # --- risk is stated once; the fake honours whichever form arrived,
+            # --- exactly as ApplyOrderCommand does. A money budget is used
+            # --- as-is (the real EA clamps it first).
+            if document.get("risk_money") is not None:
+                budget = float(document["risk_money"])
+                risk_pct = round(budget / 10_000.0 * 100.0, 4)
+            else:
+                risk_pct = float(document["risk_pct"])
+                budget = 10_000.0 * risk_pct / 100.0
             height = abs(float(document["block_top"]) - float(document["block_bottom"]))
-            budget = 10_000.0 * risk_pct / 100.0
             lots = round(budget / (height * 100_000.0) / 0.01) * 0.01
             lots = max(lots, 0.01)
             entry = float(document.get("entry") or 1.26000)
@@ -318,6 +406,8 @@ class FakeEA:
                 "risk_pct": risk_pct,
                 "rung": int(document.get("rung", 0)),
                 "ticket": int(document.get("ticket") or 555),
+                # --- the tag rides back so the dashboard can name the note
+                "journal_tag": document.get("journal_tag", ""),
             }
 
         self.applied.append(verb)
@@ -398,6 +488,10 @@ class FakeEA:
                 "progress_rr": 1.42,
             },
             "order": dict(self.order),
+            # --- working orders. Empty by default: the fake EA has no broker,
+            # --- and a fabricated pending row would make a test assert on a
+            # --- ticket that cannot be cancelled.
+            "pending": [dict(row) for row in self.pending],
             "legs": [
                 {
                     "ticket": 111,

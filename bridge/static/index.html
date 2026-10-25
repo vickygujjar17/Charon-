@@ -160,16 +160,20 @@
       </div>
 
       <div class="grid gap-3 px-4 py-3 md:grid-cols-4">
-        <label class="block">
+        <label class="block md:col-span-2">
           <span class="label">Symbol</span>
-          <!-- The datalist offers the known names but does not restrict the
-               field: a broker can list an instrument the bridge cannot see,
-               and refusing a typo-free name would be worse than accepting it.
-               Whatever is typed here is sent verbatim -- it is the exact
-               broker name, not a display label. -->
-          <input id="orderSymbol" list="symbolOptions" placeholder="exact broker name"
+          <!-- The picker offers the known names, grouped by asset class, but
+               does not restrict the field: a broker can list an instrument the
+               bridge cannot see, and refusing a typo-free name would be worse
+               than accepting it. Whatever is selected or typed here is sent
+               verbatim -- it is the exact broker name, never the label. -->
+          <input id="orderSymbol" list="symbolOptions" placeholder="search or pick an instrument"
                  class="ticket-field mt-1" autocomplete="off" spellcheck="false" />
           <datalist id="symbolOptions"></datalist>
+          <input id="orderSymbolFilter" placeholder="filter by name or class"
+                 class="ticket-field mt-1 text-[11px]" autocomplete="off"
+                 spellcheck="false" />
+          <span id="orderSymbolHint" class="mt-1 block text-[10px] text-shade-400"></span>
         </label>
 
         <label class="block">
@@ -178,6 +182,7 @@
             <option value="BUY">BUY</option>
             <option value="SELL">SELL</option>
           </select>
+          <span id="orderSideHint" class="mt-1 block text-[10px] text-shade-400">long</span>
         </label>
 
         <label class="block">
@@ -195,7 +200,15 @@
         </label>
 
         <label class="block">
-          <span class="label">Risk %</span>
+          <span class="label">Risk unit</span>
+          <select id="orderRiskUnit" class="ticket-field mt-1">
+            <option value="pct">percent of account</option>
+            <option value="money">account currency</option>
+          </select>
+        </label>
+
+        <label class="block">
+          <span class="label" id="orderRiskLabel">Risk %</span>
           <input id="orderRisk" type="number" step="0.01" min="0.01" value="0.50"
                  class="ticket-field mt-1" />
         </label>
@@ -213,7 +226,7 @@
         </label>
 
         <label class="block">
-          <span class="label">Trail from entry</span>
+          <span class="label">Trail mode on fill</span>
           <select id="orderTrail" class="ticket-field mt-1">
             <option value="0">OFF</option>
             <option value="1">POINTS</option>
@@ -221,6 +234,19 @@
             <option value="3">HWM_PERCENT</option>
             <option value="4">RR_LOCK</option>
           </select>
+        </label>
+
+        <label class="block">
+          <span class="label">Trail activation (R)</span>
+          <input id="orderTrailStart" type="number" step="0.1" min="0"
+                 placeholder="chart input" class="ticket-field mt-1" />
+        </label>
+
+        <label class="block">
+          <span class="label">Basket risk ceiling %</span>
+          <input id="orderBasketCeiling" type="number" step="0.01" min="0"
+                 placeholder="chart input" class="ticket-field mt-1" />
+          <span id="orderBasketCeilingHint" class="mt-1 block text-[10px] text-shade-400"></span>
         </label>
 
         <label class="block">
@@ -233,6 +259,26 @@
           </select>
         </label>
       </div>
+
+      <!-- Pyramid stages. Each row is a plan, not an order: the EA fires a
+           stage only when its own gates allow, and the basket-risk ceiling
+           above is applied before any of them. -->
+      <div class="mx-4 mb-3 rounded-md border border-ink-700 bg-ink-900">
+        <div class="flex items-center justify-between border-b border-ink-700 px-3 py-1.5">
+          <span class="mark text-violet">Pyramid stages</span>
+          <span id="stageHint" class="text-[10px] text-shade-400">
+            optional &mdash; each stage multiplies the primary leg's solved size
+          </span>
+        </div>
+        <div id="stageRows" class="grid gap-2 px-3 py-2.5 md:grid-cols-3"></div>
+      </div>
+
+      <label class="mx-4 mb-3 block">
+        <span class="label">Journal note</span>
+        <textarea id="orderJournal" rows="2" class="ticket-field mt-1"
+                  placeholder="why this trade? the bridge keeps this; the chart only gets a short tag"></textarea>
+        <span id="journalHint" class="mt-1 block text-[10px] text-shade-400"></span>
+      </label>
 
       <!-- The EA's answer, in the EA's own numbers. Labelled as such so
            nobody mistakes this block for editable inputs. -->
@@ -261,6 +307,10 @@
             <div class="label">Ticket</div>
             <div id="orderTicket" class="readout mt-0.5 text-sm font-semibold">—</div>
           </div>
+          <div>
+            <div class="label">Journal tag</div>
+            <div id="orderJournalTag" class="readout mt-0.5 text-sm font-semibold">—</div>
+          </div>
         </div>
       </div>
 
@@ -274,6 +324,39 @@
         <button id="orderCancelBtn" class="btn-danger">Cancel ticket</button>
       </div>
       <div class="px-4 pb-3 text-[11px] text-shade-400" id="orderMsg"></div>
+    </section>
+
+    <!-- ================= PENDING ORDERS =================
+         A pending order is not a position: it has no row in the legs table
+         until it fills, so without this panel a LIMIT ticket could only be
+         cancelled by remembering its number. -->
+    <section class="panel mt-4" id="pendingPanel">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2.5">
+        <div class="flex items-center gap-2">
+          <h2 class="mark">Pending orders</h2>
+          <span id="pendingBadge" class="pill bg-ink-700 text-shade-300">0</span>
+        </div>
+        <span id="pendingSummary" class="text-[11px] text-shade-400"></span>
+      </div>
+      <div class="hidden overflow-x-auto" id="pendingTableWrap">
+        <table class="w-full text-left text-xs">
+          <thead class="text-[10px] uppercase tracking-[0.12em] text-shade-400">
+            <tr class="border-b border-ink-700">
+              <th class="py-2 pl-4 pr-3 font-medium">Ticket</th>
+              <th class="py-2 pr-3 font-medium">Side</th>
+              <th class="py-2 pr-3 font-medium">Type</th>
+              <th class="py-2 pr-3 font-medium">Price</th>
+              <th class="py-2 pr-3 font-medium">Stop</th>
+              <th class="py-2 pr-3 font-medium">Volume</th>
+              <th class="py-2 pr-4 font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="pendingRows" class="font-mono tabular-nums text-shade-200"></tbody>
+        </table>
+      </div>
+      <div id="noPending" class="border-t border-ink-700 px-4 py-3 text-xs text-shade-400">
+        No working orders. A LIMIT ticket appears here until it fills or is cancelled.
+      </div>
     </section>
 
     <!-- ================= UNMANAGED POSITIONS =================
@@ -385,7 +468,8 @@
             <th class="py-2 pr-3 font-semibold">1R</th>
             <th class="py-2 pr-3 font-semibold">Progress</th>
             <th class="py-2 pr-3 font-semibold">Flags</th>
-            <th class="py-2 pr-4 font-semibold">Ladder</th>
+            <th class="py-2 pr-3 font-semibold">Ladder</th>
+            <th class="py-2 pr-4 font-semibold">Actions</th>
           </tr>
         </thead>
         <tbody id="legRows" class="font-mono tabular-nums text-shade-200"></tbody>

@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.3.0**
+Current release: **v1.4.0**
 
 ---
 
@@ -441,17 +441,43 @@ EA is not publishing. `CHARON_SYMBOL_PREFIX` / `CHARON_SYMBOL_SUFFIX` (see
 Sending one would queue a file that no chart could ever drain — the operator would see
 "queued" and believe something was about to happen.
 
+### Upgrading to schema 3 (v1.4.0)
+
+The wire revision moved `2` -> `3`. The two directions are deliberately asymmetric:
+
+| Direction | Behaviour |
+|---|---|
+| Snapshot, EA schema 2 -> v1.4.0 bridge | **Rendered.** Every v1.4.0 addition is additive, so nothing is invented or lost. |
+| Command, v1.4.0 bridge -> EA schema 2 | **Refused.** `ReadCommandFile` requires an exact match, so the EA cannot act on a ticket whose constraints it would silently ignore. |
+
+That asymmetry is the whole safety story. `ReadCommandFile` ignores keys it does not know,
+so a schema-2 EA handed a schema-3 ticket would accept it, open a position and drop the
+money-denominated risk, the basket ceiling, the stage plan and the trail threshold -- a
+trade that *looks* governed and is not. Refusing the revision is the only honest answer.
+
+`POST /api/order` and `/api/order/modify` pre-flight it, so the refusal is synchronous and
+readable instead of a silent no-op visible only in the Experts log. A ticket carrying none
+of the v1.4.0 semantics still passes against a schema-2 EA: an un-upgraded chart stays
+usable for exactly what it understands.
+
+**Upgrade in this order:** recompile *every* chart with the v1.4.0 EA first, then restart
+the bridge. Restarting the bridge first leaves the old charts rejecting every ticket that
+uses a new field -- loudly, with a message naming the field.
+
 The command vocabulary is seven verbs: four state-only (`arm`, `disarm`, `trail_mode`,
 `ping`) and three for attended execution (`order_open`, `order_modify`, `order_cancel`).
 Both sides whitelist it independently, so neither can widen the set alone.
 
 The order verbs carry **intent, never size**. A ticket states a side, the block the stop
-is derived from, a risk percentage and the rung it is stated against. It does not contain
-a lot, a stop distance, a take-profit or an R multiple, because those are the EA's
-answers: `CCharonRisk::LotForBudget` solves the volume from the block height and the
-ticket's budget, clamps that budget to `InpMaxRiskPct`, and re-verifies the applied risk
-before anything is sent. `CharonTrade.mqh` is still the only module that calls
-`OrderSend`.
+is derived from, a risk figure (a percentage **or** an amount of money, never both), the
+rung it is stated against, and -- since v1.4.0 -- up to three pyramid stages, an optional
+trail activation threshold, an optional basket-wide risk ceiling and a journal note. It
+does not contain a lot, a stop distance, a take-profit or an R multiple, because those are
+the EA's answers: `CCharonRisk::LotForBudget` solves the volume from the block height and
+the ticket's budget, clamps that budget to `InpMaxRiskPct`, and re-verifies the applied
+risk before anything is sent. A pyramid stage is a **multiplier** against that solved
+volume, so it cannot express a size either. `CharonTrade.mqh` is still the only module
+that calls `OrderSend`.
 
 The raw verbs an attacker would reach for — `open`, `close`, `modify`, `buy`, `sell`,
 `size`, `cancel` — remain forbidden on both sides. `POST /api/trade` exists purely to

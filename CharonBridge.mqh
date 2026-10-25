@@ -30,7 +30,7 @@
 //|  nothing here is required for trading, risk or stops.             |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.03"
+#property version   "1.04"
 
 #ifndef __CHARON_BRIDGE__
 #define __CHARON_BRIDGE__
@@ -44,7 +44,7 @@
 //---       command written at a different revision is refused outright,
 //---       which is what keeps a half-upgraded install from acting on a
 //---       ticket it only partially understands.
-#define CHARON_BRIDGE_SCHEMA      2
+#define CHARON_BRIDGE_SCHEMA      3
 #define CHARON_BRIDGE_ROOT        "Charon"
 #define CHARON_BRIDGE_CMD_DIR     "Charon\\commands"    //--- legacy, read by pre-1.3.0 EAs
 #define CHARON_BRIDGE_DONE_DIR    "Charon\\commands\\processed"
@@ -74,6 +74,21 @@
 //--- them. Must match MAX_RUNG in bridge/charon_bridge/schema.py.
 #define CHARON_BRIDGE_MAX_RUNG    3
 
+//--- pyramid stages a single ticket may define. Tier 1 is the primary leg,
+//--- so three stages reach CHARON_MAX_TIERS (4) exactly.
+//--- Must match MAX_STAGES in bridge/charon_bridge/schema.py.
+#define CHARON_BRIDGE_MAX_STAGES  3
+
+//--- how a ticket's pyramid stage decides it may fire. Sent as text so the
+//--- JSON stays readable; must match TRIGGER_KINDS in schema.py.
+#define CHARON_BRIDGE_TRIG_RR     "rr"
+#define CHARON_BRIDGE_TRIG_PRICE  "price"
+
+//--- longest journal tag copied into a broker comment. The full note lives
+//--- in the bridge's journal sidecar, not on the chart: a comment is size
+//--- limited and this EA only ever renders, never reconstructs, the note.
+#define CHARON_BRIDGE_TAG_MAX     24
+
 //+------------------------------------------------------------------+
 //| One published leg                                                |
 //|  Prices and the ladder arrive pre-formatted from the engine so    |
@@ -97,6 +112,37 @@ struct SCharonBridgeLeg
   };
 
 //+------------------------------------------------------------------+
+//| One pyramid stage as a ticket stated it                            |
+//|  triggerKind says how trigger is read: an RR multiple of the       |
+//|  primary leg's 1R, or an absolute price. Either way lotsMult        |
+//|  multiplies the primary's SOLVED volume -- it is never a volume,    |
+//|  so a stage cannot smuggle a lot value past the risk model.         |
+//+------------------------------------------------------------------+
+struct SCharonBridgeStage
+  {
+   int               kind;            // CHARON_STAGE_*
+   double            trigger;         // R multiple, or a price
+   double            lotsMult;
+  };
+
+//+------------------------------------------------------------------+
+//| One working pending order                                        |
+//|  A pending order is not a position, so it never appears in legs;  |
+//|  without this the dashboard cannot show -- or cancel -- a LIMIT    |
+//|  ticket that has been accepted but not yet filled.                 |
+//+------------------------------------------------------------------+
+struct SCharonBridgePending
+  {
+   ulong             ticket;
+   long              type;            // POSITION_TYPE_BUY (a BUY limit) / SELL
+   long              orderType;       // ORDER_TYPE_* as the terminal reports it
+   double            price;           // the working price
+   double            sl;
+   double            lot;
+   datetime          placedAt;
+  };
+
+//+------------------------------------------------------------------+
 //| A validated command extracted from the inbox                     |
 //+------------------------------------------------------------------+
 struct SCharonBridgeCommand
@@ -116,11 +162,19 @@ struct SCharonBridgeCommand
    double            entry;           // 0 => fill at market
    double            blockTop;
    double            blockBottom;
-   double            riskPct;
+   double            riskPct;         // 0 when riskMoney is the stated figure
+   double            riskMoney;       // 0 => risk is expressed as a percentage
+   double            basketCeilingPct;// 0 => no ticket-level basket ceiling
    int               trailTrigger;    // CHARON_TRAIL_*, applied on fill
+   double            trailStartRR;    // 0 => use InpTrailStartRR
+   double            trailStartPoints;// 0 => use InpTrailStartPoints
    int               rung;            // RR rung the ticket is stated against
    ulong             ticket;          // target of order_modify / order_cancel
+   string            journalTag;      // short ASCII tag for the broker comment
+   int               stageCount;
+   SCharonBridgeStage stages[CHARON_BRIDGE_MAX_STAGES];
   };
+
 
 //+------------------------------------------------------------------+
 //| Everything the dashboard may display                             |
@@ -180,6 +234,9 @@ struct SCharonBridgeSnapshot
    double            orderRiskPct;
    int               orderRung;
    ulong             orderTicket;
+   //--- the short ASCII tag the winning ticket carried, so the dashboard can
+   //--- show which note is attached without the EA ever holding the note.
+   string            orderJournalTag;
 
    //--- account
    string            currency;
@@ -189,6 +246,7 @@ struct SCharonBridgeSnapshot
 
    //--- legs (flat array; the writer streams it, no nesting needed)
    int               legCount;
+   int               pendingCount;
   };
 
 //+------------------------------------------------------------------+
@@ -220,9 +278,15 @@ public:
    string            Note(void) const { return m_lastNote; }
    ulong             Sequence(void) const { return m_seq; }
 
-   //--- EA -> Python. legs may be NULL when legCount is 0.
+   //--- EA -> Python. legs may be NULL when legCount is 0. MQL5 will not take
+   //--- a reference array with a default value, so the leg-only form is an
+   //--- explicit overload rather than a two-argument call.
    bool              Publish(const SCharonBridgeSnapshot &snap,
                              const SCharonBridgeLeg &legs[], const int legCount);
+   bool              Publish(const SCharonBridgeSnapshot &snap,
+                             const SCharonBridgeLeg &legs[], const int legCount,
+                             const SCharonBridgePending &pendings[],
+                             const int pendingCount);
 
    //--- Python -> EA. Returns at most one command per call so a burst of
    //--- files can never stall the trade pipeline.
@@ -236,6 +300,13 @@ public:
    static bool       VerbAllowed(const string verb);
    static bool       OrderVerb(const string verb);
    static bool       TrailModeValid(const int mode);
+ //--- v1.4.0 ticket helpers. Static and public so CharonSelfTest can cover
+ //--- them without a broker.
+ static bool       TagIsAscii(const string text);
+ static bool       ReadStages(const string json, int &count,
+                              SCharonBridgeStage &stages[], string &err);
+ static bool       StagesAdvance(const SCharonBridgeStage &stages[], const int count,
+                                 const bool isLong, const double top, const double bottom);
   };
 
 //+------------------------------------------------------------------+
@@ -417,7 +488,38 @@ bool CCharonBridge::ReadJsonString(const string json, const string key, string &
          else if(e == 'r')  acc += "\r";
          else if(e == '"')  acc += "\"";
          else if(e == '\\') acc += "\\";
+         else if(e == 'b')  acc += ShortToString(8);     // JSON backspace
+         else if(e == 'f')  acc += ShortToString(12);    // JSON form feed
+         else if(e == 'u')
+           {
+            //--- a JSON unicode escape: four hex digits after the 'u'.
+            //--- Without this branch the digits were copied verbatim, so a
+            //--- note containing an accented character arrived mangled
+            //--- ("u00e9" instead of the character) -- damage that looked
+            //--- like the operator's typo rather than a parser bug.
+            //--- All four digits must parse, or the whole string is
+            //--- refused: guessing a partial escape would invent text.
+            if(at + 4 >= len)
+               return false;
+            uint code = 0;
+            bool ok = true;
+            for(int d = 1; d <= 4; d++)
+              {
+               ushort h = StringGetCharacter(json, at + d);
+               uint nibble = 0;
+               if(h >= '0' && h <= '9')      nibble = (uint)(h - '0');
+               else if(h >= 'a' && h <= 'f') nibble = (uint)(h - 'a' + 10);
+               else if(h >= 'A' && h <= 'F') nibble = (uint)(h - 'A' + 10);
+               else { ok = false; break; }
+               code = (code << 4) | nibble;
+              }
+            if(!ok)
+               return false;
+            acc += ShortToString((ushort)(code & 0xFFFF));
+            at += 4;
+           }
          else               acc += ShortToString(e);
+
          at++;
          continue;
         }
@@ -511,6 +613,198 @@ bool CCharonBridge::TrailModeValid(const int mode)
   }
 
 //+------------------------------------------------------------------+
+//| Read the optional "stages" array from a ticket                    |
+//|                                                                  |
+//|  The project's JSON is flat, so this walks the array textually.    |
+//|  Each element is an object with kind / trigger / lots_mult. An     |
+//|  absent key leaves count at 0, which means "use the chart inputs"  |
+//|  and is exactly the pre-1.4.0 behaviour.                          |
+//+------------------------------------------------------------------+
+bool CCharonBridge::ReadStages(const string json, int &count,
+                               SCharonBridgeStage &stages[], string &err)
+  {
+   count = 0;
+   err   = "";
+
+   string needle = "\"stages\"";
+   int at = StringFind(json, needle);
+   if(at < 0)
+      return true;                     //--- no stages: not an error
+
+   int len = StringLen(json);
+   at += StringLen(needle);
+   while(at < len)
+     {
+      ushort c = StringGetCharacter(json, at);
+      if(c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ':')
+        {
+         at++;
+         continue;
+        }
+      break;
+     }
+   if(at >= len || StringGetCharacter(json, at) != '[')
+     {
+      err = "stages is not an array";
+      return false;
+     }
+   at++;
+
+   int guard = 0;
+   while(at < len && guard < 4096)
+     {
+      guard++;
+      ushort c = StringGetCharacter(json, at);
+      if(c == ']')
+         return true;                  //--- end of the array
+      if(c == ',' || c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        {
+         at++;
+         continue;
+        }
+      if(c != '{')
+        {
+         err = "a pyramid stage is not an object";
+         return false;
+        }
+
+      //--- isolate one element so the ordinary readers can parse it
+      int depth = 0;
+      int start = at;
+      int end   = -1;
+      for(int i = at; i < len; i++)
+        {
+         ushort d = StringGetCharacter(json, i);
+         if(d == '{')
+            depth++;
+         else if(d == '}')
+           {
+            depth--;
+            if(depth == 0)
+              {
+               end = i;
+               break;
+              }
+           }
+        }
+      if(end < 0)
+        {
+         err = "unterminated pyramid stage";
+         return false;
+        }
+
+      string body = StringSubstr(json, start, end - start + 1);
+      at = end + 1;
+
+      if(count >= CHARON_BRIDGE_MAX_STAGES)
+        {
+         err = StringFormat("a ticket may carry at most %d pyramid stages",
+                            CHARON_BRIDGE_MAX_STAGES);
+         return false;
+        }
+
+      string kind = "";
+      if(ReadJsonString(body, "kind", kind))
+        {
+         if(kind != CHARON_BRIDGE_TRIG_RR && kind != CHARON_BRIDGE_TRIG_PRICE)
+           {
+            err = StringFormat("stage kind '%s' is not supported", kind);
+            return false;
+           }
+        }
+      else
+         kind = CHARON_BRIDGE_TRIG_RR;
+
+      double trigger = 0.0;
+      if(!ReadJsonNumber(body, "trigger", trigger) ||
+         !MathIsValidNumber(trigger) || trigger <= 0.0)
+        {
+         err = "a pyramid stage has no positive trigger";
+         return false;
+        }
+
+      double mult = 1.0;
+      if(ReadJsonNumber(body, "lots_mult", mult))
+        {
+         if(!MathIsValidNumber(mult) || mult <= 0.0)
+           {
+            err = "a pyramid stage has a non-positive volume multiplier";
+            return false;
+           }
+        }
+      else
+         mult = 1.0;
+
+      stages[count].kind     = (kind == CHARON_BRIDGE_TRIG_PRICE
+                                ? (int)CHARON_STAGE_PRICE : (int)CHARON_STAGE_RR);
+      stages[count].trigger  = trigger;
+      stages[count].lotsMult = mult;
+      count++;
+     }
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Do the stages advance in the direction the trade is going?        |
+//|                                                                  |
+//|  The engine only ever adds exposure while the basket is winning,   |
+//|  so a stage on the losing side of the entry could never fire. It   |
+//|  is refused rather than quietly dropped, because a three-stage     |
+//|  plan that silently becomes a one-stage plan is a lie about the    |
+//|  risk the operator agreed to.                                     |
+//+------------------------------------------------------------------+
+bool CCharonBridge::StagesAdvance(const SCharonBridgeStage &stages[], const int count,
+                                  const bool isLong, const double top, const double bottom)
+  {
+   double lastRR    = (isLong ? -DBL_MAX : DBL_MAX);
+   double lastPrice = (isLong ? -DBL_MAX : DBL_MAX);
+
+   for(int i = 0; i < count; i++)
+     {
+      if(stages[i].kind == (int)CHARON_STAGE_PRICE)
+        {
+         //--- must sit beyond the block on the profit side
+         if(isLong && stages[i].trigger <= top)
+            return false;
+         if(!isLong && stages[i].trigger >= bottom)
+            return false;
+         if(isLong && stages[i].trigger <= lastPrice)
+            return false;
+         if(!isLong && stages[i].trigger >= lastPrice)
+            return false;
+         lastPrice = stages[i].trigger;
+        }
+      else
+        {
+         if(isLong && stages[i].trigger <= lastRR)
+            return false;
+         if(!isLong && stages[i].trigger >= lastRR)
+            return false;
+         lastRR = stages[i].trigger;
+        }
+     }
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| True when every character is printable ASCII                    |
+//|  A broker comment is bytes, not text: anything outside this set   |
+//|  is either mangled or truncated by the terminal, so the tag is    |
+//|  refused rather than sent to be silently corrupted.               |
+//+------------------------------------------------------------------+
+bool CCharonBridge::TagIsAscii(const string text)
+  {
+   int n = StringLen(text);
+   for(int i = 0; i < n; i++)
+     {
+      ushort c = StringGetCharacter(text, i);
+      if(c < 32 || c > 126)
+         return false;
+     }
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //| Write the snapshot atomically                                    |
 //|                                                                  |
 //|  The dashboard must never read a half-written document, so the    |
@@ -558,14 +852,36 @@ bool CCharonBridge::WriteStateFile(const string payload)
 //|    * the RR ladder is copied as a STRING straight from the engine  |
 //|      so a rung price can never disagree with the chart.           |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Leg-only publish: no working orders to report                    |
+//+------------------------------------------------------------------+
 bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
                             const SCharonBridgeLeg &legs[], const int legCount)
+  {
+   //--- MQL5 has no NULL for a reference array, so this forwards an empty
+   //--- one. Writing it out is clearer than overloading on a default, which
+   //--- the compiler rejects outright.
+   SCharonBridgePending none[];
+   return Publish(snap, legs, legCount, none, 0);
+  }
+
+//+------------------------------------------------------------------+
+bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
+                            const SCharonBridgeLeg &legs[], const int legCount,
+                            const SCharonBridgePending &pendings[],
+                            const int pendingCount)
   {
    int shown = legCount;
    if(shown < 0)
       shown = 0;
    if(shown > CHARON_BRIDGE_MAX_LEGS)
       shown = CHARON_BRIDGE_MAX_LEGS;
+
+   int shownPending = pendingCount;
+   if(shownPending < 0)
+      shownPending = 0;
+   if(shownPending > CHARON_BRIDGE_MAX_LEGS)
+      shownPending = CHARON_BRIDGE_MAX_LEGS;
 
    m_seq++;
 
@@ -645,7 +961,8 @@ bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
    j += StringFormat("\"risk_money\":%s,", DoubleToString(snap.orderRiskMoney, 2));
    j += StringFormat("\"risk_pct\":%s,", DoubleToString(snap.orderRiskPct, 4));
    j += StringFormat("\"rung\":%d,", snap.orderRung);
-   j += StringFormat("\"ticket\":%I64u", snap.orderTicket);
+   j += StringFormat("\"ticket\":%I64u,", snap.orderTicket);
+   j += StringFormat("\"journal_tag\":\"%s\")", JsonEscape(snap.orderJournalTag));
    j += "},";
 
    //--- legs
@@ -670,6 +987,29 @@ bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
       j += StringFormat("\"be_done\":%s,", (legs[i].beDone ? "true" : "false"));
       j += StringFormat("\"half_risk_done\":%s,", (legs[i].halfRiskDone ? "true" : "false"));
       j += StringFormat("\"ladder\":\"%s\"", JsonEscape(legs[i].ladder));
+      j += "}";
+     }
+   j += "],";
+
+   //--- working orders. A pre-1.4.0 bridge ignores this key entirely, which
+   //--- is why the field is additive rather than a schema-breaking change.
+   j += "\"pending\":[";
+   for(int i = 0; i < shownPending; i++)
+     {
+      if(i > 0)
+         j += ",";
+      j += "{";
+      j += StringFormat("\"ticket\":%I64u,", pendings[i].ticket);
+      j += StringFormat("\"side\":\"%s\",",
+                        (pendings[i].type == (long)POSITION_TYPE_BUY ? "BUY" : "SELL"));
+      j += StringFormat("\"order_type\":\"%s\",",
+                        (pendings[i].orderType == (long)ORDER_TYPE_BUY_LIMIT
+                         || pendings[i].orderType == (long)ORDER_TYPE_SELL_LIMIT
+                         ? "LIMIT" : "STOP"));
+      j += StringFormat("\"price\":%s,", DoubleToString(pendings[i].price, snap.digits));
+      j += StringFormat("\"sl\":%s,", DoubleToString(pendings[i].sl, snap.digits));
+      j += StringFormat("\"lot\":%s,", DoubleToString(pendings[i].lot, 2));
+      j += StringFormat("\"placed_at\":%I64d", (long)pendings[i].placedAt);
       j += "}";
      }
    j += "]";
@@ -731,6 +1071,18 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
    cmd.trailTrigger  = (int)CHARON_TRAIL_OFF;
    cmd.rung          = 0;
    cmd.ticket        = 0;
+   cmd.riskMoney     = 0.0;
+   cmd.basketCeilingPct = 0.0;
+   cmd.trailStartRR  = 0.0;
+   cmd.trailStartPoints = 0.0;
+   cmd.journalTag    = "";
+   cmd.stageCount    = 0;
+   for(int s = 0; s < CHARON_BRIDGE_MAX_STAGES; s++)
+     {
+      cmd.stages[s].kind     = (int)CHARON_STAGE_RR;
+      cmd.stages[s].trigger  = 0.0;
+      cmd.stages[s].lotsMult = 0.0;
+     }
 
    string path = m_cmdDir + "\\" + name;
    ResetLastError();
@@ -925,18 +1277,66 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
          entry = 0.0;
         }
 
+      //--- risk is stated exactly once. Both figures present is two answers
+      //--- to one question, so it is refused here as well as in Python --
+      //--- the EA must not depend on the client having validated anything.
       double riskPct = 0.0;
-      if(!ReadJsonNumber(body, "risk_pct", riskPct))
+      bool   havePct = ReadJsonNumber(body, "risk_pct", riskPct);
+      double riskMoney = 0.0;
+      bool   haveMoney = ReadJsonNumber(body, "risk_money", riskMoney);
+
+      if(havePct && haveMoney)
         {
-         cmd.reject = "order ticket without risk_pct";
+         cmd.reject = "order ticket states risk_pct and risk_money; send one";
          return false;
         }
-      if(!MathIsValidNumber(riskPct) || riskPct <= 0.0 || riskPct > InpMaxRiskPct)
+      if(!havePct && !haveMoney)
         {
-         cmd.reject = StringFormat("risk %.4f%% is outside (0, %.4f]",
-                                   riskPct, InpMaxRiskPct);
+         cmd.reject = "order ticket without risk_pct or risk_money";
          return false;
         }
+      if(havePct)
+        {
+         if(!MathIsValidNumber(riskPct) || riskPct <= 0.0 || riskPct > InpMaxRiskPct)
+           {
+            cmd.reject = StringFormat("risk %.4f%% is outside (0, %.4f]",
+                                      riskPct, InpMaxRiskPct);
+            return false;
+           }
+         riskMoney = 0.0;
+        }
+      else
+        {
+         //--- the account is the EA's to know, so only the sign can be
+         //--- checked here; the money figure is clamped to
+         //--- MaxAllowedRiskMoney() inside ApplyOrderCommand.
+         if(!MathIsValidNumber(riskMoney) || riskMoney <= 0.0)
+           {
+            cmd.reject = StringFormat("risk money %.2f is not positive", riskMoney);
+            return false;
+           }
+         riskPct = 0.0;
+        }
+
+      //--- optional whole-basket ceiling. 0 means "not stated", which leaves
+      //--- InpPyramidMaxRiskPct as the only ceiling -- exactly the
+      //--- pre-1.4.0 behaviour.
+      double ceiling = 0.0;
+      if(ReadJsonNumber(body, "basket_risk_ceiling_pct", ceiling))
+        {
+         if(!MathIsValidNumber(ceiling) || ceiling < 0.0 || ceiling > 100.0)
+           {
+            cmd.reject = StringFormat("basket ceiling %.4f%% is outside [0, 100]", ceiling);
+            return false;
+           }
+         if(ceiling > 0.0 && riskPct > 0.0 && riskPct > ceiling)
+           {
+            cmd.reject = "risk_pct already exceeds the basket ceiling";
+            return false;
+           }
+        }
+      else
+         ceiling = 0.0;
 
       double trailTrigger = (double)CHARON_TRAIL_OFF;
       if(ReadJsonNumber(body, "trail_trigger", trailTrigger))
@@ -974,13 +1374,87 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
            }
         }
 
+      //--- optional per-ticket trail activation. 0 (or absent) leaves the
+      //--- chart input as the threshold, so an untouched ticket trails
+      //--- exactly as it did before v1.4.0.
+      double startRR = 0.0;
+      if(ReadJsonNumber(body, "trail_start_rr", startRR))
+        {
+         if(!MathIsValidNumber(startRR) || startRR < 0.0)
+           {
+            cmd.reject = StringFormat("trail start RR %.4f is not positive", startRR);
+            return false;
+           }
+        }
+      else
+         startRR = 0.0;
+
+      double startPoints = 0.0;
+      if(ReadJsonNumber(body, "trail_start_points", startPoints))
+        {
+         if(!MathIsValidNumber(startPoints) || startPoints < 0.0)
+           {
+            cmd.reject = StringFormat("trail start points %.1f is not positive", startPoints);
+            return false;
+           }
+        }
+      else
+         startPoints = 0.0;
+
+      //--- short ASCII tag for the broker comment. Everything else about the
+      //--- note stays on the bridge side; the chart only ever renders this.
+      string tag = "";
+      if(ReadJsonString(body, "journal_tag", tag))
+        {
+         if(StringLen(tag) > CHARON_BRIDGE_TAG_MAX)
+            tag = StringSubstr(tag, 0, CHARON_BRIDGE_TAG_MAX);
+         if(!TagIsAscii(tag))
+           {
+            cmd.reject = "journal tag carries characters a broker comment cannot hold";
+            return false;
+           }
+        }
+      else
+         tag = "";
+
+      //--- pyramid stages. Parsed only when the key is present, so a ticket
+      //--- without them keeps the chart-wide InpPyramidT2RR/... ladder
+      //--- exactly as it is today.
+      SCharonBridgeStage stages[];
+      ArrayResize(stages, CHARON_BRIDGE_MAX_STAGES);
+      int stageCount = 0;
+      string stageErr = "";
+      if(!ReadStages(body, stageCount, stages, stageErr))
+        {
+         cmd.reject = stageErr;
+         return false;
+        }
+      if(stageCount > 0 && !StagesAdvance(stages, stageCount, (side == "BUY"), top, bottom))
+        {
+         cmd.reject = "pyramid stages do not advance in the trade's direction";
+         return false;
+        }
+
       cmd.side         = side;
       cmd.orderType    = otype;
       cmd.entry        = entry;
       cmd.blockTop     = top;
       cmd.blockBottom  = bottom;
       cmd.riskPct      = riskPct;
+      cmd.riskMoney    = riskMoney;
+      cmd.basketCeilingPct = ceiling;
       cmd.trailTrigger = (int)trailTrigger;
+      cmd.trailStartRR = startRR;
+      cmd.trailStartPoints = startPoints;
+      cmd.journalTag   = tag;
+      cmd.stageCount   = 0;
+      for(int s = 0; s < stageCount && s < CHARON_BRIDGE_MAX_STAGES; s++)
+        {
+         cmd.stages[s].kind     = stages[s].kind;
+         cmd.stages[s].trigger  = stages[s].trigger;
+         cmd.stages[s].lotsMult = stages[s].lotsMult;
+         cmd.stageCount         = s + 1;
+        }
       cmd.rung         = (int)rung;
       cmd.ticket       = (ulong)ticket;
      }

@@ -8,7 +8,7 @@
 //|  is retried, then the position is flattened (configurable).       |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.03"
+#property version   "1.04"
 
 #ifndef __CHARON_STOPS__
 #define __CHARON_STOPS__

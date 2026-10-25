@@ -7,7 +7,7 @@
 //|  order of operations is auditable in a single place.              |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.03"
+#property version   "1.04"
 
 #ifndef __CHARON_ENGINE__
 #define __CHARON_ENGINE__
@@ -65,6 +65,8 @@ private:
    double            OrderTarget(const double entry, const double distance,
                                  const bool isLong);
    bool              HasOwnPending(void);
+   int               CollectPending(SCharonBridgePending &out[], const int maxRows);
+   void              ApplyTicketTrail(const SCharonBridgeCommand &cmd, const ulong positionTicket);
    void              PublishBridge(void);
 
    //--- verdict of the last attended ticket, published verbatim
@@ -78,6 +80,15 @@ private:
    double            m_orderRiskPct;
    int               m_orderRung;
    ulong             m_orderTicket;
+   string            m_orderJournalTag;
+
+   //--- trail thresholds waiting on a pending order that has not filled yet.
+   //--- A pending order has no position ticket, so the values are held
+   //--- against the ORDER ticket and claimed by AdoptTicket when the fill
+   //--- finally appears.
+   ulong             m_pendingTrailTicket;
+   double            m_pendingTrailRR;
+   double            m_pendingTrailPoints;
 
    //--- helpers
    bool              WantsTicket(const ulong magic) const;
@@ -122,6 +133,10 @@ CCharonEngine::CCharonEngine(void)
    m_orderRiskPct   = 0.0;
    m_orderRung      = 0;
    m_orderTicket    = 0;
+   m_orderJournalTag = "";
+   m_pendingTrailTicket = 0;
+   m_pendingTrailRR     = 0.0;
+   m_pendingTrailPoints = 0.0;
    m_opts.symbol   = "";
    m_opts.slippage = 0;
    m_opts.retries  = 1;
@@ -360,6 +375,26 @@ void CCharonEngine::AdoptTicket(const ulong ticket)
       return;
      }
 
+   //--- a pending order filled: hand it the thresholds the ticket asked for.
+   //--- The order ticket and the position ticket differ on most brokers, so
+   //--- this is matched by the fact that only one Charon pending order may be
+   //--- working at a time (HasOwnPending refuses a second).
+   if(m_pendingTrailTicket > 0 &&
+      (m_pendingTrailRR > 0.0 || m_pendingTrailPoints > 0.0))
+     {
+      SCharonPosState pending;
+      if(m_state.Get(idx, pending))
+        {
+         pending.trailStartRR     = m_pendingTrailRR;
+         pending.trailStartPoints = m_pendingTrailPoints;
+         if(m_state.Set(idx, pending))
+            m_state.Save(idx, true);
+         m_pendingTrailTicket = 0;
+         m_pendingTrailRR     = 0.0;
+         m_pendingTrailPoints = 0.0;
+        }
+     }
+
    if(haveState)
      {
       SCharonPosState row;
@@ -372,6 +407,12 @@ void CCharonEngine::AdoptTicket(const ulong ticket)
          row.tpApplied    = restored.tpApplied;
          row.stopApplies  = restored.stopApplies;
          row.currentSL    = (restored.currentSL > 0.0 ? restored.currentSL : row.currentSL);
+      //--- a persisted threshold survives a restart; 0 in the restored row
+      //--- means the pre-1.4.0 default, so the seeded value is left alone.
+      if(restored.trailStartRR > 0.0)
+         row.trailStartRR = restored.trailStartRR;
+      if(restored.trailStartPoints > 0.0)
+         row.trailStartPoints = restored.trailStartPoints;
          m_state.Set(idx, row);
         }
      }
@@ -586,7 +627,7 @@ void CCharonEngine::ManageLadders(const int index)
    double trailStop = 0.0;
    string trailLabel = "";
    if(!m_trail.NextStop(row.entry, row.riskPrice, row.hwm, isLong, row.currentSL,
-                        trailStop, trailLabel))
+                        trailStop, trailLabel, row.trailStartRR, row.trailStartPoints))
       return;
 
    string terr = "";
@@ -1218,6 +1259,43 @@ bool CCharonEngine::ApplyBridgeCommand(const SCharonBridgeCommand &cmd)
    return false;
   }
 //+------------------------------------------------------------------+
+//| Attach a ticket's trail thresholds to the position it opened     |
+//|                                                                  |
+//|  Zero means "this ticket said nothing", so the row keeps the       |
+//|  chart-wide InpTrailStartRR / InpTrailStartPoints. That is the     |
+//|  whole compatibility story: a ticket written by any older client   |
+//|  lands here with zeros and changes nothing.                        |
+//+------------------------------------------------------------------+
+void CCharonEngine::ApplyTicketTrail(const SCharonBridgeCommand &cmd,
+                                     const ulong positionTicket)
+  {
+   if(positionTicket == 0)
+      return;
+   if(cmd.trailStartRR <= 0.0 && cmd.trailStartPoints <= 0.0)
+      return;
+
+   int idx = m_state.Find(positionTicket);
+   if(idx < 0)
+      return;
+
+   SCharonPosState row;
+   if(!m_state.Get(idx, row))
+      return;
+
+   if(cmd.trailStartRR > 0.0)
+      row.trailStartRR = cmd.trailStartRR;
+   if(cmd.trailStartPoints > 0.0)
+      row.trailStartPoints = cmd.trailStartPoints;
+
+   if(m_state.Set(idx, row))
+      m_state.Save(idx, true);
+
+   if(InpVerbose)
+      PrintFormat("%s #%I64u trail activation -> %.2fR / %.0f points",
+                  CHARON_NAME, positionTicket, row.trailStartRR, row.trailStartPoints);
+  }
+
+//+------------------------------------------------------------------+
 //| Record the verdict of the last attended ticket                   |
 //|  Every field is what the EA actually used or produced, so the     |
 //|  dashboard never has to derive a lot, a stop or an R multiple.    |
@@ -1291,6 +1369,48 @@ bool CCharonEngine::HasOwnPending(void)
   }
 
 //+------------------------------------------------------------------+
+//| The working pending orders this chart is responsible for         |
+//|                                                                  |
+//|  WantsTicket() decides ownership, so a manually placed order on    |
+//|  the same symbol is not reported as Charon's -- exactly the        |
+//|  boundary HasOwnPending already draws.                            |
+//+------------------------------------------------------------------+
+int CCharonEngine::CollectPending(SCharonBridgePending &out[], const int maxRows)
+  {
+   int n = 0;
+   if(maxRows <= 0)
+      return 0;
+
+   for(int i = OrdersTotal() - 1; i >= 0 && n < maxRows; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!OrderSelect(ticket))
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != m_symbol)
+         continue;
+      if(!WantsTicket((ulong)OrderGetInteger(ORDER_MAGIC)))
+         continue;
+
+      long otype = OrderGetInteger(ORDER_TYPE);
+      out[n].ticket    = ticket;
+      //--- ORDER_TYPE_BUY_LIMIT and BUY_STOP are both buys; the side is what
+      //--- the dashboard renders, the raw type says which kind it is.
+      out[n].type      = (otype == (long)ORDER_TYPE_BUY_LIMIT ||
+                          otype == (long)ORDER_TYPE_BUY_STOP
+                          ? (long)POSITION_TYPE_BUY : (long)POSITION_TYPE_SELL);
+      out[n].orderType = otype;
+      out[n].price     = OrderGetDouble(ORDER_PRICE_OPEN);
+      out[n].sl        = OrderGetDouble(ORDER_SL);
+      out[n].lot       = OrderGetDouble(ORDER_VOLUME_CURRENT);
+      out[n].placedAt  = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+      n++;
+     }
+   return n;
+  }
+
+//+------------------------------------------------------------------+
 //| Adjudicate and execute one attended order ticket                 |
 //|                                                                  |
 //|  The ordering of these checks is the design: every refusal is a   |
@@ -1311,6 +1431,11 @@ bool CCharonEngine::ApplyOrderCommand(const SCharonBridgeCommand &cmd)
   {
    const bool   isLong = (cmd.side == "BUY");
    const string side   = cmd.side;
+
+   //--- the tag belongs to the ticket, not to its outcome, so it is claimed
+   //--- before any verdict can be written: a rejected ticket still shows
+   //--- which note was attached to it.
+   m_orderJournalTag = cmd.journalTag;
 
    //--- 1) cancel: remove a pending ticket, or flatten a position
    if(cmd.verb == CHARON_BRIDGE_V_ORDER_CANCEL)
@@ -1419,10 +1544,32 @@ bool CCharonEngine::ApplyOrderCommand(const SCharonBridgeCommand &cmd)
      }
    //--- 5) the ticket's own budget, clamped by the operator's hard ceiling.
    //--- A ticket may ask for less than InpMaxRiskPct but never for more.
-   double wanted = cmd.riskPct;
-   if(wanted > InpMaxRiskPct)
-      wanted = InpMaxRiskPct;
-   double budget = base * wanted / 100.0;
+   double budget = 0.0;
+   if(cmd.riskMoney > 0.0)
+     {
+      //--- the account is the EA to know, so a figure the operator typed is
+      //--- measured against the same ceiling every other path uses.
+      //--- Refusing (rather than silently shrinking) an over-sized figure
+      //--- keeps the verdict honest about what actually happened.
+      double cap = m_risk.MaxAllowedRiskMoney();
+      if(cap > 0.0 && cmd.riskMoney > cap + CHARON_EPS)
+        {
+         SetOrderVerdict("rejected",
+                         StringFormat("requested risk %.2f exceeds the %.2f cap",
+                                      cmd.riskMoney, cap),
+                         side, 0.0, entry, stop, 0.0, 0.0, cmd.rung, 0);
+         return false;
+        }
+      budget = cmd.riskMoney;
+     }
+   else
+     {
+      double wanted = cmd.riskPct;
+      if(wanted > InpMaxRiskPct)
+         wanted = InpMaxRiskPct;
+      budget = base * wanted / 100.0;
+     }
+
    if(budget <= 0.0)
      {
       SetOrderVerdict("rejected", "risk budget resolves to zero", side,
@@ -1557,6 +1704,17 @@ bool CCharonEngine::ApplyOrderCommand(const SCharonBridgeCommand &cmd)
       if(cmd.trailTrigger != (int)CHARON_TRAIL_OFF)
          m_trail.SetMode((ENUM_CHARON_TRAIL_MODE)cmd.trailTrigger);
 
+      //--- a pending order has no state row until it fills, so the
+      //--- threshold is remembered against the ORDER ticket and applied when
+      //--- the fill is adopted. Chart-wide behaviour is untouched when the
+      //--- ticket carried neither value.
+      if(cmd.trailStartRR > 0.0 || cmd.trailStartPoints > 0.0)
+        {
+         m_pendingTrailTicket = ticket;
+         m_pendingTrailRR     = cmd.trailStartRR;
+         m_pendingTrailPoints = cmd.trailStartPoints;
+        }
+
       SetOrderVerdict("pending",
                       StringFormat("limit working at %.5f, stop %.5f", entry, stop),
                       side, lot, entry, stop, riskMoney, riskPct, cmd.rung, ticket);
@@ -1576,7 +1734,15 @@ bool CCharonEngine::ApplyOrderCommand(const SCharonBridgeCommand &cmd)
    if(m_basket.valid && !m_basket.mixed && m_basket.legs > 0)
      {
       double projected = m_basket.riskMoney + riskMoney;
-      double basketCap = base * InpPyramidMaxRiskPct / 100.0;
+      //--- the effective ceiling is the harder of the chart's InpPyramidMaxRiskPct
+      //--- and any ceiling the ticket attached. A ticket can only ever tighten
+      //--- it: dropping the chart's ceiling by sending a bigger number would
+      //--- make a dashboard click more permissive than the chart it drives.
+      double effectivePct = InpPyramidMaxRiskPct;
+      if(cmd.basketCeilingPct > 0.0 &&
+         (effectivePct <= 0.0 || cmd.basketCeilingPct < effectivePct))
+         effectivePct = cmd.basketCeilingPct;
+      double basketCap = base * effectivePct / 100.0;
       if(basketCap > 0.0 && projected > basketCap + CHARON_EPS)
         {
          SetOrderVerdict("rejected",
@@ -1608,6 +1774,11 @@ bool CCharonEngine::ApplyOrderCommand(const SCharonBridgeCommand &cmd)
    //--- so re-scan instead of adopting by number. The leg already carries its
    //--- stop, so there is no unprotected window here either way.
    ScanAndAdopt();
+
+   //--- a ticket may carry its own trail activation thresholds. They are
+   //--- attached to the row that was just adopted so the threshold travels
+   //--- with the position rather than with the chart.
+   ApplyTicketTrail(cmd, opened);
 
    double shownEntry = (fill > 0.0 ? fill : entry);
    SetOrderVerdict("accepted",
@@ -1744,6 +1915,7 @@ void CCharonEngine::PublishBridge(void)
    snap.orderRiskPct   = m_orderRiskPct;
    snap.orderRung      = m_orderRung;
    snap.orderTicket    = m_orderTicket;
+   snap.orderJournalTag = m_orderJournalTag;
 
    //--- legs
    SCharonBridgeLeg legs[];
@@ -1782,7 +1954,14 @@ void CCharonEngine::PublishBridge(void)
      }
    snap.legCount = n;
 
-   m_bridge.Publish(snap, legs, n);
+   //--- working orders. Scanned the same way HasOwnPending does, and for the
+   //--- same reason: a pending order is not a position, so the state table
+   //--- (and therefore legs) cannot describe it.
+   SCharonBridgePending pendings[];
+   ArrayResize(pendings, CHARON_BRIDGE_MAX_LEGS);
+   int np = CollectPending(pendings, CHARON_BRIDGE_MAX_LEGS);
+
+   m_bridge.Publish(snap, legs, n, pendings, np);
   }
 
 //+------------------------------------------------------------------+

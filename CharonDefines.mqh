@@ -13,7 +13,7 @@
 //|  target and optionally trails / pyramids.                        |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.03"
+#property version   "1.04"
 #property link      "https://github.com/vickygujjar17/Charon-.git"
 
 #ifndef __CHARON_DEFINES__
@@ -24,7 +24,7 @@
 //| _tools/bump_version.py rewrites this literal and every other     |
 //| version string in the repository in one pass.                    |
 //+------------------------------------------------------------------+
-#define CHARON_VERSION        "1.3.0"
+#define CHARON_VERSION        "1.4.0"
 #define CHARON_NAME           "Charon"
 #define CHARON_REPO           "https://github.com/vickygujjar17/Charon-.git"
 
@@ -98,6 +98,13 @@ enum ENUM_CHARON_PYRAMID_TRIGGER
    CHARON_PYR_MANUAL = 1    // Fire only when armed by the trader (hotkey)
   };
 
+//--- how a pyramid tier decides it may fire
+enum ENUM_CHARON_STAGE_KIND
+  {
+   CHARON_STAGE_RR    = 0,   // R multiple of the primary leg's 1R
+   CHARON_STAGE_PRICE = 1    // absolute price the market must trade through
+  };
+
 //+------------------------------------------------------------------+
 //| Structures                                                       |
 //+------------------------------------------------------------------+
@@ -122,6 +129,12 @@ struct SCharonPosState
    int               stopRejections;  // consecutive broker rejects
    int               stopApplies;     // successful stop modifications
    datetime          savedAt;         // last persistence write (throttle)
+
+   //--- v1.4.0 per-ticket overrides. Zero means "no override, use the
+   //--- chart input" everywhere, so a row restored from a pre-1.4.0 global
+   //--- variable set behaves exactly as it did before.
+   double            trailStartRR;    // 0 => InpTrailStartRR
+   double            trailStartPoints;// 0 => InpTrailStartPoints
   };
 
 //--- aggregated view of every managed position on the symbol
@@ -142,9 +155,13 @@ struct SCharonBasket
 //--- tier definition (scale-in ladder)
 struct SCharonTierSpec
   {
-   int               index;           // 2..4
-   double            activationRR;    // R multiple required to fire
-   double            lotMultiplier;   // volume multiplier vs tier 1
+   int                    index;          // 2..4
+   ENUM_CHARON_STAGE_KIND triggerKind;    // how 'trigger' is read
+   double                 triggerRR;      // R multiple required to fire (kind=RR)
+   double                 triggerPrice;   // absolute price required (kind=PRICE)
+   double                 lotMultiplier;  // volume multiplier vs tier 1
+   double                 activationRR;   // legacy alias of triggerRR, kept so
+                                          // older call sites read unchanged
   };
 
 //+------------------------------------------------------------------+

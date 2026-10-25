@@ -7,6 +7,68 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
+## [Unreleased]
+
+## [1.4.0] - 2026-10-25
+
+The institutional ticket. Order placement grows the decisions a desk actually makes
+before sending: risk in **percent or money**, a hard **basket-wide ceiling**, a **trail
+activation** threshold per ticket, up to **three pyramid stages** with their own trigger
+kind, and a **journal** note. Positions and working orders gain **per-row** Modify and
+Cancel, and pending orders are published for the first time.
+
+`SCHEMA_VERSION` goes `2` â†’ `3`. Commands are **strict** (a schema-3 ticket is refused by a
+schema-2 EA, which is the point) but snapshots are **tolerant**: this bridge still renders
+a schema-2 EA. See Notes for the upgrade order.
+
+### Added
+
+- **Risk in money or percent, never both.** `build_order_intent` enforces exactly one
+  figure and `ReadCommandFile` re-checks it, so the EA never has to arbitrate between two
+  contradictory budgets. A money figure is refused if it exceeds
+  `MaxAllowedRiskMoney()` rather than silently shrunk â€” the verdict says what happened.
+- **Basket risk ceiling** (`basket_risk_ceiling_pct`). It only ever *tightens* the chart's
+  `InpPyramidMaxRiskPct`; a ticket cannot use it to make a dashboard click more permissive
+  than the chart it drives. A ceiling below the primary leg's own risk is refused as a
+  contradiction.
+- **Per-ticket trail activation.** `trail_start_rr` / `trail_start_points` are stored on the
+  position row (`SCharonPosState.trailStartRR/Points`, persisted as `trR`/`trP`) and win
+  over `InpTrailStartRR`. Zero means "not stated", so an older ticket changes nothing. The
+  trail *mode* remains chart-wide via `trail_trigger` â†’ `SetMode`.
+- **Three pyramid stages per ticket** (`stages[]`), each a `kind` (`rr` or `price`), a
+  `trigger` and a `lots_mult`. The multiplier applies to the primary leg's *solved* volume,
+  so a stage can never express an absolute lot. Stages must advance in the trade's
+  direction â€” a stage that could never fire is refused rather than dropped.
+- **Journal notes.** The full text is kept bridge-side in
+  `Charon\journal_<SYMBOL>.json`, keyed by ticket and re-keyed onto the position ticket when
+  the EA reports one. The EA receives only a short printable-ASCII `journal_tag` for the
+  broker comment and echoes it back; the note is never reconstructed from the tag.
+- **`pending[]` in the snapshot** (`CollectPending`). A pending order is not a position, so
+  a `LIMIT` ticket was previously invisible until it filled â€” there was no way to cancel
+  one from the dashboard.
+- **Per-row Modify / Close** on the legs table and **Cancel** on the pending table. v1.3.0's
+  buttons only ever addressed whatever the last verdict happened to name.
+- **Asset-class grouping** in the symbol picker (`symbols.asset_class`), advisory only: an
+  unrecognised name is offered under *Other* and never rejected.
+
+### Fixed
+
+- **`ReadJsonString` did not decode `\uXXXX`.** Every escape outside the short list
+  (`\n \t \r \" \\`) was copied verbatim, so a note containing `Ã©` arrived as the literal
+  `u00e9`. The parser now decodes four hex digits and refuses the string if they do not
+  parse, rather than inventing characters.
+
+### Changed
+
+- **`SCHEMA_VERSION` 2 â†’ 3** and `CHARON_BRIDGE_SCHEMA` likewise. `Snapshot.from_json`
+  accepts `(2, 3)` and now records the revision it *actually read*, so the pre-flight can
+  compare it. `main.py` refuses a ticket that carries v1.4.0 semantics against an older EA
+  with a message naming the field and the fix; a plain ticket still passes, so an
+  un-upgraded chart stays usable for what it understands.
+- `GET /api/status` gains `bridge_schema`, `journal`, `snapshot.schema` and
+  `snapshot.pending`; `GET /api/positions` gains `pending` and `journal`;
+  `GET /api/symbols` gains `asset_classes` and a per-entry `asset_class`.
+
 ## [1.3.0] - 2026-10-25
 
 A correctness release with two features on top. The headline is a bug that made the

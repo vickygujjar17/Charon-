@@ -23,6 +23,7 @@ from charon_bridge.schema import (
     build_command,
     build_order_intent,
 )
+from charon_bridge.version import SCHEMA_VERSION
 
 
 def _buy(**overrides: object):
@@ -151,4 +152,152 @@ def test_submit_writes_an_order_ticket_that_the_ea_accepts(common_dir: Path) -> 
     loaded = json.loads((inbox / sent["file"]).read_text(encoding="utf-8"))
     assert loaded["verb"] == "order_open"
     assert loaded["block_top"] == 1.27
-    assert loaded["schema"] == 2
+    # --- the wire revision, not a literal: a schema bump must not need a test
+    # --- edit, but the *fact* that a ticket stamps the current schema must
+    # --- stay pinned.
+    assert loaded["schema"] == SCHEMA_VERSION
+
+
+#+------------------------------------------------------------------+
+#| v1.4.0: risk in money, basket ceiling, stages, journal            |
+#+------------------------------------------------------------------+
+def test_risk_may_be_stated_in_money_instead_of_percent() -> None:
+    """Option A: the figure sizes the *primary* leg, and only one unit is sent."""
+    intent = _buy(risk_pct=None, risk_money=250.0)
+    doc = intent.to_doc()
+    assert doc["risk_money"] == 250.0
+    assert "risk_pct" not in doc
+    assert intent.risk_mode == "money"
+
+
+def test_a_ticket_may_not_carry_two_risk_figures() -> None:
+    """Two answers to one question is a refusal, not a silent preference."""
+    with pytest.raises(SchemaError, match="not both"):
+        _buy(risk_pct=0.5, risk_money=250.0)
+
+
+def test_a_ticket_must_carry_a_risk_figure() -> None:
+    with pytest.raises(SchemaError, match="either risk_pct or risk_money"):
+        _buy(risk_pct=None)
+
+
+@pytest.mark.parametrize("value", [0.0, -5.0, float("nan"), float("inf"), "250", True, None])
+def test_risk_money_must_be_a_positive_number(value: object) -> None:
+    with pytest.raises(SchemaError):
+        _buy(risk_pct=None, risk_money=value)
+
+
+def test_basket_ceiling_is_carried_and_can_be_omitted() -> None:
+    with_ceiling = _buy(basket_risk_ceiling_pct=1.5).to_doc()
+    assert with_ceiling["basket_risk_ceiling_pct"] == 1.5
+    # --- absent is the pre-1.4.0 shape: the EA keeps InpPyramidMaxRiskPct
+    assert "basket_risk_ceiling_pct" not in _buy().to_doc()
+
+
+def test_basket_ceiling_below_the_primary_risk_is_a_contradiction() -> None:
+    with pytest.raises(SchemaError, match="exceeds the basket ceiling"):
+        _buy(risk_pct=2.0, basket_risk_ceiling_pct=1.0)
+
+
+def test_basket_ceiling_is_bounded() -> None:
+    with pytest.raises(SchemaError):
+        _buy(basket_risk_ceiling_pct=101.0)
+
+
+def test_trail_activation_is_per_ticket_and_optional() -> None:
+    doc = _buy(trail_start_rr=1.5).to_doc()
+    assert doc["trail_start_rr"] == 1.5
+    assert "trail_start_rr" not in _buy().to_doc()
+
+
+def test_stages_are_orders_of_advance_not_volumes() -> None:
+    """A stage carries a multiplier, never a lot count."""
+    doc = _buy(stages=[{"kind": "rr", "trigger": 2.0, "lots_mult": 0.5}]).to_doc()
+    stage = doc["stages"][0]
+    assert stage == {"kind": "rr", "trigger": 2.0, "lots_mult": 0.5}
+    for forbidden in ("lots", "volume", "lot"):
+        assert forbidden not in stage
+
+
+def test_too_many_stages_is_refused() -> None:
+    from charon_bridge.schema import MAX_STAGES
+
+    too_many = [{"kind": "rr", "trigger": float(index + 2)} for index in range(MAX_STAGES + 1)]
+    with pytest.raises(SchemaError, match="at most"):
+        _buy(stages=too_many)
+
+
+def test_stage_trigger_must_advance_for_a_buy() -> None:
+    """A stage below the trigger already reached could never fire."""
+    with pytest.raises(SchemaError, match="advance"):
+        _buy(stages=[{"trigger": 3.0}, {"trigger": 2.0}])
+
+
+def test_stage_price_must_sit_beyond_the_entry() -> None:
+    with pytest.raises(SchemaError, match="not beyond the entry"):
+        _buy(stages=[{"kind": "price", "trigger": 1.255}])
+
+
+def test_stage_kind_must_be_known() -> None:
+    with pytest.raises(SchemaError, match="kind"):
+        _buy(stages=[{"kind": "atr", "trigger": 2.0}])
+
+
+def test_journal_is_kept_and_a_tag_is_derived() -> None:
+    doc = _buy(journal="London break \u2014 retest of VWAP").to_doc()
+    assert doc["journal"] == "London break \u2014 retest of VWAP"
+    tag = doc["journal_tag"]
+    # --- the tag rides in a broker comment, so it must be printable ASCII
+    assert tag.isascii()
+    assert all(32 <= ord(char) <= 126 for char in tag)
+    # --- and the note is never recovered from the tag
+    assert tag != doc["journal"]
+
+
+def test_a_blank_journal_is_no_journal() -> None:
+    assert "journal" not in _buy(journal="   ").to_doc()
+
+
+def test_journal_is_bounded() -> None:
+    from charon_bridge.schema import MAX_JOURNAL_LEN
+
+    with pytest.raises(SchemaError, match="limit"):
+        _buy(journal="x" * (MAX_JOURNAL_LEN + 1))
+
+
+#+------------------------------------------------------------------+
+#| v1.4.0: the revision gate                                        |
+#+------------------------------------------------------------------+
+def test_a_schema_2_snapshot_is_still_renderable() -> None:
+    """Tolerant on the way in: every v1.4.0 addition is additive."""
+    from charon_bridge.schema import Snapshot
+    from tests.conftest import make_snapshot
+
+    parsed = Snapshot.from_json(make_snapshot(schema=2))
+    assert parsed.schema == 2
+    assert parsed.pending == ()
+
+
+def test_an_unknown_snapshot_schema_is_refused() -> None:
+    from charon_bridge.schema import Snapshot
+    from tests.conftest import make_snapshot
+
+    with pytest.raises(SchemaError):
+        Snapshot.from_json(make_snapshot(schema=99))
+
+
+def test_pending_orders_parse_and_survive_a_bad_row() -> None:
+    """One unusable row must not hide the rest -- it could not be cancelled."""
+    from charon_bridge.schema import Snapshot
+    from tests.conftest import make_snapshot
+
+    raw = make_snapshot(pending=[
+        {"ticket": 900, "side": "BUY", "order_type": "LIMIT", "price": 1.25,
+         "sl": 1.24, "lot": 0.2, "placed_at": 1_760_000_000},
+        {"ticket": 0, "side": "BUY"},          # unusable ticket
+        {"ticket": 901, "side": "SIDEWAYS"},   # unusable side
+        {"ticket": 902, "side": "SELL", "order_type": "LIMIT", "price": 1.30},
+    ])
+    parsed = Snapshot.from_json(raw)
+    assert [row.ticket for row in parsed.pending] == [900, 902]
+    assert parsed.pending[0].stop == 1.24

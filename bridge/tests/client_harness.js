@@ -78,10 +78,21 @@ class Element {
 const registry = new Map();
 const document = {
   activeElement: null,
+  listeners: {},
   getElementById: (id) => registry.get(id) || null,
   createElement: (tag) => new Element(tag),
   createTextNode: (text) => ({ nodeType: 3, text }),
   querySelectorAll: () => [],
+  // --- delegated listeners (v1.4.0 row actions) attach to the document, so the
+  // --- stub has to accept them or boot() fails before it ever polls.
+  addEventListener(type, fn) {
+    (this.listeners[type] = this.listeners[type] || []).push(fn);
+  },
+  removeEventListener(type, fn) {
+    const list = this.listeners[type] || [];
+    const at = list.indexOf(fn);
+    if (at !== -1) list.splice(at, 1);
+  },
 };
 
 // --- ids used by the client, so nothing is null
@@ -96,6 +107,13 @@ const IDS = ["banner", "statusPill", "ageLabel", "latencyLabel", "lastGoodLabel"
   "orderBlockTop", "orderBlockBottom", "orderTrail", "orderRung",
   "orderLots", "orderEntryPx", "orderStop", "orderRiskMoney", "orderTicket",
   "orderVerdict", "orderPlaceBtn", "orderModifyBtn", "orderCancelBtn", "orderMsg",
+  // --- institutional ticket + working orders (v1.4.0)
+  "orderRiskUnit", "orderRiskLabel", "orderSideHint", "orderTrailStart",
+  "orderBasketCeiling", "orderBasketCeilingHint", "orderJournal", "journalHint",
+  "orderJournalTag", "orderSymbolFilter", "orderSymbolHint",
+  "stageRows", "stageHint",
+  "pendingPanel", "pendingBadge", "pendingSummary", "pendingRows", "noPending",
+  "pendingTableWrap",
   // --- symbol picker + unmanaged panel (v1.3.0)
   "symbolPicker", "symbolSelect", "orderSymbol", "symbolOptions",
   "unmanagedPanel", "unmanagedBadge", "unmanagedSummary", "unmanagedBody",

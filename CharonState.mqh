@@ -7,7 +7,7 @@
 //|  the high-water mark and the latches for every live position.     |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.03"
+#property version   "1.04"
 
 #ifndef __CHARON_STATE__
 #define __CHARON_STATE__
@@ -229,6 +229,11 @@ void CCharonState::Save(const int index, const bool force)
    GlobalVariableSet(Key(tk, "tp"),       (m_rows[index].tpApplied ? 1.0 : 0.0));
    GlobalVariableSet(Key(tk, "cur"),      m_rows[index].currentSL);
    GlobalVariableSet(Key(tk, "applies"),  (double)m_rows[index].stopApplies);
+   //--- v1.4.0 per-ticket trail thresholds. A pre-1.4.0 install simply has
+   //--- no such variables, and Load() defaults them to 0 -- which means
+   //--- "use the chart input", exactly the old behaviour.
+   GlobalVariableSet(Key(tk, "trR"),      m_rows[index].trailStartRR);
+   GlobalVariableSet(Key(tk, "trP"),      m_rows[index].trailStartPoints);
   }
 
 //+------------------------------------------------------------------+
@@ -266,6 +271,10 @@ bool CCharonState::Load(const ulong ticket, const int tierDefault, SCharonPosSta
    out.tpApplied     = (GlobalVariableGet(Key(ticket, "tp"))      > 0.5);
    out.currentSL     = GlobalVariableGet(Key(ticket, "cur"));
    out.stopApplies   = (int)GlobalVariableGet(Key(ticket, "applies"));
+   //--- 0 when absent, so a row restored from a pre-1.4.0 build falls back
+   //--- to the chart-wide thresholds instead of disabling the trail.
+   out.trailStartRR     = GlobalVariableGet(Key(ticket, "trR"));
+   out.trailStartPoints = GlobalVariableGet(Key(ticket, "trP"));
 
    if(out.tier <= 0)
       out.tier = ChClampI(tierDefault, 1, CHARON_MAX_TIERS);
@@ -279,7 +288,7 @@ void CCharonState::Erase(const ulong ticket)
   {
    if(ticket == 0)
       return;
-   string fields[] = {"sl","risk","hwm","tier","time","trail","half","be","tp","cur","applies"};
+   string fields[] = {"sl","risk","hwm","tier","time","trail","half","be","tp","cur","applies","trR","trP"};
    for(int i = 0; i < ArraySize(fields); i++)
      {
       string k = Key(ticket, fields[i]);
