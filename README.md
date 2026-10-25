@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.1.1**
+Current release: **v1.1.2**
 
 ---
 
@@ -121,28 +121,47 @@ snapshot and hands it validated commands to apply.
 
 ## Installation
 
-1. Copy the whole `Charon` folder into your terminal:
+Charon installs into **two** folders, because its entry points reach the modules by
+angle include and angle includes resolve against `MQL5\Include`:
+
+1. Copy the two `.mq5` files into:
    `<terminal data folder>\MQL5\Experts\Charon\`
-2. In MetaEditor, open `Charon.mq5` and press **F7** (Compile).
-3. Attach `Charon` to a chart. One instance manages one symbol.
+2. Copy the ten `.mqh` files into:
+   `<terminal data folder>\MQL5\Include\Charon\`
+3. Open `Charon.mq5` in MetaEditor and press **F7** (Compile).
+4. Attach `Charon` to a chart. One instance manages one symbol.
 
 Charon only touches positions whose symbol matches the chart symbol.
 
-> **All 12 MQL5 files must stay in the same folder.** `Charon.mq5` includes its
-> headers with sibling-relative paths (`#include "CharonDefines.mqh"`), which MQL5
-> resolves against the *including file's own directory*. Copy `Charon.mq5` on its own
-> and compilation fails with
-> `error 106: file 'Experts\CharonDefines.mqh' not found` — the exact error you get
-> when only the `.mq5` was copied. Copy the folder, not the file.
+> **The split is not optional.** `Charon.mq5` and `CharonSelfTest.mq5` include their
+> modules with angle brackets (`#include <Charon\CharonDefines.mqh>`), and MQL5
+> resolves angle includes against `MQL5\Include` — never against the folder holding
+> the `.mq5`. Copy the `.mq5` files without the headers and compilation fails with
+> `error 106: file 'Include\Charon\CharonDefines.mqh' not found`. The header folder
+> must be named exactly `Charon`, because the name is part of every include path.
 >
-> The destination folder name is yours to choose: `Experts\Charon\` (documented
-> default) and a flat `Experts\` both work, because the includes are relative to the
-> files rather than to `Experts`. What is not optional is that the ten headers and
-> the two `.mq5` files sit together.
+> The headers overwrite nothing in the standard library: no stock MQL5 header lives
+> under `Include\Charon`. Upgrading is a plain copy over the top of both folders.
+>
+> **Do not compile `Charon.mq5` from a clone of this repository.** The repository
+> keeps the `.mq5` and `.mqh` files side by side for review, which is not the
+> installed layout. A build run in the repo would resolve `<Charon\...>` against
+> whatever happens to be installed in your terminal, silently testing the wrong
+> code. Use `_tools\build_check.ps1`, which stages a throwaway tree in the real
+> layout; an F7 belongs in the terminal folder.
 >
 > `build_check.ps1` compiles exactly this layout, so `*** GATE PASSED ***` means the
 > files you have would compile as an installed EA — not merely that a hand-built
 > staging tree would.
+
+### Migrating from v1.1.1 or earlier
+
+Before v1.1.2 all twelve files lived together in `Experts\Charon\` and were joined by
+sibling-relative quotes. If you are upgrading in place, **move** the ten `.mqh` files
+out of `Experts\Charon\` into `Include\Charon\` — leaving them where they are is
+harmless but pointless, since nothing reads that copy any more. An install left
+un-migrated does not half-work: the new `.mq5` cannot see the old headers and the
+build stops immediately.
 
 ---
 
@@ -456,10 +475,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File _tools\integration_check.ps1
 ```
 
 The gate compiles **both** `Charon.mq5` and `CharonSelfTest.mq5`, staged in the documented
-install layout (`MQL5\Experts\Charon\`), and fails if any `#include` resolved outside the
-staging tree — so a green result means *this commit* compiled as an installed EA, not some
-stale deployed copy and not a tree of convenience that the docs never mention. It also
-aborts if the staged file set does not match the source set, so a partial copy cannot be
+install layout — entry points in `MQL5\Experts\Charon\`, modules in
+`MQL5\Include\Charon\` — and fails if any `#include` resolved outside the staging tree or
+outside `Include\Charon`, so a green result means *this commit* compiled as an installed EA,
+not some stale deployed copy and not a tree of convenience that the docs never mention. It
+also aborts if either staged half does not match its source set, so a partial copy cannot be
 compiled as if it were whole.
 
 `integration_check.ps1` is the one gate that exercises both halves at once. It starts an

@@ -53,21 +53,27 @@ if (-not (Test-Path (Join-Path $Source $Entry))) {
 # /inc must point at the staging MQL5 folder so MetaEditor never reads the
 # live terminal's headers.
 #
-# Charon's entry uses SIBLING-RELATIVE includes ("CharonDefines.mqh"), which
-# MQL5 resolves against the including file's own directory. The headers must
-# therefore sit in the same folder as the .mq5 -- wherever that folder is.
+# Charon's install is SPLIT, mirroring the terminal:
 #
-# v1.0.6: the gate used to stage everything FLAT in MQL5\Experts, a layout the
-# documentation never told anyone to use. That made the gate pass while a real
-# install failed with "file 'Experts\CharonDefines.mqh' not found": a user who
-# copied Charon.mq5 without the headers beside it still got a green build here.
-# We now stage exactly the documented install layout -- MQL5\Experts\Charon\ --
-# so the gate validates the path users actually take.
+#     MQL5\Experts\Charon\   <- Charon.mq5, CharonSelfTest.mq5
+#     MQL5\Include\Charon\   <- the ten .mqh modules
+#
+# The entry points reach the headers with ANGLE includes
+# (`#include <Charon\CharonDefines.mqh>`), and MQL5 resolves angle includes
+# against MQL5\Include only. The headers themselves still use sibling-relative
+# quotes for each other ("CharonDefines.mqh"), which resolve against the
+# including file's own directory -- so they keep working wherever the folder is
+# placed, including inside Include\Charon\.
+#
+# v1.0.6 staged everything FLAT in MQL5\Experts and the gate went green while a
+# real install failed with "file 'Experts\CharonDefines.mqh' not found".
+# v1.1.2 moves to the split layout above, so the staged tree is once again the
+# layout the documentation tells users to create.
 if (Test-Path $buildRoot) { Remove-Item $buildRoot -Recurse -Force }
 $deploy = Join-Path $experts "Charon"
-New-Item -ItemType Directory -Force -Path $deploy, $stageInc | Out-Null
+New-Item -ItemType Directory -Force -Path $deploy, $includes | Out-Null
 
-Copy-Item (Join-Path $Source "*.mqh") $deploy -Force
+Copy-Item (Join-Path $Source "*.mqh") $includes -Force
 Copy-Item (Join-Path $Source "*.mq5") $deploy -Force
 
 $charonModules = Get-ChildItem (Join-Path $Source "*.mqh") |
@@ -79,26 +85,40 @@ if ($charonModules.Count -eq 0) {
 }
 
 # --- Deployment completeness --------------------------------------------
-# Every header plus both entry points must land in ONE folder. A partial copy
-# is the failure mode this gate exists to make impossible, so verify the staged
-# set against the source set rather than trusting Copy-Item.
-$srcMql = @(Get-ChildItem (Join-Path $Source "*.mq*") -File | ForEach-Object { $_.Name } | Sort-Object)
-$stgMql = @(Get-ChildItem (Join-Path $deploy "*.mq*") -File | ForEach-Object { $_.Name } | Sort-Object)
-$missingFiles = @($srcMql | Where-Object { $stgMql -notcontains $_ })
-if ($missingFiles.Count -gt 0) {
-    Write-Host "FATAL: staging is incomplete, missing: $($missingFiles -join ', ')"
+# Both halves of the split layout must be complete. A partial copy is the
+# failure mode this gate exists to make impossible, so verify each staged set
+# against its source set rather than trusting Copy-Item. An entry point with no
+# headers would die on the first angle include; a header tree missing one
+# module would fail to link.
+$srcMqh = @(Get-ChildItem (Join-Path $Source "*.mqh") -File | ForEach-Object { $_.Name } | Sort-Object)
+$stgMqh = @(Get-ChildItem $includes -File -Filter "*.mqh" | ForEach-Object { $_.Name } | Sort-Object)
+$srcMq5 = @(Get-ChildItem (Join-Path $Source "*.mq5") -File | ForEach-Object { $_.Name } | Sort-Object)
+$stgMq5 = @(Get-ChildItem $deploy -File -Filter "*.mq5" | ForEach-Object { $_.Name } | Sort-Object)
+
+$missingHeaders = @($srcMqh | Where-Object { $stgMqh -notcontains $_ })
+if ($missingHeaders.Count -gt 0) {
+    Write-Host "FATAL: Include\Charon is incomplete, missing: $($missingHeaders -join ', ')"
+    exit 2
+}
+$missingEntries = @($srcMq5 | Where-Object { $stgMq5 -notcontains $_ })
+if ($missingEntries.Count -gt 0) {
+    Write-Host "FATAL: Experts\Charon is incomplete, missing: $($missingEntries -join ', ')"
     exit 2
 }
 $charonSelfTest = Join-Path $Source "CharonSelfTest.mq5"
-if ((Test-Path $charonSelfTest) -and ($stgMql -notcontains "CharonSelfTest.mq5")) {
-    Write-Host "FATAL: CharonSelfTest.mq5 was not staged beside the headers"
+if ((Test-Path $charonSelfTest) -and ($stgMq5 -notcontains "CharonSelfTest.mq5")) {
+    Write-Host "FATAL: CharonSelfTest.mq5 was not staged in Experts\Charon"
     exit 2
 }
-Write-Host ("deploy    : {0} ({1} MQL5 files, headers beside the entry point)" -f $deploy, $stgMql.Count)
+Write-Host ("experts   : {0} ({1} entry point(s): {2})" -f $deploy, $stgMq5.Count, ($stgMq5 -join ', '))
+Write-Host ("headers   : {0} ({1} modules)" -f $includes, $stgMqh.Count)
 Write-Host ""
 
 # --- Stock framework includes so <Trade/...> resolves -------------------
-# Only the official include tree is copied, never a Charon folder.
+# Only the official include tree is copied, never a Charon folder. That
+# exclusion is load-bearing: Include\Charon in the staging tree must contain
+# this commit's modules and nothing else, or the provenance check below would
+# happily validate against a stale installed copy sitting on this machine.
 $candidates = New-Object System.Collections.Generic.List[string]
 $terminalRoot = Join-Path $env:APPDATA "MetaQuotes\Terminal"
 if (Test-Path $terminalRoot) {
@@ -126,8 +146,9 @@ if (-not $found) {
 }
 
 # --- Compile: EA, then the self-test script ------------------------------
-# Both entry points are held to the same 0 errors / 0 warnings standard. The
-# script is staged next to the headers so its relative includes resolve.
+# Both entry points are held to the same 0 errors / 0 warnings standard. Each
+# is staged in MQL5\Experts\Charon and reaches its modules through
+# <Charon\...>, which resolves against the staged MQL5\Include\Charon.
 $entryPoints = @($Entry)
 $scriptSrc = Join-Path $Source "CharonSelfTest.mq5"
 if (Test-Path $scriptSrc) { $entryPoints += "CharonSelfTest.mq5" }
@@ -184,8 +205,10 @@ foreach ($m in $charonModules) {
     }
     $p = $linked[$leaf]
     $fromStage = $p.StartsWith($buildRoot, [StringComparison]::OrdinalIgnoreCase)
+    $isHeaderTree = $p.StartsWith($includes, [StringComparison]::OrdinalIgnoreCase)
     Write-Host ("  {0,-24} {1} {2}" -f $leaf, $(if ($fromStage) { "[STAGED]  " } else { "[EXTERNAL]" }), $p)
     if (-not $fromStage) { $provenanceBad += "$leaf : linked from OUTSIDE staging -> $p" }
+    elseif (-not $isHeaderTree) { $provenanceBad += "$leaf : resolved outside Include\Charon -> $p" }
 }
 Write-Host ""
 

@@ -21,8 +21,19 @@
 #property link      "https://github.com/vickygujjar17/Charon-.git"
 #property strict
 
-#include "CharonDefines.mqh"
-#include "CharonEngine.mqh"
+//--- Headers live in MQL5\Include\Charon\ and are reached by angle include.
+//    Angle includes search MQL5\Include, so this file can sit anywhere under
+//    Experts\ while the headers stay in one shared, versioned location.
+#include <Charon\CharonDefines.mqh>
+#include <Charon\CharonMath.mqh>
+#include <Charon\CharonBridge.mqh>
+#include <Charon\CharonRisk.mqh>
+#include <Charon\CharonPyramid.mqh>
+#include <Charon\CharonStops.mqh>
+#include <Charon\CharonTrail.mqh>
+#include <Charon\CharonTrade.mqh>
+#include <Charon\CharonState.mqh>
+#include <Charon\CharonEngine.mqh>
 
 //--- one engine per chart
 CCharonEngine g_engine;

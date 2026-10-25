@@ -12,9 +12,10 @@
 #property version   "1.01"
 #property script_show_inputs
 
-#include "CharonMath.mqh"
-#include "CharonPyramid.mqh"
-#include "CharonBridge.mqh"
+//--- Same angle-include contract as Charon.mq5: headers live in Include\Charon\.
+#include <Charon\CharonMath.mqh>
+#include <Charon\CharonPyramid.mqh>
+#include <Charon\CharonBridge.mqh>
 
 //+------------------------------------------------------------------+
 //| Harness                                                          |

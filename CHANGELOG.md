@@ -7,6 +7,54 @@ All notable changes to Charon are recorded here. The format follows
 Every commit subject starts with the version it ships, for example
 `v1.0.1: fix ladder re-arm after a rejected modify`.
 
+## [1.1.2] - 2026-10-25
+
+A packaging release with one breaking change and no change to trading behaviour: the wire
+format, `SCHEMA_VERSION` (`2`), every input default and every calculation are untouched. What
+moves is the install layout.
+
+### Changed
+
+- **The MQL5 sources are split into `Experts` and `Include`.** The two entry points,
+  `Charon.mq5` and `CharonSelfTest.mq5`, now reach their modules with angle includes —
+  `#include <Charon\CharonDefines.mqh>` — while the ten `.mqh` files live in
+  `MQL5\Include\Charon\`. Previously all twelve files sat in one folder and were joined by
+  sibling-relative quotes. Angle includes resolve against `MQL5\Include` and quotes resolve
+  against the including file's own directory; those are different roots, so the directive
+  form and the folder layout have to move together. The reason to prefer the split is that
+  the headers are now one versioned copy under `Include`, which is where MQL5 looks for a
+  library, and the entry point no longer has to sit beside them.
+- **The headers still use sibling-relative quotes for each other.** Only the two entry points
+  were converted. Inside `Include\Charon` a module's `#include "CharonDefines.mqh"` resolves
+  against that same folder, so the modules stay portable as a unit and could be relocated
+  again without touching nine files.
+- **`build_check.ps1` stages the split layout.** Entry points go to `MQL5\Experts\Charon`,
+  modules to `MQL5\Include\Charon`, and the two staged sets are each reconciled against their
+  source sets, so an incomplete copy on either side fails the gate instead of compiling. The
+  link-provenance check gained a second assertion: a Charon header must not only come from
+  the staging tree but must resolve inside `Include\Charon`. That closes the hole the new
+  layout would otherwise open, where a stale installed copy in the developer's own terminal
+  could satisfy `<Charon\...>` and make a broken tree look green.
+
+### Breaking
+
+- **Existing installs must move their headers.** An install upgraded in place without moving
+  the ten `.mqh` files from `Experts\Charon\` into `Include\Charon\` will not compile: the new
+  entry point looks under `Include` and finds nothing. The failure is immediate and total
+  rather than subtle — `error 106: file 'Include\Charon\CharonDefines.mqh' not found` — and
+  it cannot be mistaken for a partial build. `README.md` documents the migration.
+
+### Fixed
+
+- **`build_check.ps1` no longer declares an unused `$includes` path.** It had computed the
+  `MQL5\Include\Charon` staging path since v1.0.6 and never used it, which is the shape of a
+  migration that was planned and left half-done. The variable is now what the gate stages to.
+- **`README.md` no longer claims a flat `Experts\` install works.** That was true while the
+  includes were quoted and became false the moment they were not. The installation section
+  now states the two-folder requirement, names the exact error a missing header folder
+  produces, and warns against compiling from a repository clone — where `<Charon\...>` would
+  silently resolve against whatever is installed in the terminal instead of the working tree.
+
 ## [1.1.1] - 2026-10-25
 
 A presentation release. No trading behaviour changed, no wire format changed, and
