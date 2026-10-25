@@ -9,7 +9,7 @@
 //|  Run it on any chart. The verdict line is "SELFTEST RESULT: ..." |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.04"
+#property version   "1.05"
 #property script_show_inputs
 
 //--- Same angle-include contract as Charon.mq5: headers live in Include\Charon\.
@@ -160,6 +160,38 @@ void TestRR(void)
          "rr: short 2R reports 2.0R");
    Check(Near(ChProgressRR(1.10000, 0.0, 1.10600, true), 0.0),
          "rr: zero risk reports 0.0R (no division by zero)");
+  }
+
+//+------------------------------------------------------------------+
+//| Absolute-price trail activation (v1.5.0)                         |
+//|                                                                  |
+//|  The cross test is "touched or crossed", never equality: a level  |
+//|  the market gaps over must still arm the trail, and an exact-tick |
+//|  comparison would silently never fire -- the worst failure for a  |
+//|  feature whose job is to wait.                                    |
+//+------------------------------------------------------------------+
+void TestTrailStartPrice(void)
+  {
+   //--- a long arms once the high-water mark reaches the level
+   Check(ChPriceAtOrBeyond(1.20000, 1.25000, true),
+         "trail price: long 1.25 reached exactly");
+   Check(ChPriceAtOrBeyond(1.26000, 1.25000, true),
+         "trail price: long gapped through 1.25");
+   Check(!ChPriceAtOrBeyond(1.24990, 1.25000, true),
+         "trail price: long one point short does not arm");
+
+   //--- a short arms once the low reaches its level
+   Check(ChPriceAtOrBeyond(1.30000, 1.25000, false),
+         "trail price: short 1.25 reached exactly");
+   Check(ChPriceAtOrBeyond(1.24000, 1.25000, false),
+         "trail price: short gapped through 1.25");
+   Check(!ChPriceAtOrBeyond(1.25010, 1.25000, false),
+         "trail price: short one point short does not arm");
+
+   //--- 0 means "no absolute level", and every caller must read that as
+   //--- "fall back to the chart input" rather than "armed immediately"
+   Check(!ChPriceAtOrBeyond(1.30000, 0.0, true),
+         "trail price: no level never reports activation");
   }
 
 //+------------------------------------------------------------------+
@@ -342,6 +374,20 @@ void TestBridgeVerbs(void)
    Check(CCharonBridge::OrderVerb("order_cancel"), "bridge: order_cancel is an order verb");
    Check(!CCharonBridge::OrderVerb("arm"), "bridge: arm is not an order verb");
    Check(!CCharonBridge::OrderVerb("ping"), "bridge: ping is not an order verb");
+
+   //--- v1.5.0 watch queue. watch_add carries a full ticket, so the parser
+   //--- validates it identically and OrderVerb says so; watch_cancel names an
+   //--- id, not a ticket.
+   Check(CCharonBridge::VerbAllowed("watch_add"), "bridge: watch_add is permitted");
+   Check(CCharonBridge::VerbAllowed("watch_cancel"), "bridge: watch_cancel is permitted");
+   Check(CCharonBridge::OrderVerb("watch_add"),
+         "bridge: watch_add needs a full validated ticket");
+   Check(!CCharonBridge::OrderVerb("watch_cancel"),
+         "bridge: watch_cancel needs an id, not a ticket");
+   Check(!CCharonBridge::VerbAllowed("watch"), "bridge: bare watch is refused");
+   Check(!CCharonBridge::VerbAllowed("watch_fire"),
+         "bridge: watch_fire is refused - only the EA decides a level was hit");
+   Check(CHARON_BRIDGE_MAX_WATCHES > 0, "bridge: a watch queue exists");
 
    //--- nothing that could express a trade the EA did not size
    Check(!CCharonBridge::VerbAllowed("open"), "bridge: open is refused");
@@ -578,6 +624,7 @@ void OnStart(void)
    TestLotFromRisk();
    TestStopGeometry();
    TestRR();
+   TestTrailStartPrice();
    TestImprovementGate();
    TestExtremeAndClamp();
    TestPyramidModel();

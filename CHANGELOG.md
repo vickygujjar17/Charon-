@@ -9,6 +9,81 @@ Every commit subject starts with the version it ships, for example
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-25
+
+Four gaps closed, one of them a live trap. A `MARKET` ticket that names an `entry` price no
+longer fills at market — it **arms a watch**, and the EA submits it itself when its own tick
+reaches that price. Trail activation may be stated as an **absolute price**. Commodities get
+their own asset class, and the dashboard shows both queues side by side.
+
+`SCHEMA_VERSION` goes `3` → `4`. Snapshots stay **tolerant** (a schema-2 or schema-3 EA is
+still rendered); commands are now gated **per field** rather than per version — see Notes.
+
+### Fixed
+
+- **`MARKET` + an entry price silently filled at market.** `ApplyOrderCommand` replaced the
+  entry with the live ask or bid for any MARKET ticket, so "wait for 1.1050" and "buy now"
+  produced the same trade — the price was validated, carried across the wire, read, and then
+  ignored. The routing rule is now explicit: MARKET with no entry fills immediately, MARKET
+  with an entry arms a watch. This was the most dangerous of the four gaps, because the
+  dashboard reported "queued" for both.
+- **A schema-3 chart would have been refused every v1.4.0 field the moment the bridge learned
+  schema 4.** `_require_semantic_capable` compared against `SCHEMA_VERSION`, which is only
+  correct while there is one frontier. Each field now carries the revision that first honours
+  it, so a schema-3 EA still accepts a schema-3 ticket.
+- **`XTI`/`XBR` crude was filed under Forex.** Both are six letters ending in a currency, so
+  the structural pair test claimed them before energy could. Energy is matched first.
+- **`CL`, `CO1` and the softs/grains landed under Other** beside genuine unknowns like `AAPL`,
+  because no token list mentioned them.
+
+### Added
+
+- **The watch queue (`watch_add`, `watch_cancel`).** A watch parks an already-validated
+  ticket and submits it through the identical `ApplyOrderCommand` path when the level is hit,
+  so a deferred ticket is never a weaker one than an immediate ticket. The queue is capped at
+  `CHARON_BRIDGE_MAX_WATCHES` (8), persisted to `MQL5\Files\Charon\watches.txt`, and restored
+  on init so a recompile does not lose an operator's entry.
+- **`watch[]` in the snapshot,** beside `pending[]` rather than merged into it. A watch has no
+  broker ticket — nothing reached the broker — so it is cancelled by the id the EA minted,
+  through `POST /api/orders/watch/cancel`. The panel gives it its own table for that reason.
+- **`watching` as an order verdict,** so the last submitted ticket can be reported as armed
+  rather than filled. `accepted`/`pending`/`rejected` keep their existing meanings.
+- **Absolute-price trail activation (`trail_start_price`).** Validated against the *fill* in
+  `ApplyTicketTrail`, not in the parser: only the EA has a fill to compare against, and a
+  threshold on the wrong side of the entry would arm the trail in the wrong direction.
+  Mutually exclusive with `trail_start_rr`/`trail_start_points` — a ticket stating two is a
+  ticket whose author had not decided, so it is refused rather than resolved.
+- **`ASSET_COMMODITIES`** (`WHEAT`, `CORN`, `SOYBEAN`, `COFFEE`, `COCOA`, `SUGAR`, `COTTON`,
+  `ORANGE`, plus `RICE`/`OATS`/`LUMBER`/`CATTLE`/`HOG`) and `XTI`/`XBR`/`CO1` under energy.
+  `CL` is matched exactly, never as a prefix, because `CLP` is the Chilean peso. Classification
+  remains **advisory only**: an unrecognised symbol is still offered, under Other.
+- **`bid`/`ask` in the snapshot,** so a watch row can show its remaining distance instead of
+  making the operator subtract two prices by hand. Advisory: no decision depends on it.
+- **`ChPriceAtOrBeyond()`** in `CharonMath.mqh`, shared by the watch trigger and the trail
+  activation so the two can never drift. Both test *touched or crossed*, never equality — a
+  level the market gaps over must still fire, and an exact-tick comparison would silently
+  never trigger, which is the worst possible failure for a condition whose job is to wait.
+
+### Notes
+
+- **Upgrade in this order:** recompile every chart with the v1.5.0 EA first, then restart the
+  bridge. Restarting first leaves schema-3 charts refusing watches and absolute-price
+  activation — loudly, naming the field.
+- **Two things require schema 4:** the `watch_add` verb (a schema-3 EA does not know it) and
+  `trail_start_price` (a schema-3 EA would ignore the key and trail from its own default).
+  Everything else still passes against a schema-3 chart.
+- **Watches are restored, not fired, at `OnInit`.** The queue is loaded there but evaluated on
+  the first `OnTickWork`: a chart reload can carry a stale cached tick, and firing a trade
+  against it would be worse than waiting one tick.
+- **The cross-to-fill path is not covered by the Python suite.** It needs a live terminal and a
+  tick stream. The arithmetic is pinned by `CharonSelfTest.mq5` (`TestTrailStartPrice`), the
+  command and snapshot shapes by `tests/test_watch.py`, and the EA's own behaviour by
+  `tests/fake_ea.py` — but the moment a real tick fires a real watch has only been reasoned
+  about, not observed.
+- **A watch the operator armed with `InpPersistState` false does not survive a reload.** The
+  queue file is skipped in that mode, deliberately, because "do not persist" should mean
+  exactly that. The EA logs the restore count on init so a silent loss is visible.
+
 ## [1.4.0] - 2026-10-25
 
 The institutional ticket. Order placement grows the decisions a desk actually makes

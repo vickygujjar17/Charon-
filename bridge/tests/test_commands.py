@@ -26,17 +26,20 @@ from charon_bridge.version import SCHEMA_VERSION
 from tests.fake_ea import local_epoch as fake_local_epoch
 
 
-def test_allowed_verbs_are_exactly_seven() -> None:
-    """The vocabulary grew in v1.1.0, and the growth is deliberate.
+def test_allowed_verbs_are_exactly_nine() -> None:
+    """The vocabulary grew in v1.1.0 and again in v1.5.0, deliberately.
 
     The three order verbs submit *intent* to the EA's risk model; none of
-    them accepts a caller-chosen volume, stop distance or R multiple. The
-    raw verbs they might have been named after remain forbidden, so this
+    them accepts a caller-chosen volume, stop distance or R multiple. The two
+    watch verbs are the same intent, merely deferred until a price is
+    touched -- the EA still originates the order and still solves the size.
+    The raw verbs they might have been named after remain forbidden, so this
     list is the whole of what the bridge can express.
     """
     assert set(ALLOWED_VERBS) == {
         "arm", "disarm", "trail_mode", "ping",
         "order_open", "order_modify", "order_cancel",
+        "watch_add", "watch_cancel",
     }
 
 

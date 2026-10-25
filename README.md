@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.4.0**
+Current release: **v1.5.0**
 
 ---
 
@@ -441,57 +441,93 @@ EA is not publishing. `CHARON_SYMBOL_PREFIX` / `CHARON_SYMBOL_SUFFIX` (see
 Sending one would queue a file that no chart could ever drain — the operator would see
 "queued" and believe something was about to happen.
 
-### Upgrading to schema 3 (v1.4.0)
+### Upgrading to schema 4 (v1.5.0)
 
-The wire revision moved `2` -> `3`. The two directions are deliberately asymmetric:
+The wire revision moved `3` -> `4`. The same asymmetry applies, but the gate is now **per
+field** rather than per version, which is a change from v1.4.0:
 
 | Direction | Behaviour |
 |---|---|
-| Snapshot, EA schema 2 -> v1.4.0 bridge | **Rendered.** Every v1.4.0 addition is additive, so nothing is invented or lost. |
-| Command, v1.4.0 bridge -> EA schema 2 | **Refused.** `ReadCommandFile` requires an exact match, so the EA cannot act on a ticket whose constraints it would silently ignore. |
+| Snapshot, EA schema 2/3 -> v1.5.0 bridge | **Rendered.** `watch` defaults to empty and `bid`/`ask` to null, so an older chart shows no watches and no distance column. |
+| Command, v1.5.0 bridge -> EA schema 3 | **Per field.** A ticket using only schema-3 semantics passes; anything schema-3 cannot honour is refused with a message naming it. |
 
-That asymmetry is the whole safety story. `ReadCommandFile` ignores keys it does not know,
-so a schema-2 EA handed a schema-3 ticket would accept it, open a position and drop the
-money-denominated risk, the basket ceiling, the stage plan and the trail threshold -- a
-trade that *looks* governed and is not. Refusing the revision is the only honest answer.
+v1.4.0 refused on `snapshot.schema < SCHEMA_VERSION`, which worked while there was one
+frontier. With two it would have broken every schema-3 chart the moment the bridge learned
+schema 4 — a schema-3 EA understands a journal note perfectly well. So each field carries
+the revision that first honours it, and only fields above the chart's own revision are
+refused. Two things are gated at 4:
 
-`POST /api/order` and `/api/order/modify` pre-flight it, so the refusal is synchronous and
-readable instead of a silent no-op visible only in the Experts log. A ticket carrying none
-of the v1.4.0 semantics still passes against a schema-2 EA: an un-upgraded chart stays
-usable for exactly what it understands.
+* **`watch_add`** — a schema-3 EA does not know the verb at all and would reject the file.
+* **`trail_start_price`** — a schema-3 EA would ignore the key and trail from its own
+  default, so the operator would be told a level was armed when it was not.
 
-**Upgrade in this order:** recompile *every* chart with the v1.4.0 EA first, then restart
-the bridge. Restarting the bridge first leaves the old charts rejecting every ticket that
-uses a new field -- loudly, with a message naming the field.
+`POST /api/order`, `/api/order/modify` and `/api/orders/watch/cancel` pre-flight it, so the
+refusal is synchronous and readable instead of a silent no-op visible only in the Experts
+log.
 
-The command vocabulary is seven verbs: four state-only (`arm`, `disarm`, `trail_mode`,
-`ping`) and three for attended execution (`order_open`, `order_modify`, `order_cancel`).
-Both sides whitelist it independently, so neither can widen the set alone.
+**Upgrade in this order:** recompile *every* chart with the v1.5.0 EA first, then restart
+the bridge. Restarting the bridge first leaves schema-3 charts refusing watches and
+absolute-price activation — loudly, with a message naming the field.
+
+The command vocabulary is nine verbs: four state-only (`arm`, `disarm`, `trail_mode`,
+`ping`), three for attended execution (`order_open`, `order_modify`, `order_cancel`) and two
+for the watch queue (`watch_add`, `watch_cancel`). Both sides whitelist it independently, so
+neither can widen the set alone.
 
 The order verbs carry **intent, never size**. A ticket states a side, the block the stop
 is derived from, a risk figure (a percentage **or** an amount of money, never both), the
 rung it is stated against, and -- since v1.4.0 -- up to three pyramid stages, an optional
-trail activation threshold, an optional basket-wide risk ceiling and a journal note. It
-does not contain a lot, a stop distance, a take-profit or an R multiple, because those are
-the EA's answers: `CCharonRisk::LotForBudget` solves the volume from the block height and
-the ticket's budget, clamps that budget to `InpMaxRiskPct`, and re-verifies the applied
-risk before anything is sent. A pyramid stage is a **multiplier** against that solved
-volume, so it cannot express a size either. `CharonTrade.mqh` is still the only module
-that calls `OrderSend`.
+trail activation threshold, an optional basket-wide risk ceiling and a journal note. Since
+v1.5.0 the trail threshold may also be stated as an absolute price. A ticket does not
+contain a lot, a stop distance, a take-profit or an R multiple, because those are the EA's
+answers: `CCharonRisk::LotForBudget` solves the volume from the block height and the
+ticket's budget, clamps that budget to `InpMaxRiskPct`, and re-verifies the applied risk
+before anything is sent. A pyramid stage is a **multiplier** against that solved volume, so
+it cannot express a size either. `CharonTrade.mqh` is still the only module that calls
+`OrderSend`.
 
 The raw verbs an attacker would reach for — `open`, `close`, `modify`, `buy`, `sell`,
-`size`, `cancel` — remain forbidden on both sides. `POST /api/trade` exists purely to
-answer **`405`** with the reason, and points at `POST /api/order` instead.
+`size`, `cancel` — remain forbidden on both sides, joined in v1.5.0 by `watch` and
+`watch_fire`: whether a level was reached is the EA's conclusion from its own tick, never
+something the bridge can declare. `POST /api/trade` exists purely to answer **`405`** with
+the reason, and points at `POST /api/order` instead.
 
 Executing from the browser is attended, not autonomous: the EA applies its own gates
 (`InpMaxRiskPct`, the broker's stop level, one basket per symbol, no opposite direction,
-one working pending ticket) and reports a verdict — `accepted`, `pending` or `rejected`
-with the reason — in the snapshot's `order` block, which the panel renders in the EA's
-own numbers.
+one working pending ticket) and reports a verdict — `accepted`, `pending`, `watching` or
+`rejected` with the reason — in the snapshot's `order` block, which the panel renders in the
+EA's own numbers.
 
-Arming from the browser is the same call the `A` hotkey makes, and every other gate —
-max legs, cooldown, spread, basket risk — still applies. An arm can never force an
-exposure add the risk model would reject.
+### Watched entries (v1.5.0)
+
+A `MARKET` ticket that names an `entry` price no longer fills at market. It arms a **watch**,
+and the EA submits the ticket itself once its own tick reaches that price. Before this,
+`ApplyOrderCommand` replaced the entry with the live ask or bid for any MARKET ticket, so an
+operator who typed `1.1050` next to MARKET got whatever the market was — and the dashboard
+said "queued".
+
+| Ticket | Behaviour |
+|---|---|
+| `MARKET`, no entry | Fills now. The pre-v1.5.0 default, unchanged. |
+| `MARKET`, with entry | `watch_add`. Nothing is submitted until the price is reached. |
+| `LIMIT`, with entry | `order_open`. The broker holds it; no second mechanism. |
+
+A watch is **not** a pending order and deliberately does not share its table or its cancel
+path: nothing exists at the broker, so it has no ticket, and it is cancelled by the id the
+EA minted via `POST /api/orders/watch/cancel`. The panel shows the two queues separately for
+that reason.
+
+The trigger test is *touched or crossed*, using the ask for a BUY and the bid for a SELL —
+the price the fill would actually use. Equality is never tested: a level the market gaps
+over must still fire, and an exact-tick comparison would silently never trigger.
+
+At most `CHARON_BRIDGE_MAX_WATCHES` (8) watches are held at once. The queue is persisted to
+`MQL5\Files\Charon\watches.txt` and restored on init, so a recompile does not lose an entry
+the operator set. It is deliberately **not** saved when `InpPersistState` is false.
+
+The one thing a watch cannot survive is being fired from `OnInit`: the EA restores the queue
+there but evaluates it on the first `OnTickWork`, because a chart reload can carry a stale
+cached tick and firing a trade against it would be worse than waiting one tick.
 
 ### Honesty about staleness
 

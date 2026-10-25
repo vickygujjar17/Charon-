@@ -194,9 +194,13 @@
         </label>
 
         <label class="block">
-          <span class="label">Entry (LIMIT only)</span>
-          <input id="orderEntry" type="number" step="0.00001" placeholder="market"
+          <span class="label">Entry price</span>
+          <input id="orderEntry" type="number" step="0.00001"
+                 placeholder="optional: wait for this price"
                  class="ticket-field mt-1" />
+          <span class="mt-1 block text-[10px] text-shade-400">
+            MARKET + a price arms a watch; blank fills now.
+          </span>
         </label>
 
         <label class="block">
@@ -240,6 +244,12 @@
           <span class="label">Trail activation (R)</span>
           <input id="orderTrailStart" type="number" step="0.1" min="0"
                  placeholder="chart input" class="ticket-field mt-1" />
+        </label>
+
+        <label class="block">
+          <span class="label">or activation price</span>
+          <input id="orderTrailPrice" type="number" step="0.00001" min="0"
+                 placeholder="absolute level" class="ticket-field mt-1" />
         </label>
 
         <label class="block">
@@ -356,6 +366,40 @@
       </div>
       <div id="noPending" class="border-t border-ink-700 px-4 py-3 text-xs text-shade-400">
         No working orders. A LIMIT ticket appears here until it fills or is cancelled.
+      </div>
+    </section>
+
+    <!-- ================= ARMED WATCHES =================
+         A watch is not a pending order: nothing exists at the broker until the
+         EA decides the price was touched, so it has no ticket and cannot be
+         cancelled through the order path. Its own panel keeps that distinction
+         visible instead of blending two queues with different cancel paths. -->
+    <section class="panel mt-4" id="watchPanel">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2.5">
+        <div class="flex items-center gap-2">
+          <h2 class="mark">Armed watches</h2>
+          <span id="watchBadge" class="pill bg-ink-700 text-shade-300">0</span>
+        </div>
+        <span id="watchSummary" class="text-[11px] text-shade-400"></span>
+      </div>
+      <div class="hidden overflow-x-auto" id="watchTableWrap">
+        <table class="w-full text-left text-xs">
+          <thead class="text-[10px] uppercase tracking-[0.14em] text-shade-400">
+            <tr class="border-b border-ink-700">
+              <th class="py-2 pl-4 pr-3">Watch</th>
+              <th class="py-2 pr-3">Side</th>
+              <th class="py-2 pr-3">Target</th>
+              <th class="py-2 pr-3">Distance</th>
+              <th class="py-2 pr-3">State</th>
+              <th class="py-2 pr-4">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="watchRows" class="font-mono tabular-nums text-shade-200"></tbody>
+        </table>
+      </div>
+      <div id="noWatch" class="border-t border-ink-700 px-4 py-3 text-xs text-shade-400">
+        No armed watches. A MARKET ticket that names an entry price waits here
+        instead of filling immediately.
       </div>
     </section>
 

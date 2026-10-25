@@ -7,7 +7,7 @@
 //|  order of operations is auditable in a single place.              |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.04"
+#property version   "1.05"
 
 #ifndef __CHARON_ENGINE__
 #define __CHARON_ENGINE__
@@ -69,6 +69,20 @@ private:
    void              ApplyTicketTrail(const SCharonBridgeCommand &cmd, const ulong positionTicket);
    void              PublishBridge(void);
 
+   //--- v1.5.0 watch queue
+   void              WatchAdd(const SCharonBridgeCommand &cmd);
+   bool              WatchCancel(const long id);
+   void              EvaluateWatches(void);
+   int               CollectWatches(SCharonBridgeWatch &out[], const int maxRows);
+   bool              SaveWatches(void);
+   bool              LoadWatches(void);
+
+   //--- armed tickets waiting on a price. Held whole, so the fill runs the
+   //--- identical order_open path with the identical validated intent.
+   SCharonWatch      m_watch[CHARON_BRIDGE_MAX_WATCHES];
+   int               m_watchCount;
+   long              m_nextWatchId;
+
    //--- verdict of the last attended ticket, published verbatim
    string            m_orderStatus;
    string            m_orderReason;
@@ -89,6 +103,7 @@ private:
    ulong             m_pendingTrailTicket;
    double            m_pendingTrailRR;
    double            m_pendingTrailPoints;
+   double            m_pendingTrailPrice;
 
    //--- helpers
    bool              WantsTicket(const ulong magic) const;
@@ -137,6 +152,9 @@ CCharonEngine::CCharonEngine(void)
    m_pendingTrailTicket = 0;
    m_pendingTrailRR     = 0.0;
    m_pendingTrailPoints = 0.0;
+   m_pendingTrailPrice  = 0.0;
+   m_watchCount = 0;
+   m_nextWatchId = 1;
    m_opts.symbol   = "";
    m_opts.slippage = 0;
    m_opts.retries  = 1;
@@ -227,6 +245,16 @@ bool CCharonEngine::Init(void)
    m_state.Clear();
    m_bridge.Init(InpBridgeEnable ? m_symbol : "");
 
+   //--- adopt anything that already belongs to Charon before the first tick,
+   //--- so a reload does not leave positions unmanaged for one tick. Watches
+   //--- are restored here but deliberately NOT evaluated: firing a trade from
+   //--- OnInit would act on whatever tick the terminal last cached, which on a
+   //--- weekend reload can be hours stale. The first OnTickWork evaluates them
+   //--- against a real tick, and a level reached while the terminal was down
+   //--- still fires there.
+   ScanAndAdopt();
+   LoadWatches();
+
    m_ready = true;
 
    PrintFormat("%s %s ready on %s | point %.5f | min lot %.2f step %.2f | ATR(%d) %s",
@@ -265,9 +293,300 @@ void CCharonEngine::Deinit(void)
 
    //--- flush every row before releasing the ATR handle
    m_state.FlushAll();
+   //--- the armed queue outlives a chart reload by design: an entry the
+   //--- operator set is not "chart state" they expect to lose when they
+   //--- recompile. Save is unconditional here -- a throttle would drop a
+   //--- watch armed seconds before the reload.
+   SaveWatches();
    m_risk.Deinit();
    Comment("");
    m_ready = false;
+  }
+
+//+------------------------------------------------------------------+
+//| The watch queue file                                             |
+//|                                                                  |
+//|  Tab-separated, one watch per line, rewritten whole on every      |
+//|  change: the queue is at most CHARON_BRIDGE_MAX_WATCHES rows, so   |
+//|  an incremental format would buy nothing and risk a torn tail.     |
+//|  A corrupt line costs one watch, never the queue.                  |
+//|  Written under MQL5\Files\ and not into Common\Files: the queue is |
+//|  this chart's private state, not part of the Python contract, and  |
+//|  the bridge never reads it.                                        |
+//+------------------------------------------------------------------+
+#define CHARON_WATCH_FILE "Charon\\watches.txt"
+
+//+------------------------------------------------------------------+
+//| Persist the armed queue                                          |
+//|  Deliberately whole-file: at most CHARON_BRIDGE_MAX_WATCHES rows, |
+//|  so rewriting is cheaper and simpler than any incremental scheme. |
+//+------------------------------------------------------------------+
+bool CCharonEngine::SaveWatches(void)
+  {
+   if(!InpPersistState)
+      return false;
+
+   //--- delete before writing. FileSeek(0) only rewinds: it does not truncate,
+   //--- so rewriting a shorter queue would leave the old tail on disk and a
+   //--- cancelled watch would come back on the next reload. There is no
+   //--- truncate call in MQL5, so the file is recreated.
+   if(FileIsExist(CHARON_WATCH_FILE))
+      FileDelete(CHARON_WATCH_FILE);
+
+   ResetLastError();
+   int h = FileOpen(CHARON_WATCH_FILE,
+                    FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
+   if(h == INVALID_HANDLE)
+     {
+      PrintFormat("%s watches: could not open %s (%d)", CHARON_NAME,
+                  CHARON_WATCH_FILE, GetLastError());
+      return false;
+     }
+
+   FileWrite(h, "# Charon watch queue v1");
+   const int dg = (m_risk.Digits() > 0 ? m_risk.Digits() : 5);
+   for(int i = 0; i < m_watchCount; i++)
+     {
+      //--- one tab-separated record per watch, field order fixed and mirrored
+      //--- exactly by LoadWatches:
+      //---   0 id        1 side       2 orderType   3 created   4 price
+      //---   5 entry     6 blockTop   7 blockBottom 8 riskPct   9 riskMoney
+      //---  10 ceiling  11 startRR   12 startPts   13 startPrc 14 rung
+      //---  15 journalTag
+      //--- Prices use the symbol's own digits, so a reload reproduces the exact
+      //--- doubles the operator sent rather than a rounded copy of them.
+      const SCharonBridgeCommand c = m_watch[i].cmd;
+      string row = StringFormat("%I64d\t%s\t%s\t%I64d\t",
+                                m_watch[i].id, c.side, c.orderType,
+                                (long)m_watch[i].createdAt);
+      row += DoubleToString(m_watch[i].price, dg) + "\t";
+      row += DoubleToString(c.entry, dg) + "\t";
+      row += DoubleToString(c.blockTop, dg) + "\t";
+      row += DoubleToString(c.blockBottom, dg) + "\t";
+      row += DoubleToString(c.riskPct, 4) + "\t";
+      row += DoubleToString(c.riskMoney, 2) + "\t";
+      row += DoubleToString(c.basketCeilingPct, 4) + "\t";
+      row += DoubleToString(c.trailStartRR, 4) + "\t";
+      row += DoubleToString(c.trailStartPoints, 2) + "\t";
+      row += DoubleToString(c.trailStartPrice, dg) + "\t";
+      row += StringFormat("%d\t%s", c.rung, c.journalTag);
+      FileWrite(h, row);
+     }
+   FileClose(h);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Restore the armed queue                                          |
+//|  A line that cannot be parsed is skipped, not fatal: the operator  |
+//|  loses one watch and keeps the rest, and the log says so.          |
+//+------------------------------------------------------------------+
+bool CCharonEngine::LoadWatches(void)
+  {
+   m_watchCount = 0;
+   if(!InpPersistState)
+      return false;
+
+   if(!FileIsExist(CHARON_WATCH_FILE))
+      return false;
+
+   int h = FileOpen(CHARON_WATCH_FILE, FILE_READ | FILE_TXT | FILE_ANSI | FILE_SHARE_READ);
+   if(h == INVALID_HANDLE)
+      return false;
+
+   while(!FileIsEnding(h) && m_watchCount < CHARON_BRIDGE_MAX_WATCHES)
+     {
+      string line = FileReadString(h);
+      if(StringLen(line) < 8 || StringGetCharacter(line, 0) == '#')
+         continue;
+
+      string f[];
+      if(StringSplit(line, '\t', f) < 16)
+        {
+         PrintFormat("%s watches: skipping a malformed record", CHARON_NAME);
+         continue;
+        }
+
+      SCharonBridgeCommand c;
+      ZeroMemory(c);
+      c.valid       = true;
+      c.verb        = CHARON_BRIDGE_V_ORDER_OPEN;   // a fired watch IS an open
+      c.side        = f[1];
+      c.orderType   = f[2];
+      c.entry       = StringToDouble(f[5]);
+      c.blockTop    = StringToDouble(f[6]);
+      c.blockBottom = StringToDouble(f[7]);
+      c.riskPct     = StringToDouble(f[8]);
+      c.riskMoney   = StringToDouble(f[9]);
+      c.basketCeilingPct = StringToDouble(f[10]);
+      c.trailStartRR     = StringToDouble(f[11]);
+      c.trailStartPoints = StringToDouble(f[12]);
+      c.trailStartPrice  = StringToDouble(f[13]);
+      c.rung        = (int)StringToInteger(f[14]);
+      c.journalTag  = f[15];
+
+      //--- a row that would not have passed the parser is not worth keeping:
+      //--- restoring it would submit a ticket the operator never validated.
+      if(c.side != "BUY" && c.side != "SELL")
+         continue;
+      if(c.entry <= 0.0 || c.blockTop == c.blockBottom)
+         continue;
+
+      m_watch[m_watchCount].id        = (long)StringToInteger(f[0]);
+      m_watch[m_watchCount].price     = StringToDouble(f[4]);
+      m_watch[m_watchCount].createdAt = (datetime)(long)StringToInteger(f[3]);
+      m_watch[m_watchCount].cmd       = c;
+      if(m_watch[m_watchCount].id >= m_nextWatchId)
+         m_nextWatchId = m_watch[m_watchCount].id + 1;
+      m_watchCount++;
+     }
+   FileClose(h);
+
+   if(m_watchCount > 0)
+      PrintFormat("%s watches: restored %d armed entr%s",
+                  CHARON_NAME, m_watchCount, (m_watchCount == 1 ? "y" : "ies"));
+   return (m_watchCount > 0);
+  }
+//+------------------------------------------------------------------+
+//| Arm a validated ticket until the market reaches its price        |
+//|                                                                  |
+//|  Nothing is submitted here and nothing is sized: the ticket is    |
+//|  parked whole, and when the level is touched the EA runs the same |
+//|  ApplyOrderCommand path an immediate order would have taken.      |
+//|  That is the whole point -- a watch defers *when*, never *what*.  |
+//+------------------------------------------------------------------+
+void CCharonEngine::WatchAdd(const SCharonBridgeCommand &cmd)
+  {
+   if(m_watchCount >= CHARON_BRIDGE_MAX_WATCHES)
+     {
+      SetOrderVerdict("rejected",
+                      StringFormat("watch queue is full (%d)", CHARON_BRIDGE_MAX_WATCHES),
+                      cmd.side, 0.0, cmd.entry, 0.0,
+                      cmd.riskMoney, cmd.riskPct, cmd.rung, 0);
+      PrintFormat("%s bridge: watch refused - queue is full", CHARON_NAME);
+      return;
+     }
+
+   m_watch[m_watchCount].id        = m_nextWatchId++;
+   m_watch[m_watchCount].price     = cmd.entry;
+   m_watch[m_watchCount].createdAt = TimeCurrent();
+   m_watch[m_watchCount].cmd       = cmd;
+   m_watchCount++;
+
+   SaveWatches();
+
+   SetOrderVerdict("watching",
+                   StringFormat("watching %.5f for a %s entry", cmd.entry, cmd.side),
+                   cmd.side, 0.0, cmd.entry, 0.0,
+                   cmd.riskMoney, cmd.riskPct, cmd.rung, 0);
+   PrintFormat("%s bridge: watching %.5f for %s (watch #%I64d)",
+               CHARON_NAME, cmd.entry, cmd.side, m_nextWatchId - 1);
+  }
+
+//+------------------------------------------------------------------+
+//| Drop an armed watch                                              |
+//+------------------------------------------------------------------+
+bool CCharonEngine::WatchCancel(const long id)
+  {
+   for(int i = 0; i < m_watchCount; i++)
+     {
+      if(m_watch[i].id != id)
+         continue;
+
+      for(int k = i; k < m_watchCount - 1; k++)
+         m_watch[k] = m_watch[k + 1];
+      m_watchCount--;
+
+      SaveWatches();
+      SetOrderVerdict("accepted", StringFormat("watch #%I64d cancelled", id),
+                      "", 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0);
+      PrintFormat("%s bridge: watch #%I64d cancelled", CHARON_NAME, id);
+      return true;
+     }
+
+   SetOrderVerdict("rejected", StringFormat("no watch #%I64d to cancel", id),
+                   "", 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0);
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Fire every watch whose level the market has reached              |
+//|                                                                  |
+//|  Runs *before* ManageRow in the tick pipeline: a watch that fires |
+//|  opens a position, and that position should be managed by the     |
+//|  same pass rather than waiting a tick for its first stop check.   |
+//|                                                                  |
+//|  The test is "touched or crossed", never equality. A level the     |
+//|  market gaps over must still fire, and an exact-tick comparison    |
+//|  would silently never trigger -- which is the worst possible      |
+//|  failure for a feature whose entire job is to wait.               |
+//+------------------------------------------------------------------+
+void CCharonEngine::EvaluateWatches(void)
+  {
+   if(m_watchCount <= 0)
+      return;
+
+   //--- iterate backwards: firing removes rows
+   for(int i = m_watchCount - 1; i >= 0; i--)
+     {
+      const bool   isLong = (m_watch[i].cmd.side == "BUY");
+      //--- a BUY is filled at the ask and a SELL at the bid, so the price that
+      //--- must reach the level is the one the fill would use, not the other
+      //--- side of the spread.
+      double quoted = (isLong ? m_risk.Ask() : m_risk.Bid());
+      if(!MathIsValidNumber(quoted) || quoted <= 0.0)
+         continue;
+
+      const double target = m_watch[i].price;
+      //--- "touched or crossed", never equality -- the same rule the trail
+      //--- uses, via the same helper, so the two can never drift.
+      if(!ChPriceAtOrBeyond(quoted, target, isLong))
+         continue;
+
+      //--- take a copy and remove the row BEFORE submitting: leaving it armed
+      //--- would re-fire on the very next tick whatever the outcome.
+      SCharonWatch firing = m_watch[i];
+      for(int k = i; k < m_watchCount - 1; k++)
+         m_watch[k] = m_watch[k + 1];
+      m_watchCount--;
+      SaveWatches();
+
+      //--- identical path an immediate order takes. The ticket is already
+      //--- validated; verb order_open is exactly what the parser would have
+      //--- set had the command arrived as an order instead of a watch.
+      SCharonBridgeCommand fire = firing.cmd;
+      fire.verb  = CHARON_BRIDGE_V_ORDER_OPEN;
+      fire.valid = true;
+
+      PrintFormat("%s watch #%I64d fired: %s reached %.5f (quoted %.5f)",
+                  CHARON_NAME, firing.id, fire.side, target, quoted);
+
+      //--- ApplyOrderCommand writes its own verdict, including on refusal, so
+      //--- nothing is added here: a rejected fire reports the real reason.
+      ApplyOrderCommand(fire);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Project the armed queue for the snapshot                         |
+//+------------------------------------------------------------------+
+int CCharonEngine::CollectWatches(SCharonBridgeWatch &out[], const int maxRows)
+  {
+   int n = 0;
+   if(maxRows <= 0)
+      return 0;
+
+   for(int i = 0; i < m_watchCount && n < maxRows; i++)
+     {
+      out[n].id        = m_watch[i].id;
+      out[n].side      = m_watch[i].cmd.side;
+      out[n].price     = m_watch[i].price;
+      out[n].orderType = m_watch[i].cmd.orderType;
+      out[n].createdAt = m_watch[i].createdAt;
+      out[n].status    = "armed";
+      n++;
+     }
+   return n;
   }
 
 //+------------------------------------------------------------------+
@@ -380,18 +699,20 @@ void CCharonEngine::AdoptTicket(const ulong ticket)
    //--- this is matched by the fact that only one Charon pending order may be
    //--- working at a time (HasOwnPending refuses a second).
    if(m_pendingTrailTicket > 0 &&
-      (m_pendingTrailRR > 0.0 || m_pendingTrailPoints > 0.0))
+      (m_pendingTrailRR > 0.0 || m_pendingTrailPoints > 0.0 || m_pendingTrailPrice > 0.0))
      {
       SCharonPosState pending;
       if(m_state.Get(idx, pending))
         {
          pending.trailStartRR     = m_pendingTrailRR;
          pending.trailStartPoints = m_pendingTrailPoints;
+         pending.trailStartPrice  = m_pendingTrailPrice;
          if(m_state.Set(idx, pending))
             m_state.Save(idx, true);
          m_pendingTrailTicket = 0;
          m_pendingTrailRR     = 0.0;
          m_pendingTrailPoints = 0.0;
+         m_pendingTrailPrice  = 0.0;
         }
      }
 
@@ -413,6 +734,8 @@ void CCharonEngine::AdoptTicket(const ulong ticket)
          row.trailStartRR = restored.trailStartRR;
       if(restored.trailStartPoints > 0.0)
          row.trailStartPoints = restored.trailStartPoints;
+      if(restored.trailStartPrice > 0.0)
+         row.trailStartPrice = restored.trailStartPrice;
          m_state.Set(idx, row);
         }
      }
@@ -627,7 +950,8 @@ void CCharonEngine::ManageLadders(const int index)
    double trailStop = 0.0;
    string trailLabel = "";
    if(!m_trail.NextStop(row.entry, row.riskPrice, row.hwm, isLong, row.currentSL,
-                        trailStop, trailLabel, row.trailStartRR, row.trailStartPoints))
+                        trailStop, trailLabel, row.trailStartRR, row.trailStartPoints,
+                        row.trailStartPrice))
       return;
 
    string terr = "";
@@ -1086,6 +1410,12 @@ void CCharonEngine::OnTickWork(void)
    //--- 1) adopt anything new the human just opened
    ScanAndAdopt();
 
+   //--- 1b) fire any armed entry whose level this tick reached. Before
+   //--- ManageRow on purpose: a fired watch opens a position, and that
+   //--- position gets its first stop check in the same pass rather than on
+   //--- the next one.
+   EvaluateWatches();
+
    //--- 2) manage every tracked position (backwards: rows get removed)
    for(int i = m_state.Count() - 1; i >= 0; i--)
       ManageRow(i);
@@ -1116,6 +1446,9 @@ void CCharonEngine::OnTimerWork(void)
 
    m_busy = true;
    ScanAndAdopt();
+   //--- the timer is the only pass that runs without ticks, so a watch whose
+   //--- level was reached during a quiet spell still fires here.
+   EvaluateWatches();
    for(int i = m_state.Count() - 1; i >= 0; i--)
       ManageRow(i);
    m_state.Compact();
@@ -1248,6 +1581,16 @@ bool CCharonEngine::ApplyBridgeCommand(const SCharonBridgeCommand &cmd)
    if(cmd.verb == CHARON_BRIDGE_V_PING)
       return true;                    // liveness probe, no state change
 
+   //--- v1.5.0 watch queue. `watch_add` carries a full validated ticket, so it
+   //--- is parked rather than submitted; `watch_cancel` names a watch id.
+   if(cmd.verb == CHARON_BRIDGE_V_WATCH_ADD)
+     {
+      WatchAdd(cmd);
+      return true;
+     }
+   if(cmd.verb == CHARON_BRIDGE_V_WATCH_CANCEL)
+      return WatchCancel(cmd.watchId);
+
    //--- attended execution. The ticket carries intent only: the side, the
    //--- block the stop is derived from, and the risk the operator is willing
    //--- to carry. Everything else -- whether it is allowed, how large it is,
@@ -1271,7 +1614,8 @@ void CCharonEngine::ApplyTicketTrail(const SCharonBridgeCommand &cmd,
   {
    if(positionTicket == 0)
       return;
-   if(cmd.trailStartRR <= 0.0 && cmd.trailStartPoints <= 0.0)
+   if(cmd.trailStartRR <= 0.0 && cmd.trailStartPoints <= 0.0 &&
+      cmd.trailStartPrice <= 0.0)
       return;
 
    int idx = m_state.Find(positionTicket);
@@ -1286,6 +1630,24 @@ void CCharonEngine::ApplyTicketTrail(const SCharonBridgeCommand &cmd,
       row.trailStartRR = cmd.trailStartRR;
    if(cmd.trailStartPoints > 0.0)
       row.trailStartPoints = cmd.trailStartPoints;
+   //--- v1.5.0: an absolute activation price. Validated against the fill
+   //--- price here rather than in the parser, because the parser has no fill
+   //--- to check against -- and a threshold on the wrong side of the entry
+   //--- would arm the trail immediately in the wrong direction.
+   if(cmd.trailStartPrice > 0.0)
+     {
+      bool isLongPos = ChIsLong(PositionGetInteger(POSITION_TYPE));
+      double fill    = PositionGetDouble(POSITION_PRICE_OPEN);
+      if(fill > 0.0 &&
+         ((isLongPos && cmd.trailStartPrice <= fill) ||
+          (!isLongPos && cmd.trailStartPrice >= fill)))
+        {
+         PrintFormat("%s #%I64u trail_start_price %.5f is not beyond the %.5f fill; ignored",
+                     CHARON_NAME, positionTicket, cmd.trailStartPrice, fill);
+        }
+      else
+         row.trailStartPrice = cmd.trailStartPrice;
+     }
 
    if(m_state.Set(idx, row))
       m_state.Save(idx, true);
@@ -1708,11 +2070,13 @@ bool CCharonEngine::ApplyOrderCommand(const SCharonBridgeCommand &cmd)
       //--- threshold is remembered against the ORDER ticket and applied when
       //--- the fill is adopted. Chart-wide behaviour is untouched when the
       //--- ticket carried neither value.
-      if(cmd.trailStartRR > 0.0 || cmd.trailStartPoints > 0.0)
+      if(cmd.trailStartRR > 0.0 || cmd.trailStartPoints > 0.0 ||
+         cmd.trailStartPrice > 0.0)
         {
          m_pendingTrailTicket = ticket;
          m_pendingTrailRR     = cmd.trailStartRR;
          m_pendingTrailPoints = cmd.trailStartPoints;
+         m_pendingTrailPrice  = cmd.trailStartPrice;
         }
 
       SetOrderVerdict("pending",
@@ -1961,7 +2325,16 @@ void CCharonEngine::PublishBridge(void)
    ArrayResize(pendings, CHARON_BRIDGE_MAX_LEGS);
    int np = CollectPending(pendings, CHARON_BRIDGE_MAX_LEGS);
 
-   m_bridge.Publish(snap, legs, n, pendings, np);
+   //--- armed watches, which are neither positions nor broker orders
+   SCharonBridgeWatch watches[];
+   ArrayResize(watches, CHARON_BRIDGE_MAX_WATCHES);
+   int nw = CollectWatches(watches, CHARON_BRIDGE_MAX_WATCHES);
+
+   //--- last tick, so a watch can be shown with its distance to target
+   snap.bid = m_risk.Bid();
+   snap.ask = m_risk.Ask();
+
+   m_bridge.Publish(snap, legs, n, pendings, np, watches, nw);
   }
 
 //+------------------------------------------------------------------+

@@ -7,7 +7,7 @@
 //|  the high-water mark and the latches for every live position.     |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.04"
+#property version   "1.05"
 
 #ifndef __CHARON_STATE__
 #define __CHARON_STATE__
@@ -234,6 +234,9 @@ void CCharonState::Save(const int index, const bool force)
    //--- "use the chart input", exactly the old behaviour.
    GlobalVariableSet(Key(tk, "trR"),      m_rows[index].trailStartRR);
    GlobalVariableSet(Key(tk, "trP"),      m_rows[index].trailStartPoints);
+   //--- v1.5.0 activation expressed as an absolute price. 0 means the row
+   //--- still derives its threshold from the chart input.
+   GlobalVariableSet(Key(tk, "trX"),      m_rows[index].trailStartPrice);
   }
 
 //+------------------------------------------------------------------+
@@ -275,6 +278,7 @@ bool CCharonState::Load(const ulong ticket, const int tierDefault, SCharonPosSta
    //--- to the chart-wide thresholds instead of disabling the trail.
    out.trailStartRR     = GlobalVariableGet(Key(ticket, "trR"));
    out.trailStartPoints = GlobalVariableGet(Key(ticket, "trP"));
+   out.trailStartPrice  = GlobalVariableGet(Key(ticket, "trX"));
 
    if(out.tier <= 0)
       out.tier = ChClampI(tierDefault, 1, CHARON_MAX_TIERS);
@@ -288,7 +292,7 @@ void CCharonState::Erase(const ulong ticket)
   {
    if(ticket == 0)
       return;
-   string fields[] = {"sl","risk","hwm","tier","time","trail","half","be","tp","cur","applies","trR","trP"};
+   string fields[] = {"sl","risk","hwm","tier","time","trail","half","be","tp","cur","applies","trR","trP","trX"};
    for(int i = 0; i < ArraySize(fields); i++)
      {
       string k = Key(ticket, fields[i]);

@@ -306,6 +306,24 @@ def status(symbol: str | None = Query(default=None)) -> dict[str, Any]:
                 }
                 for order in snap.pending
             ],
+            # --- entries the EA is holding until the market reaches a price.
+            # --- Separate from ``pending`` on purpose: these have no broker
+            # --- ticket and are cancelled by watch id, not ticket number.
+            "watch": [
+                {
+                    "watch_id": item.watch_id,
+                    "side": item.side,
+                    "price": item.price,
+                    "order_type": item.order_type,
+                    "created_at": item.created_at,
+                    "status": item.status,
+                }
+                for item in snap.watch
+            ],
+            # --- the EA's last tick. Null on a schema-2/3 EA, which never
+            # --- published it; the dashboard then simply omits distance.
+            "bid": snap.bid,
+            "ask": snap.ask,
             "legs": [
                 {
                     "ticket": leg.ticket,
@@ -494,48 +512,64 @@ def _require_live_chart(symbol: str) -> Any:
     return snapshot
 
 
-# --- v1.4.0 fields an older EA would accept and then ignore. Listing them
-# --- explicitly (rather than testing "is this a v1.4 ticket") keeps the
-# --- refusal tied to the field that is actually unhonourable, so the message
-# --- can name it.
-_SEMANTIC_FIELDS: tuple[tuple[str, str], ...] = (
-    ("risk_money", "a money-denominated risk"),
-    ("basket_risk_ceiling_pct", "a basket-wide risk ceiling"),
-    ("trail_start_rr", "a per-ticket trail activation"),
-    ("trail_start_points", "a per-ticket trail activation"),
-    ("stages", "pyramid stages"),
-    ("journal", "a journal note"),
+# --- fields an older EA would accept and then ignore, each with the schema
+# --- revision that first honours it. Listing them explicitly (rather than
+# --- testing "is this a v1.5 ticket") keeps the refusal tied to the field that
+# --- is actually unhonourable, so the message can name it -- and, just as
+# --- importantly, keeps a schema-3 EA usable for everything schema 3 does
+# --- understand. A single "needs SCHEMA_VERSION" test would refuse a v1.4.0
+# --- operator their own journal note the moment the bridge moved to schema 4.
+_SEMANTIC_FIELDS: tuple[tuple[str, int, str], ...] = (
+    ("risk_money", 3, "a money-denominated risk"),
+    ("basket_risk_ceiling_pct", 3, "a basket-wide risk ceiling"),
+    ("trail_start_rr", 3, "a per-ticket trail activation"),
+    ("trail_start_points", 3, "a per-ticket trail activation"),
+    ("stages", 3, "pyramid stages"),
+    ("journal", 3, "a journal note"),
+    ("trail_start_price", 4, "an absolute-price trail activation"),
+    # --- a watch is gated on the *verb*, not on a field: a schema-3 EA does
+    # --- not know ``watch_add`` exists, so it would reject the file outright.
+    # --- ``is_watch`` is a property, and the loop below only asks whether it
+    # --- is truthy, which is exactly the question here.
+    ("is_watch", 4, "a watched entry"),
 )
 
 
 def _require_semantic_capable(symbol: str, intent: Any, where: str) -> None:
-    """Refuse a v1.4.0 ticket aimed at an EA that cannot honour it.
+    """Refuse a ticket aimed at an EA that cannot honour it.
 
     ``CCharonBridge::ReadCommandFile`` ignores keys it does not know, and the
-    EA refuses a schema mismatch by design. So a schema-3 ticket against a
+    EA refuses a schema mismatch by design. So a schema-4 ticket against a
     schema-2 EA is already safe from *trading wrongly* -- it is refused on
     the chart. But that refusal is only visible in the Experts log, while the
     dashboard has just said "queued". This turns it into a synchronous,
     readable answer naming both the field and the fix.
 
-    A ticket that carries none of the v1.4.0 semantics is deliberately
+    The check is **per field**, not per version: each entry carries the
+    revision that first honours it, and only fields above the EA's own
+    revision are refused. That is what lets a schema-3 chart keep placing
+    v1.4.0 tickets after the bridge has learned schema 4.
+
+    A ticket that carries none of the newer semantics is deliberately
     allowed through: an operator with no upgraded charts can still place a
     plain block-and-risk ticket, and the EA will accept it exactly as before.
     """
     snapshot = _require_live_chart(symbol)
-    if snapshot.schema >= SCHEMA_VERSION:
-        return
 
-    offending = [label for field, label in _SEMANTIC_FIELDS if getattr(intent, field, None)]
+    offending = sorted({
+        label
+        for field, needs, label in _SEMANTIC_FIELDS
+        if getattr(intent, field, None) and snapshot.schema < needs
+    })
     if not offending:
         return
 
     raise HTTPException(
         status_code=422,
         detail=(
-            f"{where} needs a v{SCHEMA_VERSION} EA, but the chart publishing "
+            f"{where} needs a newer EA, but the chart publishing "
             f"{symbol!r} speaks schema {snapshot.schema}. It would read this "
-            f"ticket, ignore {', '.join(sorted(set(offending)))}, and trade "
+            f"ticket, ignore {', '.join(offending)}, and trade "
             "anyway. Either drop that part of the ticket, or install the "
             f"v{SCHEMA_VERSION} EA (version {snapshot.ea_version or 'unknown'} "
             "is running) and recompile that chart."
@@ -633,6 +667,13 @@ class OrderTicket(BaseModel):
     trail_start_points: float | None = Field(
         default=None, description="Per-ticket trail activation in points"
     )
+    trail_start_price: float | None = Field(
+        default=None,
+        description=(
+            "Per-ticket trail activation as an absolute price the market must "
+            "reach. Exclusive with trail_start_rr / trail_start_points."
+        ),
+    )
     rung: int = Field(default=0, ge=0, le=3, description="RR rung to report against")
     stages: list[Stage] | None = Field(
         default=None,
@@ -664,6 +705,7 @@ def _intent_from(ticket: "OrderTicket") -> Any:
         trail_trigger=ticket.trail_trigger,
         trail_start_rr=ticket.trail_start_rr,
         trail_start_points=ticket.trail_start_points,
+        trail_start_price=ticket.trail_start_price,
         rung=ticket.rung,
         stages=[stage.to_doc() for stage in ticket.stages] if ticket.stages else None,
         journal=ticket.journal,
@@ -682,6 +724,12 @@ def place_order(ticket: "OrderTicket") -> dict[str, Any]:
     ticket was queued; the verdict arrives in the next snapshot's ``order``
     block, which is where the dashboard reads its numbers from.
 
+    A ``MARKET`` ticket that names an ``entry`` is **not** filled at market:
+    it is queued as a watch, and the EA submits it itself once its own tick
+    reaches that price. Before v1.5.0 that combination silently filled at
+    market, which made "wait for 1.1050" indistinguishable from "buy now" --
+    the operator's price was read, stored in the ticket, and ignored.
+
     Refusals here are all *shape* refusals (bad side, inverted block, a
     LIMIT entry outside its block, a risk figure that is not a positive
     number) plus one liveness check: a symbol with no live snapshot has no
@@ -697,27 +745,47 @@ def place_order(ticket: "OrderTicket") -> dict[str, Any]:
         # --- that is more useful than "no chart". Both refuse before
         # --- anything is written.
         _require_semantic_capable(resolved, intent, "this ticket")
-        sent = commands.submit("order_open", resolved, order=intent)
+        verb = "watch_add" if intent.is_watch else "order_open"
+        sent = commands.submit(verb, resolved, order=intent)
     except (SchemaError, commands.CommandError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    LOG.command(
-        f"order_open queued for {resolved}: {intent.side} {intent.order_type} "
-        f"risk={intent.risk_pct if intent.risk_pct is not None else str(intent.risk_money) + ' ccy'}"
-        f" block={intent.block_bottom}-{intent.block_top} ({sent['file']})"
-    )
+    if intent.is_watch:
+        LOG.command(
+            f"watch_add queued for {resolved}: {intent.side} MARKET once "
+            f"{intent.entry} is touched, risk="
+            f"{intent.risk_pct if intent.risk_pct is not None else str(intent.risk_money) + ' ccy'}"
+            f" block={intent.block_bottom}-{intent.block_top} ({sent['file']})"
+        )
+    else:
+        LOG.command(
+            f"order_open queued for {resolved}: {intent.side} {intent.order_type} "
+            f"risk={intent.risk_pct if intent.risk_pct is not None else str(intent.risk_money) + ' ccy'}"
+            f" block={intent.block_bottom}-{intent.block_top} ({sent['file']})"
+        )
     # --- the note is filed against the ticket the EA will report. Until the
     # --- verdict arrives there is no position ticket, so it is keyed by 0 and
     # --- re-keyed by ``_sync_journal`` as soon as the snapshot carries one.
     # --- Written *after* the command, so a failed submit leaves no orphan note.
     if intent.journal:
         journal.note(resolved, 0, intent.journal, tag=journal_tag(intent.journal))
-    return {
+    response: dict[str, Any] = {
         "queued": True,
-        "verb": "order_open",
+        "verb": verb,
         "command": sent,
-        "note": "Queued for the EA. The EA decides sizing and the stop.",
+        "note": (
+            f"Watching {intent.entry}. The EA submits this ticket itself once "
+            "the price is touched, then decides sizing and the stop."
+            if intent.is_watch else
+            "Queued for the EA. The EA decides sizing and the stop."
+        ),
     }
+    if intent.is_watch:
+        # --- the UI shows the target rather than making the operator re-read
+        # --- the ticket they just sent. ``watching`` is the flag it keys on.
+        response["watching"] = True
+        response["entry"] = intent.entry
+    return response
 
 
 @app.post("/api/order/modify", dependencies=[Depends(require_token)])
@@ -751,6 +819,26 @@ def cancel_order(position: int = Query(gt=0),
 
     LOG.command(f"order_cancel queued for {resolved} ticket={position} ({sent['file']})")
     return {"queued": True, "verb": "order_cancel", "command": sent}
+
+
+@app.post("/api/orders/watch/cancel", dependencies=[Depends(require_token)])
+def cancel_watch(watch_id: int = Query(gt=0),
+                 symbol: str | None = Query(default=None)) -> dict[str, Any]:
+    """Ask the EA to drop an armed watch before it fires.
+
+    Deliberately *not* ``/api/order/cancel``: a watch has no broker ticket, so
+    routing it through the order path would send a ticket number the EA would
+    look for among its pending orders and not find. The two queues are
+    cancelled by different names because they are different objects.
+    """
+    resolved = _symbol_or_404(symbol)
+    try:
+        sent = commands.submit("watch_cancel", resolved, watch_id=watch_id)
+    except (SchemaError, commands.CommandError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    LOG.command(f"watch_cancel queued for {resolved} watch={watch_id} ({sent['file']})")
+    return {"queued": True, "verb": "watch_cancel", "command": sent}
 
 
 @app.post("/api/trade")

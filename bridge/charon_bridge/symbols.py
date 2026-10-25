@@ -89,6 +89,7 @@ ASSET_FOREX = "forex"
 ASSET_METALS = "metals"
 ASSET_INDEX = "indices"
 ASSET_ENERGY = "energy"
+ASSET_COMMODITIES = "commodities"
 ASSET_CRYPTO = "crypto"
 ASSET_STOCK = "stocks"
 ASSET_OTHER = "other"
@@ -98,6 +99,7 @@ ASSET_CLASSES: tuple[str, ...] = (
     ASSET_METALS,
     ASSET_INDEX,
     ASSET_ENERGY,
+    ASSET_COMMODITIES,
     ASSET_CRYPTO,
     ASSET_STOCK,
     ASSET_OTHER,
@@ -116,6 +118,18 @@ _INDEX_TOKENS = frozenset({
 })
 _ENERGY_TOKENS = frozenset({
     "WTI", "BRENT", "USOIL", "UKOIL", "NGAS", "NATGAS", "GAS", "OIL",
+    # --- brokers that name crude by its ticker rather than the word "oil"
+    "XTI", "XBR", "CO1",
+})
+# --- tokens that are only ever the whole instrument name. ``CL`` is crude's
+# --- ticker, but as a *prefix* it would read every ``CLP...`` symbol as energy,
+# --- so it is matched exactly and never prefixed.
+_ENERGY_EXACT = frozenset({"CL"})
+# --- softs and grains. Exact whole-token matches for the same reason: a prefix
+# --- test would claim unrelated names that merely start with the same letters.
+_COMMODITY_TOKENS = frozenset({
+    "WHEAT", "CORN", "SOYBEAN", "SOY", "COFFEE", "COCOA", "SUGAR", "COTTON",
+    "ORANGE", "RICE", "OATS", "LUMBER", "CATTLE", "HOG",
 })
 _CRYPTO_TOKENS = frozenset({
     "BTC", "ETH", "XRP", "LTC", "BCH", "ADA", "SOL", "DOGE", "DOT", "AVAX",
@@ -139,10 +153,10 @@ def asset_class(name: str) -> str:
     A broker suffix (``.a``, ``m``, ``#``) is already stripped by
     :func:`canonical`, so ``XAUUSD.a`` classifies like ``XAUUSD``.
 
-    Detection order matters. Metals, indices, energy and crypto are matched by
-    token because those names are distinctive; forex is matched structurally
-    (two known currencies in a row) and only afterwards, so ``USDJPY`` is forex
-    while ``USOIL`` is not.
+    Detection order matters. Metals, indices, energy, crypto and commodities
+    are matched by token because those names are distinctive; forex is matched
+    structurally (two known currencies in a row) and only afterwards, so
+    ``USDJPY`` is forex while ``USOIL`` is not.
     """
     text = canonical(name)
     if not text:
@@ -166,8 +180,9 @@ def _classify_token(token: str) -> str:
 
     Prefix matching is used where the instrument's name *starts* with the
     marker (``BTCUSD``, ``XAUUSD``, ``WTIUSD``); exact matching is used for
-    index names, where a prefix test would collide with unrelated symbols.
-    Structural forex comes last so ``USOIL`` is never read as a currency pair.
+    index and commodity names, where a prefix test would collide with
+    unrelated symbols. Structural forex comes last so ``USOIL`` is never read
+    as a currency pair.
     """
     if not token:
         return ASSET_OTHER
@@ -177,11 +192,18 @@ def _classify_token(token: str) -> str:
     for prefix in _ENERGY_TOKENS:
         if token.startswith(prefix):
             return ASSET_ENERGY
+    if token in _ENERGY_EXACT:
+        return ASSET_ENERGY
     for prefix in _CRYPTO_TOKENS:
         if token.startswith(prefix):
             return ASSET_CRYPTO
     if token in _INDEX_TOKENS:
         return ASSET_INDEX
+    # --- softs and grains, before the structural pair test. ``CORN`` is not a
+    # --- pair, but ordering it here keeps every commodity in one place rather
+    # --- than scattered either side of the forex rule.
+    if token in _COMMODITY_TOKENS:
+        return ASSET_COMMODITIES
     if len(token) == 6 and token.isalpha():
         if token[:3] in _CURRENCIES and token[3:] in _CURRENCIES:
             return ASSET_FOREX
@@ -310,6 +332,7 @@ def resolve(hint: str, known: Sequence[str]) -> str | None:
 
 __all__ = [
     "ASSET_CLASSES",
+    "ASSET_COMMODITIES",
     "ASSET_CRYPTO",
     "ASSET_ENERGY",
     "ASSET_FOREX",

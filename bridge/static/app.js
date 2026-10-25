@@ -287,6 +287,11 @@ function render(payload) {
   // --- is visible even when pyramiding is disabled.
   renderPending(snap.pending, digits, snap.currency);
 
+  // --- armed entries. Separate from pending because they are separate
+  // --- objects: no broker ticket, cancelled by watch id. The EA's last quote
+  // --- is passed so each row can show its remaining distance.
+  renderWatches(snap.watch, digits, snap.bid, snap.ask);
+
   // --- pyramid
   const pyr = snap.pyramid;
   const armState = $("armState");
@@ -554,6 +559,110 @@ function renderPending(orders, digits, currency) {
     ? rows.length + " working \u00b7 " + volume.toFixed(2) + " lots committed"
     : "nothing working";
 }
+//+------------------------------------------------------------------+
+//| Armed watches                                                    |
+//|                                                                  |
+//| A watch has no broker ticket, so it is not a pending order and is |
+//| cancelled by a different endpoint. Shown separately so the        |
+//| operator never has to guess which number to paste where.          |
+//+------------------------------------------------------------------+
+function watchRow(item) {
+  const tr = document.createElement("tr");
+  tr.className = "border-b border-ink-800 transition-colors hover:bg-ink-800/40";
+  tr.dataset.watch = String(item.watch_id);
+  for (let index = 0; index < 6; index += 1) {
+    const td = document.createElement("td");
+    td.className = index === 0 ? "py-2 pl-4 pr-3" : "py-2 pr-3";
+    td.dataset.cell = String(index);
+    tr.append(td);
+  }
+  return tr;
+}
+
+// --- how far the market still has to travel to reach the target. Returns
+// --- null when the EA published no quote (a schema-2/3 EA), because inventing
+// --- a distance would be worse than showing a dash.
+function watchDistance(item, bid, ask) {
+  const target = typeof item.price === "number" ? item.price : null;
+  if (target === null) return null;
+  const quoted = item.side === "BUY" ? ask : bid;
+  if (typeof quoted !== "number" || !isFinite(quoted)) return null;
+  return Math.abs(target - quoted);
+}
+
+function fillWatchRow(tr, item, digits, bid, ask) {
+  const cells = [
+    { text: "#" + item.watch_id, cls: "text-shade-300" },
+    {
+      text: item.side || "\u2014",
+      cls: item.side === "BUY" ? "font-semibold text-live" : "font-semibold text-offline",
+    },
+    { text: price(item.price, digits), cls: "" },
+  ];
+
+  const gap = watchDistance(item, bid, ask);
+  cells.push({
+    text: gap === null ? "\u2014" : price(gap, digits),
+    // --- a target the market has already reached is about to fire; colouring
+    // --- it warns the operator before the fill rather than after it
+    cls: gap === null ? "text-shade-400" : (gap === 0 ? "text-live" : ""),
+  });
+  cells.push({ text: item.status || "armed", cls: "text-stale" });
+
+  const tdNodes = tr.querySelectorAll("td[data-cell]");
+  for (let index = 0; index < cells.length; index += 1) {
+    const td = tdNodes[index];
+    if (!td) continue;
+    td.className =
+      (index === 0 ? "py-2 pl-4 pr-3 " : "py-2 pr-3 ") + cells[index].cls;
+    td.textContent = cells[index].text;
+  }
+
+  const tdActions = tdNodes[5];
+  if (tdActions) {
+    tdActions.className = "py-2 pr-4";
+    while (tdActions.firstChild) tdActions.removeChild(tdActions.firstChild);
+    const actions = document.createElement("div");
+    actions.className = "flex gap-1";
+    actions.append(rowButton("watch-cancel", "Cancel", "btn-danger", item.watch_id));
+    tdActions.append(actions);
+  }
+}
+
+function renderWatches(items, digits, bid, ask) {
+  const rows = Array.isArray(items) ? items : [];
+  const tbody = $("watchRows");
+  if (!tbody) return;
+
+  const existing = new Map();
+  for (const tr of tbody.children) {
+    existing.set(tr.dataset.watch, tr);
+  }
+
+  for (const item of rows) {
+    const key = String(item.watch_id);
+    let tr = existing.get(key);
+    if (tr) {
+      existing.delete(key);
+    } else {
+      tr = watchRow(item);
+    }
+    fillWatchRow(tr, item, digits, bid, ask);
+    tbody.append(tr);
+  }
+  for (const tr of existing.values()) {
+    tr.remove();
+  }
+
+  $("watchBadge").textContent = String(rows.length);
+  $("noWatch").classList.toggle("hidden", rows.length > 0);
+  $("watchTableWrap").classList.toggle("hidden", rows.length === 0);
+  $("watchSummary").textContent = rows.length
+    ? rows.length + (rows.length === 1 ? " entry waiting" : " entries waiting")
+    : "nothing armed";
+}
+
+
 
 
 
@@ -678,6 +787,21 @@ function renderOrder(order, digits, currency) {
     return;
   }
 
+  // --- a watch is neither a fill nor a working order: nothing was submitted,
+  // --- and it may fire many minutes from now. Amber is the palette's "waiting,
+  // --- but not broken" colour; green here would claim a position exists.
+  if (status === "watching") {
+    verdict.className = "mt-2 text-[11px] text-stale";
+    const watching = [];
+    if (order.side) watching.push(order.side);
+    if (typeof order.entry === "number" && order.entry > 0) {
+      watching.push("target " + price(order.entry, digits));
+    }
+    watching.push(order.reason || "armed, waiting for the price");
+    verdict.textContent = watching.join(" \u00b7 ");
+    return;
+  }
+
   verdict.className =
     status === "pending" ? "mt-2 text-[11px] text-stale" : "mt-2 text-[11px] text-live";
   const parts = [];
@@ -722,8 +846,14 @@ function readTicket() {
 
   // --- optional, and only sent when actually filled in: an empty box means
   // --- "use the chart setting", which is what the EA does with an absent key.
+  // --- An absolute activation price and an RR/points threshold are mutually
+  // --- exclusive -- the server refuses both -- so stating a price here clears
+  // --- the RR box rather than letting the operator send a contradiction.
   const trailStart = optionalNumber("orderTrailStart");
-  if (trailStart !== null) {
+  const trailPrice = optionalNumber("orderTrailPrice");
+  if (trailPrice !== null) {
+    ticket.trail_start_price = trailPrice;
+  } else if (trailStart !== null) {
     ticket.trail_start_rr = trailStart;
   }
   const ceiling = optionalNumber("orderBasketCeiling");
@@ -891,6 +1021,18 @@ function wireRowActions() {
     const action = button.dataset.rowAction;
     if (!ticket || !action) return;
 
+    if (action === "watch-cancel") {
+      // --- a watch is cancelled by the id the EA minted, not by a broker
+      // --- ticket: nothing was ever submitted, so /api/order/cancel would
+      // --- look for a ticket that does not exist.
+      const ok = window.confirm(
+        "Cancel watch #" + ticket + "? Nothing has been submitted to the broker."
+      );
+      if (!ok) return;
+      await cancelWatch(ticket, $("orderMsg"));
+      return;
+    }
+
     if (action === "cancel") {
       // --- a close is irreversible and closes real money, so it asks first.
       const ok = window.confirm(
@@ -919,10 +1061,16 @@ function wireRowActions() {
 function wireOrderPanel() {
   $("orderType").addEventListener("change", (event) => {
     const isLimit = event.target.value === "LIMIT";
-    $("orderEntry").disabled = !isLimit;
-    $("orderEntry").placeholder = isLimit ? "price inside the block" : "market";
+    // --- MARKET with an entry price is a *watch*, not an immediate fill: the
+    // --- EA holds the ticket until its own tick reaches that price. So the box
+    // --- stays enabled for both types; only its wording changes.
+    $("orderEntry").disabled = false;
+    $("orderEntry").placeholder = isLimit
+      ? "price inside the block"
+      : "optional: wait for this price";
   });
-  $("orderEntry").disabled = true;
+  $("orderEntry").disabled = false;
+  $("orderEntry").placeholder = "optional: wait for this price";
 
   // --- the risk unit changes the label, not the field: the operator keeps one
   // --- box and the ticket carries exactly one figure.
@@ -1036,6 +1184,47 @@ async function cancelTicket(ticketNumber, message) {
   }
 }
 
+// --- cancel one armed watch. Its own request because the object is its own
+// --- kind: a watch has no broker ticket, so sending it to /api/order/cancel
+// --- would name something the EA cannot find.
+async function cancelWatch(watchId, message) {
+  const symbol = activeSymbol;
+  const path =
+    "/api/orders/watch/cancel?watch_id=" +
+    encodeURIComponent(watchId) +
+    (symbol ? "&symbol=" + encodeURIComponent(symbol) : "");
+  if (message) {
+    message.className = "mt-2 text-[11px] text-shade-400";
+    message.textContent = "sending\u2026";
+  }
+  try {
+    const response = await fetch(path, { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (message) {
+        message.className = "mt-2 text-[11px] text-offline";
+        message.textContent =
+          typeof body.detail === "string" ? body.detail : "HTTP " + response.status;
+      }
+      return false;
+    }
+    if (message) {
+      message.className = "mt-2 text-[11px] text-accent";
+      message.textContent =
+        "Watch #" + watchId + " cancel queued \u2014 the EA drops it on its next tick.";
+    }
+    appendLocalLog("command", "order: watch #" + watchId + " cancel queued");
+    refresh();
+    return true;
+  } catch (error) {
+    if (message) {
+      message.className = "mt-2 text-[11px] text-offline";
+      message.textContent = "failed: " + error.message;
+    }
+    return false;
+  }
+}
+
 
 
 
@@ -1120,6 +1309,7 @@ const ASSET_LABELS = {
   metals: "Metals",
   indices: "Indices",
   energy: "Energy",
+  commodities: "Commodities",
   crypto: "Crypto",
   stocks: "Stocks",
   other: "Other",

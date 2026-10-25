@@ -14,7 +14,7 @@
 //|  the basket is never unprotected, not even for one tick.          |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.04"
+#property version   "1.05"
 
 #ifndef __CHARON_PYRAMID__
 #define __CHARON_PYRAMID__

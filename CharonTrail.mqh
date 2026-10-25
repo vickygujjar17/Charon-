@@ -6,7 +6,7 @@
 //|  already on the position.                                        |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.04"
+#property version   "1.05"
 
 #ifndef __CHARON_TRAIL__
 #define __CHARON_TRAIL__
@@ -34,13 +34,17 @@ public:
    void              SetMode(const ENUM_CHARON_TRAIL_MODE mode);
    ENUM_CHARON_TRAIL_MODE Mode(void) const { return m_mode; }
 
-   //--- true once the activation threshold has been reached. startRR and
-   //--- startPoints are the per-ticket thresholds: 0 means "use the chart
-   //--- input", which is why an untouched ticket behaves exactly as before.
+   //--- true once the activation threshold has been reached. startRR,
+   //--- startPoints and startPrice are the per-ticket thresholds: 0 means "use
+   //--- the chart input", which is why an untouched ticket behaves exactly as
+   //--- before. startPrice is an absolute level the market must reach; when it
+   //--- is stated it wins, because a price the operator read off the chart is
+   //--- not something the EA should second-guess.
    bool              IsActivated(const double entry, const double riskPrice,
                                  const double hwm, const bool isLong,
                                  const double startRR = 0.0,
-                                 const double startPoints = 0.0) const;
+                                 const double startPoints = 0.0,
+                                 const double startPrice = 0.0) const;
 
    //--- trailing distance in price for the configured mode
    double            Distance(void);
@@ -55,7 +59,8 @@ public:
                               const double hwm, const bool isLong,
                               const double currentStop, double &stopOut, string &label,
                               const double startRR = 0.0,
-                              const double startPoints = 0.0);
+                              const double startPoints = 0.0,
+                              const double startPrice = 0.0);
   };
 
 //+------------------------------------------------------------------+
@@ -83,17 +88,25 @@ void CCharonTrail::SetMode(const ENUM_CHARON_TRAIL_MODE mode)
 
 //+------------------------------------------------------------------+
 //| Activation gate                                                  |
-//|  * R activation (InpTrailStartRR) is primary                     |
+//|  * an absolute price, when stated, is the only test that counts  |
+//|  * otherwise R activation (InpTrailStartRR) is primary           |
 //|  * a points activation may also arm it (either may trigger)      |
 //+------------------------------------------------------------------+
 bool CCharonTrail::IsActivated(const double entry, const double riskPrice,
                                const double hwm, const bool isLong,
-                               const double startRR, const double startPoints) const
+                               const double startRR, const double startPoints,
+                               const double startPrice) const
   {
    if(m_mode == CHARON_TRAIL_OFF || m_risk == NULL)
       return false;
    if(!MathIsValidNumber(hwm) || hwm <= 0.0)
       return false;
+
+   //--- an absolute-price ticket. "Touched or crossed" is tested, never
+   //--- equality: a level the market gaps over must still arm the trail, and
+   //--- an exact-tick comparison would silently never fire.
+   if(MathIsValidNumber(startPrice) && startPrice > 0.0)
+      return ChPriceAtOrBeyond(hwm, startPrice, isLong);
 
    //--- a ticket's own thresholds win over the chart inputs. A negative
    //--- value is not a threshold, so it is ignored rather than trusted.
@@ -223,13 +236,14 @@ double CCharonTrail::Candidate(const double entry, const double riskPrice,
 bool CCharonTrail::NextStop(const double entry, const double riskPrice,
                             const double hwm, const bool isLong,
                             const double currentStop, double &stopOut, string &label,
-                            const double startRR, const double startPoints)
+                            const double startRR, const double startPoints,
+                            const double startPrice)
   {
    stopOut = 0.0;
    label   = "";
    if(m_risk == NULL || m_mode == CHARON_TRAIL_OFF)
       return false;
-   if(!IsActivated(entry, riskPrice, hwm, isLong, startRR, startPoints))
+   if(!IsActivated(entry, riskPrice, hwm, isLong, startRR, startPoints, startPrice))
       return false;
 
    double candidate = Candidate(entry, riskPrice, hwm, isLong, currentStop, label);

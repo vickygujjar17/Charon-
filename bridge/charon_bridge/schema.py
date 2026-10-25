@@ -43,6 +43,11 @@ class SchemaError(ValueError):
 ALLOWED_VERBS: tuple[str, ...] = (
     "arm", "disarm", "trail_mode", "ping",
     "order_open", "order_modify", "order_cancel",
+    # --- v1.5.0. A watch is not an order: it asks the EA to hold a validated
+    # --- ticket and submit it itself when the market reaches a price. The
+    # --- bridge still decides no price and no volume, so these belong in the
+    # --- same allowlist as the order verbs rather than beside ``open``.
+    "watch_add", "watch_cancel",
 )
 
 # --- verbs that are deliberately absent, documented so the gap is a
@@ -50,13 +55,22 @@ ALLOWED_VERBS: tuple[str, ...] = (
 # --- precisely because each one would hand the caller a decision the EA owns:
 # --- ``open``/``size``/``buy``/``sell`` imply caller-chosen volume or price,
 # --- and ``close``/``modify``/``cancel`` bypass the block-geometry contract.
+# --- ``watch_fire`` is absent for the mirror reason: a fired watch is the
+# --- EA's own conclusion from its own tick, never something the bridge
+# --- reaches in and declares.
 FORBIDDEN_VERBS: tuple[str, ...] = (
     "open", "close", "modify", "size", "buy", "sell", "cancel", "pyramid",
+    "watch", "watch_fire",
 )
 
 # --- the attended-execution subset. Every one of these requires an explicit
 # --- order specification; none of them is reachable with a bare verb.
 ORDER_VERBS: tuple[str, ...] = ("order_open", "order_modify", "order_cancel")
+
+# --- the watch subset. ``watch_add`` carries the same full ticket an
+# --- ``order_open`` does; ``watch_cancel`` needs only the watch id it was
+# --- given, because there is no broker-side object to name.
+WATCH_VERBS: tuple[str, ...] = ("watch_add", "watch_cancel")
 
 SIDES: tuple[str, ...] = ("BUY", "SELL")
 ORDER_TYPES: tuple[str, ...] = ("MARKET", "LIMIT")
@@ -75,6 +89,12 @@ MAX_RUNG: int = 3
 # --- further stages reach CHARON_MAX_TIERS (4) exactly.
 # --- Must match CHARON_BRIDGE_MAX_STAGES in CharonBridge.mqh.
 MAX_STAGES: int = 3
+
+# --- armed watches the EA will hold at once. A queue longer than this is an
+# --- operator who has forgotten it exists, so the EA refuses rather than
+# --- growing the snapshot and the queue file without bound.
+# --- Must match CHARON_BRIDGE_MAX_WATCHES in CharonBridge.mqh.
+MAX_WATCHES: int = 8
 
 # --- how a pyramid stage decides it may fire.
 # --- ``rr``    -- the basket must have reached ``trigger`` R multiples;
@@ -291,9 +311,11 @@ class Order:
     """The EA's verdict on the last order ticket, rendered as published.
 
     ``status`` is authoritative: ``idle`` (nothing pending), ``accepted``,
-    ``rejected`` or ``pending``. The numeric fields are the EA's own solved
-    values -- volume from ``LotForStop``, stop from the block geometry -- so
-    a rejected ticket still shows *why* with the numbers it refused.
+    ``rejected``, ``pending`` or -- from v1.5.0 -- ``watching``, which means a
+    validated ticket is armed and nothing has been submitted. The numeric
+    fields are the EA's own solved values -- volume from ``LotForStop``, stop
+    from the block geometry -- so a rejected ticket still shows *why* with the
+    numbers it refused.
 
     ``None`` means "the EA did not report this", never zero. A zero lot on a
     rejected ticket would read as a real size.
@@ -322,7 +344,8 @@ class Order:
         rung = raw.get("rung")
         ticket = raw.get("ticket")
         return cls(
-            status=status if status in ("idle", "accepted", "rejected", "pending") else "idle",
+            status=status if status in ("idle", "accepted", "rejected", "pending",
+                                       "watching") else "idle",
             reason=_text(raw, "reason"),
             side=side if side in ("BUY", "SELL") else None,
             lots=_number(raw, "lots"),
@@ -399,6 +422,83 @@ def _pendings(raw: Any) -> tuple[Pending, ...]:
 
 
 @dataclass(frozen=True)
+class Watch:
+    """One entry the EA is holding, waiting for the market to reach a price.
+
+    A watch is *not* a pending order. Nothing exists at the broker until the
+    EA decides the price was touched, so it has no broker ticket, cannot be
+    cancelled through ``order_cancel``, and does not appear in
+    :class:`Pending`. It carries the id the EA minted so the operator has
+    something to name when cancelling.
+
+    A watch is also the one row on this dashboard that can be lost without a
+    trace -- a chart reload drops in-memory state -- which is why the EA
+    persists the queue and why the snapshot reports it at all rather than
+    leaving the UI to infer intent from a missing position.
+    """
+
+    watch_id: int
+    side: str
+    price: float | None
+    """The price the operator asked for. ``None`` if the EA did not publish
+    one -- never a substitute, because a watch with an invented target would
+    look armed against a price nobody chose."""
+
+    order_type: str | None
+    created_at: int | None
+    status: str | None
+    """The EA's own word for what the watch is doing (``armed``, ``fired``,
+    ``expired``). Passed through rather than re-derived, for the same reason
+    the RR ladder is: two calculations of one state can disagree."""
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any]) -> "Watch":
+        # --- accept either key: the EA writes ``id`` but a hand-edited or
+        # --- replayed snapshot may say ``watch_id``. Same value either way.
+        watch_id = raw.get("watch_id", raw.get("id"))
+        if isinstance(watch_id, bool) or not isinstance(watch_id, int) or watch_id <= 0:
+            raise SchemaError(f"watch has a non-positive id: {watch_id!r}")
+        side = _text(raw, "side")
+        if side not in SIDES:
+            raise SchemaError(f"watch {watch_id} has no usable side")
+        created = raw.get("created_at")
+        # --- ``price`` is what the EA writes; ``target`` is accepted because a
+        # --- watcher's price is naturally called a target on the way in and
+        # --- the two must not disagree. ``price`` wins when both are present.
+        price = _number(raw, "price")
+        if price is None:
+            price = _number(raw, "target")
+        return cls(
+            watch_id=watch_id,
+            side=side,
+            price=price,
+            order_type=_text(raw, "order_type"),
+            created_at=created if isinstance(created, int) else None,
+            status=_text(raw, "status"),
+        )
+
+
+def _watches(raw: Any) -> tuple[Watch, ...]:
+    """Parse a ``watch`` array, skipping anything unusable.
+
+    Same rule as :func:`_pendings`: a row without a usable id cannot be
+    cancelled, so it is dropped; every other kind of damage is survivable and
+    must not hide the rows beside it.
+    """
+    if not isinstance(raw, list):
+        return ()
+    parsed: list[Watch] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            parsed.append(Watch.from_json(item))
+        except SchemaError:
+            continue
+    return tuple(parsed)
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """One validated EA snapshot."""
 
@@ -419,6 +519,9 @@ class Snapshot:
     legs: tuple[Leg, ...] = field(default_factory=tuple)
     order: Order = field(default_factory=lambda: Order.from_json(None))
     pending: tuple[Pending, ...] = field(default_factory=tuple)
+    watch: tuple[Watch, ...] = field(default_factory=tuple)
+    bid: float | None = None
+    ask: float | None = None
 
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> "Snapshot":
@@ -473,6 +576,9 @@ class Snapshot:
             legs=legs,
             order=Order.from_json(raw.get("order")),
             pending=_pendings(raw.get("pending")),
+            watch=_watches(raw.get("watch")),
+            bid=_number(raw, "bid"),
+            ask=_number(raw, "ask"),
         )
 
 
@@ -505,6 +611,12 @@ class OrderIntent:
     basket_risk_ceiling_pct: float | None = None
     trail_start_rr: float | None = None
     trail_start_points: float | None = None
+    # --- v1.5.0: trail activation may be stated as the absolute price the
+    # --- market must reach, which is what an operator actually has when they
+    # --- are reading a level off the chart. Mutually exclusive with the other
+    # --- two: three ways to say "start trailing" would leave the EA
+    # --- arbitrating between contradictory instructions.
+    trail_start_price: float | None = None
     stages: tuple[Stage, ...] = ()
     journal: str | None = None
 
@@ -512,6 +624,18 @@ class OrderIntent:
     def risk_mode(self) -> str:
         """Which risk figure the ticket actually stated: ``pct`` or ``money``."""
         return "money" if self.risk_money is not None else "pct"
+
+    @property
+    def is_watch(self) -> bool:
+        """Whether this ticket should be armed, not submitted.
+
+        ``MARKET`` with no ``entry`` means "fill me now" and goes straight to
+        ``order_open``. ``MARKET`` *with* an ``entry`` is the operator naming a
+        price they want without claiming it is a resting order -- before
+        v1.5.0 that combination was silently filled at market, which is the
+        trap this property exists to close.
+        """
+        return self.order_type == "MARKET" and self.entry is not None
 
     def to_doc(self) -> dict[str, Any]:
         doc: dict[str, Any] = {
@@ -537,6 +661,8 @@ class OrderIntent:
             doc["trail_start_rr"] = self.trail_start_rr
         if self.trail_start_points is not None:
             doc["trail_start_points"] = self.trail_start_points
+        if self.trail_start_price is not None:
+            doc["trail_start_price"] = self.trail_start_price
         if self.stages:
             doc["stages"] = [stage.to_doc() for stage in self.stages]
         if self.journal:
@@ -699,6 +825,7 @@ def build_order_intent(
     basket_risk_ceiling_pct: Any = None,
     trail_start_rr: Any = None,
     trail_start_points: Any = None,
+    trail_start_price: Any = None,
     stages: Any = None,
     journal: Any = None,
 ) -> OrderIntent:
@@ -781,6 +908,32 @@ def build_order_intent(
     if trail_start_points is not None:
         start_points = _positive(trail_start_points, "trail_start_points")
 
+    # --- v1.5.0: at most one activation trigger. RR and points are both
+    # --- *distances* from the entry, so the EA could in principle take the
+    # --- tighter of the two -- but an absolute price is a different kind of
+    # --- statement, and a ticket carrying two of these is a ticket whose
+    # --- author had not decided. Refused rather than resolved.
+    start_price: float | None = None
+    if trail_start_price is not None:
+        start_price = _positive(trail_start_price, "trail_start_price")
+    stated_triggers = sum(
+        value is not None for value in (start_rr, start_points, start_price)
+    )
+    if stated_triggers > 1:
+        raise SchemaError(
+            "state trail activation once: trail_start_rr, trail_start_points "
+            "or trail_start_price -- not more than one"
+        )
+    # --- an absolute activation price has to sit on the profitable side of the
+    # --- entry, or trailing would begin in the wrong direction from the first
+    # --- tick. Checkable here only when an entry was given; otherwise the EA
+    # --- checks it against the fill, which is the only price it trusts.
+    if start_price is not None and entry_price is not None:
+        if side == "BUY" and start_price <= entry_price:
+            raise SchemaError("a BUY trail_start_price must sit above the entry")
+        if side == "SELL" and start_price >= entry_price:
+            raise SchemaError("a SELL trail_start_price must sit below the entry")
+
     if isinstance(trail_trigger, bool) or trail_trigger not in TRAIL_MODE_NAMES:
         raise SchemaError(
             f"trail_trigger must be one of {sorted(TRAIL_MODE_NAMES)}, got {trail_trigger!r}"
@@ -816,6 +969,7 @@ def build_order_intent(
         basket_risk_ceiling_pct=ceiling,
         trail_start_rr=start_rr,
         trail_start_points=start_points,
+        trail_start_price=start_price,
         stages=_stages(stages, side, entry_price),
         journal=note,
     )
@@ -826,13 +980,18 @@ def build_order_intent(
 def build_command(verb: str, issued: int, *, symbol: str, command_id: str,
                   mode: int | None = None,
                   order: "OrderIntent | None" = None,
-                  ticket: int | None = None) -> dict[str, Any]:
+                  ticket: int | None = None,
+                  watch_id: int | None = None) -> dict[str, Any]:
     """Construct a command document for the EA inbox.
 
     Refuses any verb outside :data:`ALLOWED_VERBS`, so a bug elsewhere in
     the process cannot turn into a file the EA might act on. Order verbs
     additionally refuse to be built without a validated
     :class:`OrderIntent` (or, for a cancel, an explicit ticket).
+
+    ``watch_add`` carries the *same* validated intent ``order_open`` does --
+    the EA re-checks it identically, because a watch is only a deferral of
+    when the ticket is submitted, never a relaxation of what it must satisfy.
     """
     if verb not in ALLOWED_VERBS:
         raise SchemaError(f"verb {verb!r} is not permitted by the bridge")
@@ -850,15 +1009,29 @@ def build_command(verb: str, issued: int, *, symbol: str, command_id: str,
             raise SchemaError(f"trail_mode needs a valid mode, got {mode!r}")
         doc["mode"] = int(mode)
 
-    if verb in ("order_open", "order_modify"):
+    if verb in ("order_open", "order_modify", "watch_add"):
         if order is None:
             raise SchemaError(f"{verb} needs a validated order intent")
         doc.update(order.to_doc())
+        # --- ``watch_add`` must name the price it is waiting for. Without one
+        # --- the EA would have nothing to compare against the tick and would
+        # --- have to either fire immediately or wait forever; both are wrong
+        # --- answers to a malformed ticket, so it is refused here instead.
+        if verb == "watch_add":
+            if order.order_type != "MARKET":
+                raise SchemaError("watch_add only defers a MARKET entry")
+            if order.entry is None:
+                raise SchemaError("watch_add needs an entry price to watch for")
 
     if verb in ("order_modify", "order_cancel"):
         if ticket is None or ticket <= 0:
             raise SchemaError(f"{verb} needs a positive ticket, got {ticket!r}")
         doc["ticket"] = int(ticket)
+
+    if verb == "watch_cancel":
+        if watch_id is None or watch_id <= 0:
+            raise SchemaError(f"watch_cancel needs a positive watch_id, got {watch_id!r}")
+        doc["watch_id"] = int(watch_id)
 
     return doc
 
@@ -872,11 +1045,13 @@ __all__ = [
     "MAX_RISK_PCT",
     "MAX_RUNG",
     "MAX_STAGES",
+    "MAX_WATCHES",
     "ORDER_TYPES",
     "ORDER_VERBS",
     "SIDES",
     "TRAIL_MODE_NAMES",
     "TRIGGER_KINDS",
+    "WATCH_VERBS",
     "Basket",
     "Leg",
     "Model",
@@ -888,6 +1063,7 @@ __all__ = [
     "Snapshot",
     "Stage",
     "Trail",
+    "Watch",
     "build_command",
     "build_order_intent",
     "journal_tag",

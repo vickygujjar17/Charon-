@@ -30,7 +30,7 @@
 //|  nothing here is required for trading, risk or stops.             |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.04"
+#property version   "1.05"
 
 #ifndef __CHARON_BRIDGE__
 #define __CHARON_BRIDGE__
@@ -44,7 +44,11 @@
 //---       command written at a different revision is refused outright,
 //---       which is what keeps a half-upgraded install from acting on a
 //---       ticket it only partially understands.
-#define CHARON_BRIDGE_SCHEMA      3
+//---   4 = v1.5.0 watched entries: `watch_add` parks a validated ticket and
+//---       the EA submits it itself once its own tick reaches the price, the
+//---       snapshot publishes `watch[]` beside `pending[]`, and trail
+//---       activation may be stated as an absolute price.
+#define CHARON_BRIDGE_SCHEMA      4
 #define CHARON_BRIDGE_ROOT        "Charon"
 #define CHARON_BRIDGE_CMD_DIR     "Charon\\commands"    //--- legacy, read by pre-1.3.0 EAs
 #define CHARON_BRIDGE_DONE_DIR    "Charon\\commands\\processed"
@@ -57,10 +61,12 @@
 #define CHARON_BRIDGE_MAX_LEGS    16
 
 //--- permitted command verbs.
-//---  The first four are state-only. The last three are attended manual
+//---  The first four are state-only. The next three are attended manual
 //---  execution: they carry an operator's *intent* and are still adjudicated
 //---  by CCharonRisk and the block geometry inside the EA. Nothing here lets
 //---  the caller choose a volume, a stop distance or an R multiple.
+//---  The last two are the v1.5.0 watch queue: the same intent, only deferred
+//---  until a price is touched. The EA originates the order either way.
 #define CHARON_BRIDGE_V_ARM       "arm"
 #define CHARON_BRIDGE_V_DISARM    "disarm"
 #define CHARON_BRIDGE_V_TRAILMODE "trail_mode"
@@ -68,6 +74,14 @@
 #define CHARON_BRIDGE_V_ORDER_OPEN   "order_open"
 #define CHARON_BRIDGE_V_ORDER_MODIFY "order_modify"
 #define CHARON_BRIDGE_V_ORDER_CANCEL "order_cancel"
+#define CHARON_BRIDGE_V_WATCH_ADD    "watch_add"
+#define CHARON_BRIDGE_V_WATCH_CANCEL "watch_cancel"
+
+//--- watches held at once. A queue this long is already an operator who has
+//--- forgotten it exists; the cap keeps the snapshot and the persistence file
+//--- bounded and gives a refusal instead of silent growth.
+//--- Must match MAX_WATCHES in bridge/charon_bridge/schema.py.
+#define CHARON_BRIDGE_MAX_WATCHES 8
 
 //--- highest RR rung a ticket may reference. The ladder publishes three
 //--- levels (InpRrLadderA/B/C), so rung 0 means "no rung" and 1..3 index
@@ -143,6 +157,22 @@ struct SCharonBridgePending
   };
 
 //+------------------------------------------------------------------+
+//| One armed watch                                                   |
+//|  A watch is not a pending order. Nothing exists at the broker      |
+//|  until the EA decides the price was touched, so there is no ticket |
+//|  -- only the id the EA minted, which is what `watch_cancel` names. |
+//+------------------------------------------------------------------+
+struct SCharonBridgeWatch
+  {
+   long              id;
+   string            side;            // "BUY" / "SELL"
+   double            price;           // the price being waited for
+   string            orderType;       // "MARKET"
+   datetime          createdAt;
+   string            status;          // "armed"
+  };
+
+//+------------------------------------------------------------------+
 //| A validated command extracted from the inbox                     |
 //+------------------------------------------------------------------+
 struct SCharonBridgeCommand
@@ -168,11 +198,29 @@ struct SCharonBridgeCommand
    int               trailTrigger;    // CHARON_TRAIL_*, applied on fill
    double            trailStartRR;    // 0 => use InpTrailStartRR
    double            trailStartPoints;// 0 => use InpTrailStartPoints
+   double            trailStartPrice; // 0 => not stated as an absolute price
    int               rung;            // RR rung the ticket is stated against
    ulong             ticket;          // target of order_modify / order_cancel
+   long              watchId;         // target of watch_cancel
    string            journalTag;      // short ASCII tag for the broker comment
    int               stageCount;
    SCharonBridgeStage stages[CHARON_BRIDGE_MAX_STAGES];
+  };
+
+//+------------------------------------------------------------------+
+//| One armed watch, as the engine holds it                          |
+//|  The whole validated command is kept, not just its price: when   |
+//|  the level is reached the EA runs the identical order_open path,  |
+//|  so the ticket it submits must be byte-for-byte the one the       |
+//|  operator sent. Re-reading the price and re-deriving the rest     |
+//|  would be a second interpretation of one ticket.                  |
+//+------------------------------------------------------------------+
+struct SCharonWatch
+  {
+   long                 id;
+   double               price;        // the level being waited for
+   datetime             createdAt;
+   SCharonBridgeCommand cmd;          // the validated ticket, held verbatim
   };
 
 
@@ -247,6 +295,13 @@ struct SCharonBridgeSnapshot
    //--- legs (flat array; the writer streams it, no nesting needed)
    int               legCount;
    int               pendingCount;
+   int               watchCount;
+
+   //--- last tick, so the dashboard can show how far a watch still is from
+   //--- its target. Advisory only: the EA is the only party that decides a
+   //--- price was touched, and it reads SymbolInfoDouble itself.
+   double            bid;
+   double            ask;
   };
 
 //+------------------------------------------------------------------+
@@ -287,6 +342,13 @@ public:
                              const SCharonBridgeLeg &legs[], const int legCount,
                              const SCharonBridgePending &pendings[],
                              const int pendingCount);
+   //--- full form: the watch queue rides alongside the working orders.
+   bool              Publish(const SCharonBridgeSnapshot &snap,
+                             const SCharonBridgeLeg &legs[], const int legCount,
+                             const SCharonBridgePending &pendings[],
+                             const int pendingCount,
+                             const SCharonBridgeWatch &watches[],
+                             const int watchCount);
 
    //--- Python -> EA. Returns at most one command per call so a burst of
    //--- files can never stall the trade pipeline.
@@ -591,17 +653,24 @@ bool CCharonBridge::VerbAllowed(const string verb)
            verb == CHARON_BRIDGE_V_PING ||
            verb == CHARON_BRIDGE_V_ORDER_OPEN ||
            verb == CHARON_BRIDGE_V_ORDER_MODIFY ||
-           verb == CHARON_BRIDGE_V_ORDER_CANCEL);
+           verb == CHARON_BRIDGE_V_ORDER_CANCEL ||
+           verb == CHARON_BRIDGE_V_WATCH_ADD ||
+           verb == CHARON_BRIDGE_V_WATCH_CANCEL);
   }
 
 //+------------------------------------------------------------------+
 //| Order-bearing verbs need a full ticket; state verbs do not       |
+//|  watch_add is included: it carries the same validated ticket an   |
+//|  order_open does, and the EA re-checks it identically. Deferring  |
+//|  *when* a ticket is submitted never relaxes *what* it must        |
+//|  satisfy. watch_cancel is not: it names a watch id, not a ticket. |
 //+------------------------------------------------------------------+
 bool CCharonBridge::OrderVerb(const string verb)
   {
    return (verb == CHARON_BRIDGE_V_ORDER_OPEN ||
            verb == CHARON_BRIDGE_V_ORDER_MODIFY ||
-           verb == CHARON_BRIDGE_V_ORDER_CANCEL);
+           verb == CHARON_BRIDGE_V_ORDER_CANCEL ||
+           verb == CHARON_BRIDGE_V_WATCH_ADD);
   }
 
 //+------------------------------------------------------------------+
@@ -862,7 +931,8 @@ bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
    //--- one. Writing it out is clearer than overloading on a default, which
    //--- the compiler rejects outright.
    SCharonBridgePending none[];
-   return Publish(snap, legs, legCount, none, 0);
+   SCharonBridgeWatch  noWatches[];
+   return Publish(snap, legs, legCount, none, 0, noWatches, 0);
   }
 
 //+------------------------------------------------------------------+
@@ -870,6 +940,19 @@ bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
                             const SCharonBridgeLeg &legs[], const int legCount,
                             const SCharonBridgePending &pendings[],
                             const int pendingCount)
+  {
+   //--- same forwarding trick: no watch queue to report
+   SCharonBridgeWatch noWatches[];
+   return Publish(snap, legs, legCount, pendings, pendingCount, noWatches, 0);
+  }
+
+//+------------------------------------------------------------------+
+bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
+                            const SCharonBridgeLeg &legs[], const int legCount,
+                            const SCharonBridgePending &pendings[],
+                            const int pendingCount,
+                            const SCharonBridgeWatch &watches[],
+                            const int watchCount)
   {
    int shown = legCount;
    if(shown < 0)
@@ -882,6 +965,12 @@ bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
       shownPending = 0;
    if(shownPending > CHARON_BRIDGE_MAX_LEGS)
       shownPending = CHARON_BRIDGE_MAX_LEGS;
+
+   int shownWatch = watchCount;
+   if(shownWatch < 0)
+      shownWatch = 0;
+   if(shownWatch > CHARON_BRIDGE_MAX_WATCHES)
+      shownWatch = CHARON_BRIDGE_MAX_WATCHES;
 
    m_seq++;
 
@@ -1012,7 +1101,33 @@ bool CCharonBridge::Publish(const SCharonBridgeSnapshot &snap,
       j += StringFormat("\"placed_at\":%I64d", (long)pendings[i].placedAt);
       j += "}";
      }
-   j += "]";
+   j += "],";
+
+   //--- armed watches. Deliberately a separate array from ``pending``: a
+   //--- watch has no broker ticket because nothing has been submitted yet, so
+   //--- the two are cancelled by different names. A pre-1.5.0 reader ignores
+   //--- this key entirely.
+   j += "\"watch\":[";
+   for(int i = 0; i < shownWatch; i++)
+     {
+      if(i > 0)
+         j += ",";
+      j += "{";
+      j += StringFormat("\"id\":%I64d,", watches[i].id);
+      j += StringFormat("\"side\":\"%s\",", JsonEscape(watches[i].side));
+      j += StringFormat("\"price\":%s,", DoubleToString(watches[i].price, snap.digits));
+      j += StringFormat("\"order_type\":\"%s\",", JsonEscape(watches[i].orderType));
+      j += StringFormat("\"created_at\":%I64d,", (long)watches[i].createdAt);
+      j += StringFormat("\"status\":\"%s\"", JsonEscape(watches[i].status));
+      j += "}";
+     }
+   j += "],";
+
+   //--- last tick. Advisory only: the dashboard uses it to show how far a
+   //--- watch still is from its target, and no decision depends on it -- the
+   //--- EA reads SymbolInfoDouble itself when deciding a price was touched.
+   j += StringFormat("\"bid\":%s,", DoubleToString(snap.bid, snap.digits));
+   j += StringFormat("\"ask\":%s", DoubleToString(snap.ask, snap.digits));
    j += "}";
 
    m_lastOk = WriteStateFile(j);
@@ -1374,6 +1489,24 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
            }
         }
 
+      //--- watch_add is a validated ticket that is submitted later, so it must
+      //--- carry the price it is waiting for. Without one the EA would either
+      //--- fire on the next tick or wait forever -- both wrong answers to a
+      //--- malformed command, so it is refused at the door instead.
+      if(verb == CHARON_BRIDGE_V_WATCH_ADD)
+        {
+         if(otype != "MARKET")
+           {
+            cmd.reject = "watch_add only defers a MARKET entry";
+            return false;
+           }
+         if(entry <= 0.0)
+           {
+            cmd.reject = "watch_add needs an entry price to watch for";
+            return false;
+           }
+        }
+
       //--- optional per-ticket trail activation. 0 (or absent) leaves the
       //--- chart input as the threshold, so an untouched ticket trails
       //--- exactly as it did before v1.4.0.
@@ -1400,6 +1533,28 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
         }
       else
          startPoints = 0.0;
+
+      //--- v1.5.0: activation stated as an absolute price. At most one of the
+      //--- three forms may appear -- two would be two answers to one question
+      //--- and ApplyOrderCommand would have to pick a winner. Only the sign is
+      //--- checkable here; whether the price sits on the profitable side of the
+      //--- entry depends on the fill, which happens later in ApplyOrderCommand.
+      double startPrice = 0.0;
+      if(ReadJsonNumber(body, "trail_start_price", startPrice))
+        {
+         if(!MathIsValidNumber(startPrice) || startPrice <= 0.0)
+           {
+            cmd.reject = StringFormat("trail start price %.5f is not positive", startPrice);
+            return false;
+           }
+         if(startRR > 0.0 || startPoints > 0.0)
+           {
+            cmd.reject = "state trail activation once: rr, points or price";
+            return false;
+           }
+        }
+      else
+         startPrice = 0.0;
 
       //--- short ASCII tag for the broker comment. Everything else about the
       //--- note stays on the bridge side; the chart only ever renders this.
@@ -1457,6 +1612,19 @@ bool CCharonBridge::ReadCommandFile(const string name, SCharonBridgeCommand &cmd
         }
       cmd.rung         = (int)rung;
       cmd.ticket       = (ulong)ticket;
+      cmd.trailStartPrice = startPrice;
+     }
+   else if(verb == CHARON_BRIDGE_V_WATCH_CANCEL)
+     {
+      //--- watch_cancel names a watch id, not a ticket: nothing reached the
+      //--- broker, so there is no broker-side object to name.
+      double watchId = 0.0;
+      if(!ReadJsonNumber(body, "watch_id", watchId) || watchId <= 0.0)
+        {
+         cmd.reject = "watch_cancel needs a positive watch_id";
+         return false;
+        }
+      cmd.watchId = (long)watchId;
      }
 
    cmd.valid = true;
@@ -1509,6 +1677,10 @@ bool CCharonBridge::Poll(SCharonBridgeCommand &cmd)
    cmd.arg    = "";
    cmd.issued = 0;
    cmd.reject = "";
+   cmd.watchId = 0;
+   cmd.trailStartPrice = 0.0;
+   cmd.stageCount = 0;
+   cmd.ticket = 0;
 
    string name = NextPending();
    if(name == "")

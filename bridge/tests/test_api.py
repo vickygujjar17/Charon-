@@ -319,6 +319,127 @@ def test_order_endpoint_defaults_to_market_without_an_entry(
     assert "entry" not in sent
 
 
+def test_market_with_an_entry_is_queued_as_a_watch_not_an_order(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    """The v1.5.0 routing rule, at the API boundary.
+
+    Before this, MARKET+entry was written as ``order_open`` and the EA filled
+    it at market -- the price was carried, read, and ignored. Now the verb
+    itself changes, so an un-upgraded EA refuses the file instead of trading
+    on a ticket it only half understands.
+    """
+    write_snapshot(make_snapshot(schema=SCHEMA_VERSION))
+    response = client.post("/api/order", json=_ticket(
+        order_type="MARKET", entry=1.25600))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["verb"] == "watch_add"
+    assert body["watching"] is True
+    assert body["entry"] == 1.25600
+
+    inbox = common_dir / "Charon" / "commands"
+    sent = json.loads(next(inbox.glob("*.json")).read_text(encoding="utf-8"))
+    assert sent["verb"] == "watch_add"
+    assert sent["entry"] == 1.25600
+    assert sent["order_type"] == "MARKET"
+    # --- the whole ticket still rides along: a watch defers *when*, not *what*
+    assert sent["risk_pct"] == 0.5
+    assert sent["block_top"] == 1.27000
+    assert sent["block_bottom"] == 1.25000
+
+
+def test_a_watch_needs_a_schema_4_chart(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    """A schema-3 EA does not know ``watch_add`` at all.
+
+    Refusing synchronously names the problem; writing the file would leave the
+    operator reading an Experts-log rejection after the dashboard said
+    "queued".
+    """
+    write_snapshot(make_snapshot(schema=3))
+    response = client.post("/api/order", json=_ticket(
+        order_type="MARKET", entry=1.25600))
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "schema" in detail
+    # --- nothing was written, so no chart can act on it
+    inbox = common_dir / "Charon" / "commands"
+    assert list(inbox.glob("*.json")) == []
+
+
+def test_an_absolute_trail_price_needs_a_schema_4_chart(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    """Gap C has the same half-upgrade trap as Gap B: a schema-3 EA would
+    ignore the key and trail from its own default, so the operator would be
+    told a level was armed when it was not."""
+    write_snapshot(make_snapshot(schema=3))
+    response = client.post("/api/order", json=_ticket(
+        order_type="MARKET", entry=None, trail_start_price=1.27500))
+
+    assert response.status_code == 422
+    assert "absolute-price" in response.json()["detail"]
+
+
+def test_a_schema_3_ea_still_accepts_a_v14_ticket(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    """The per-field gate must not over-refuse.
+
+    A schema-3 chart understands every schema-3 field, so a ticket carrying
+    one is still accepted after the bridge learned schema 4. Refusing on the
+    bridge's own revision alone would have broken every un-upgraded chart on
+    the day of the upgrade.
+    """
+    write_snapshot(make_snapshot(schema=3))
+    response = client.post("/api/order", json=_ticket(
+        order_type="MARKET", entry=None, journal="a note a schema-3 EA can hold"))
+
+    assert response.status_code == 200
+    assert response.json()["verb"] == "order_open"
+
+
+def test_watch_cancel_queues_a_watch_cancel(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    write_snapshot(make_snapshot(schema=SCHEMA_VERSION))
+    response = client.post("/api/orders/watch/cancel", params={"watch_id": 7})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["verb"] == "watch_cancel"
+
+    inbox = common_dir / "Charon" / "commands"
+    sent = json.loads(next(inbox.glob("*.json")).read_text(encoding="utf-8"))
+    assert sent["verb"] == "watch_cancel"
+    assert sent["watch_id"] == 7
+    # --- it names a watch, never a ticket: nothing reached the broker
+    assert "ticket" not in sent
+
+
+def test_watch_cancel_refuses_a_non_positive_id(client: TestClient) -> None:
+    response = client.post("/api/orders/watch/cancel", params={"watch_id": 0})
+    assert response.status_code == 422
+
+
+def test_status_publishes_the_watch_queue_and_the_tick(
+        client: TestClient, write_snapshot) -> None:
+    write_snapshot(make_snapshot(
+        schema=SCHEMA_VERSION,
+        bid=1.25980,
+        ask=1.26020,
+        watch=[{"id": 3, "side": "BUY", "price": 1.25600,
+                "order_type": "MARKET", "created_at": 1, "status": "armed"}],
+    ))
+    snap = client.get("/api/status", params={"symbol": "GBPUSD"}).json()["snapshot"]
+
+    assert len(snap["watch"]) == 1
+    assert snap["watch"][0]["watch_id"] == 3
+    assert snap["watch"][0]["price"] == 1.25600
+    assert snap["watch"][0]["status"] == "armed"
+    assert snap["bid"] == 1.25980
+    assert snap["ask"] == 1.26020
+
+
 @pytest.mark.parametrize("body,reason", [
     ({"side": "buy"}, "side"),
     ({"order_type": "STOP"}, "order_type"),

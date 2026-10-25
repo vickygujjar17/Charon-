@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 # --- mirrors CHARON_BRIDGE_SCHEMA / CHARON_BRIDGE_CMD_MAX_AGE in CharonBridge.mqh
-SCHEMA = 3
+SCHEMA = 4
 CMD_MAX_AGE = 60
 
 
@@ -62,8 +62,13 @@ def local_epoch(now: float | None = None) -> int:
 
 # --- mirrors CCharonBridge::VerbAllowed(). Adding one is a security decision.
 ALLOWED_VERBS = ("arm", "disarm", "trail_mode", "ping",
-                 "order_open", "order_modify", "order_cancel")
+                 "order_open", "order_modify", "order_cancel",
+                 "watch_add", "watch_cancel")
 ORDER_VERBS = ("order_open", "order_modify", "order_cancel")
+# --- ``watch_add`` is validated exactly like ``order_open``: a watch defers
+# --- *when* a ticket is submitted, never *what* it must satisfy.
+TICKET_VERBS = ORDER_VERBS + ("watch_add",)
+WATCH_VERBS = ("watch_add", "watch_cancel")
 MAX_RUNG = 3
 MAX_STAGES = 3
 TRIGGER_KINDS = ("rr", "price")
@@ -118,6 +123,11 @@ class FakeEA:
         # --- default, because a pending ticket is something the dashboard
         # --- offers to cancel.
         self.pending: list[dict[str, Any]] = []
+        # --- the EA's watch queue, as CollectWatches would report it. Rows are
+        # --- added by ``watch_add`` and removed by ``watch_cancel``; a test
+        # --- that wants one armed can also append a row directly.
+        self.watches: list[dict[str, Any]] = []
+        self._next_watch_id = 1
 
     #+----------------------------------------------------------------+
     #| Inbox                                                         |
@@ -184,10 +194,15 @@ class FakeEA:
             if int(mode) not in TRAIL_MODE_NAMES:
                 return document, False, f"trail mode {mode} is out of range"
 
-        if verb in ORDER_VERBS:
+        if verb in TICKET_VERBS:
             reject = self._validate_ticket(document, verb)
             if reject:
                 return document, False, reject
+
+        if verb == "watch_cancel":
+            watch_id = document.get("watch_id")
+            if isinstance(watch_id, bool) or not isinstance(watch_id, int) or watch_id <= 0:
+                return document, False, "watch_cancel needs a positive watch_id"
 
         return document, True, ""
 
@@ -262,6 +277,27 @@ class FakeEA:
                 continue
             if not isinstance(start, (int, float)) or isinstance(start, bool) or start < 0:
                 return f"{key} is not positive"
+
+        # --- v1.5.0. An absolute activation price is validated here only for
+        # --- sign and exclusivity: whether it sits on the profitable side of
+        # --- the entry depends on the fill, which the EA learns at submit
+        # --- time, not the parser.
+        start_price = doc.get("trail_start_price")
+        if start_price is not None:
+            if not isinstance(start_price, (int, float)) or isinstance(start_price, bool):
+                return "trail_start_price is not a number"
+            if start_price <= 0:
+                return "trail_start_price is not positive"
+            stated = [key for key in ("trail_start_rr", "trail_start_points")
+                      if doc.get(key) is not None]
+            if stated:
+                return "state trail activation once; " + ", ".join(stated) + " also given"
+
+        if verb == "watch_add":
+            if otype != "MARKET":
+                return "watch_add only defers a MARKET entry"
+            if entry is None:
+                return "watch_add needs an entry price to watch for"
 
         tag = doc.get("journal_tag")
         if tag is not None:
@@ -373,6 +409,44 @@ class FakeEA:
                 "side": "", "lots": 0.0, "entry": 0.0, "stop": 0.0,
                 "risk_money": 0.0, "risk_pct": 0.0, "rung": 0,
                 "ticket": int(document["ticket"]),
+            }
+        elif verb == "watch_add":
+            # --- the ticket is parsed and validated, then *parked*. Nothing
+            # --- is submitted: the real EA only submits once its own tick
+            # --- reaches ``entry``. ``lot``/``stop`` are deliberately left
+            # --- unsolved here for the same reason -- the EA solves volume
+            # --- against the fill, and a watch has no fill yet.
+            watch = {
+                "id": self._next_watch_id,
+                "side": document["side"],
+                "price": float(document["entry"]),
+                "order_type": "MARKET",
+                "created_at": int(time.time()),
+                "status": "armed",
+            }
+            self._next_watch_id += 1
+            self.watches.append(watch)
+            self.order = {
+                "status": "watching",
+                "reason": f"watching {document['entry']}",
+                "side": document["side"], "lots": 0.0,
+                "entry": float(document["entry"]), "stop": 0.0,
+                "risk_money": 0.0, "risk_pct": 0.0, "rung": 0,
+                "ticket": 0,
+                "journal_tag": document.get("journal_tag", ""),
+            }
+        elif verb == "watch_cancel":
+            watch_id = int(document["watch_id"])
+            before = len(self.watches)
+            self.watches = [row for row in self.watches if row["id"] != watch_id]
+            cancelled = len(self.watches) < before
+            self.order = {
+                "status": "accepted" if cancelled else "rejected",
+                "reason": (f"watch #{watch_id} cancelled" if cancelled
+                           else f"no watch #{watch_id}"),
+                "side": "", "lots": 0.0, "entry": 0.0, "stop": 0.0,
+                "risk_money": 0.0, "risk_pct": 0.0, "rung": 0,
+                "ticket": 0,
             }
         else:
             # --- order_open / order_modify: simulate the EA's adjudication.
@@ -492,6 +566,14 @@ class FakeEA:
             # --- and a fabricated pending row would make a test assert on a
             # --- ticket that cannot be cancelled.
             "pending": [dict(row) for row in self.pending],
+            # --- the EA's own watch queue, distinct from pending: these have
+            # --- no broker ticket because nothing has been submitted.
+            "watch": [dict(row) for row in self.watches],
+            # --- last tick, as SymbolInfoDouble would report it. Published so
+            # --- the dashboard can show a watch's distance-to-target instead
+            # --- of making the operator subtract two numbers by hand.
+            "bid": 1.25980,
+            "ask": 1.26020,
             "legs": [
                 {
                     "ticket": 111,
@@ -513,5 +595,6 @@ class FakeEA:
         }
 
 
-__all__ = ["ALLOWED_VERBS", "CMD_MAX_AGE", "SCHEMA", "TRAIL_MODE_NAMES", "FakeEA"]
+__all__ = ["ALLOWED_VERBS", "CMD_MAX_AGE", "SCHEMA", "TICKET_VERBS",
+           "TRAIL_MODE_NAMES", "WATCH_VERBS", "FakeEA"]
 

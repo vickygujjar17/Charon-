@@ -13,7 +13,7 @@
 //|  target and optionally trails / pyramids.                        |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.04"
+#property version   "1.05"
 #property link      "https://github.com/vickygujjar17/Charon-.git"
 
 #ifndef __CHARON_DEFINES__
@@ -24,7 +24,7 @@
 //| _tools/bump_version.py rewrites this literal and every other     |
 //| version string in the repository in one pass.                    |
 //+------------------------------------------------------------------+
-#define CHARON_VERSION        "1.4.0"
+#define CHARON_VERSION        "1.5.0"
 #define CHARON_NAME           "Charon"
 #define CHARON_REPO           "https://github.com/vickygujjar17/Charon-.git"
 
@@ -135,6 +135,7 @@ struct SCharonPosState
    //--- variable set behaves exactly as it did before.
    double            trailStartRR;    // 0 => InpTrailStartRR
    double            trailStartPoints;// 0 => InpTrailStartPoints
+   double            trailStartPrice; // 0 => not stated as a price (v1.5.0)
   };
 
 //--- aggregated view of every managed position on the symbol

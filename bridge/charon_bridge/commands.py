@@ -96,7 +96,8 @@ def _atomic_write(path: Path, payload: str) -> None:
 
 def submit(verb: str, symbol: str, *, mode: int | None = None,
            order: OrderIntent | None = None,
-           ticket: int | None = None) -> dict[str, Any]:
+           ticket: int | None = None,
+           watch_id: int | None = None) -> dict[str, Any]:
     """Queue one command for the EA and return what was sent.
 
     ``issued`` is the **local** epoch second (:func:`local_epoch`). The EA
@@ -104,10 +105,11 @@ def submit(verb: str, symbol: str, *, mode: int | None = None,
     ``CHARON_BRIDGE_CMD_MAX_AGE`` away in either direction, so a file left
     on disk and replayed later is a no-op rather than a surprise.
 
-    For ``order_open``/``order_modify`` the caller must pass a validated
-    :class:`~charon_bridge.schema.OrderIntent`; for ``order_modify``/
-    ``order_cancel`` a positive ticket. This module still writes the file
-    and nothing else -- the EA decides whether the order happens.
+    For ``order_open``/``order_modify``/``watch_add`` the caller must pass a
+    validated :class:`~charon_bridge.schema.OrderIntent`; for
+    ``order_modify``/``order_cancel`` a positive ticket, and for
+    ``watch_cancel`` the watch id the EA minted. This module still writes the
+    file and nothing else -- the EA decides whether the order happens.
     """
     if verb not in ALLOWED_VERBS:
         raise SchemaError(f"verb {verb!r} is not permitted")
@@ -125,7 +127,7 @@ def submit(verb: str, symbol: str, *, mode: int | None = None,
     command_id = uuid.uuid4().hex
 
     doc = build_command(verb, issued, symbol=symbol, command_id=command_id,
-                        mode=mode, order=order, ticket=ticket)
+                        mode=mode, order=order, ticket=ticket, watch_id=watch_id)
     name = _next_name(now_ns)
     payload = json.dumps(doc, indent=2, sort_keys=True) + "\n"
 

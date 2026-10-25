@@ -6,7 +6,7 @@
 //|  risk / RR mathematics is defined.                               |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.04"
+#property version   "1.05"
 
 #ifndef __CHARON_MATH__
 #define __CHARON_MATH__
@@ -176,6 +176,24 @@ double ChProgressRR(const double entryPrice, const double riskPrice,
       return 0.0;
    double travel = (isLong ? (price - entryPrice) : (entryPrice - price));
    return travel / riskPrice;
+  }
+
+//+------------------------------------------------------------------+
+//| Has price touched or crossed level?                              |
+//|                                                                  |
+//|  "Touched or crossed", never equality. A level the market gaps    |
+//|  over must still register, and an exact-tick comparison would     |
+//|  silently never fire -- the worst failure for a condition whose   |
+//|  whole job is to wait. A non-positive level means "no level",      |
+//|  which every caller reads as "not yet", never "already there".    |
+//+------------------------------------------------------------------+
+bool ChPriceAtOrBeyond(const double price, const double level, const bool isLong)
+  {
+   if(!MathIsValidNumber(level) || level <= 0.0)
+      return false;
+   if(!MathIsValidNumber(price) || price <= 0.0)
+      return false;
+   return (isLong ? (price >= level) : (price <= level));
   }
 
 //+------------------------------------------------------------------+

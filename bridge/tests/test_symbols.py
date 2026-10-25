@@ -178,6 +178,20 @@ def test_catalogue_of_nothing_is_empty() -> None:
         ("SPX500", symbols.ASSET_INDEX),
         ("USOIL", symbols.ASSET_ENERGY),
         ("WTIUSD", symbols.ASSET_ENERGY),
+        # --- v1.5.0: crude named by its ticker rather than the word "oil"
+        ("XTIUSD", symbols.ASSET_ENERGY),
+        ("XBRUSD", symbols.ASSET_ENERGY),
+        ("CL", symbols.ASSET_ENERGY),
+        # --- softs and grains, which had no home before v1.5.0 and landed
+        # --- under Other beside genuine unknowns like AAPL
+        ("WHEAT", symbols.ASSET_COMMODITIES),
+        ("CORN", symbols.ASSET_COMMODITIES),
+        ("SOYBEAN", symbols.ASSET_COMMODITIES),
+        ("COFFEE", symbols.ASSET_COMMODITIES),
+        ("COCOA", symbols.ASSET_COMMODITIES),
+        ("SUGAR", symbols.ASSET_COMMODITIES),
+        ("COTTON", symbols.ASSET_COMMODITIES),
+        ("ORANGE", symbols.ASSET_COMMODITIES),
         ("BTCUSD", symbols.ASSET_CRYPTO),
         ("ETH/USD", symbols.ASSET_CRYPTO),
     ],
@@ -198,6 +212,45 @@ def test_asset_class_prefers_energy_over_forex() -> None:
     """``USOIL`` contains no currency pair but ``USD`` alone; check the order."""
     assert symbols.asset_class("USOIL") == symbols.ASSET_ENERGY
     assert symbols.asset_class("USDJPY") == symbols.ASSET_FOREX
+
+
+def test_a_crude_ticker_never_reaches_the_pair_test() -> None:
+    """``XTIUSD`` is six letters containing a currency at the end.
+
+    Energy is matched before the structural pair rule for exactly this reason:
+    ``XTI`` + ``USD`` would otherwise look like a currency pair and the symbol
+    would be filed under Forex beside EURUSD.
+    """
+    assert symbols.asset_class("XTIUSD") == symbols.ASSET_ENERGY
+    assert symbols.asset_class("XBRUSD") == symbols.ASSET_ENERGY
+
+
+def test_a_commodity_token_is_matched_whole_not_as_a_prefix() -> None:
+    """``CL`` is crude's ticker, but ``CLP`` is the Chilean peso.
+
+    Prefix matching on a short token is how a picker ends up filing a currency
+    under Energy, so the short tokens are matched exactly. ``USDCLP`` is not
+    asserted to be Forex: ``CLP`` is not in ``_CURRENCIES``, so it is Other,
+    which is the pre-existing answer and beside the point here. What matters
+    is that it is *not* Energy.
+    """
+    assert symbols.asset_class("CL") == symbols.ASSET_ENERGY
+    assert symbols.asset_class("CLPUSD") != symbols.ASSET_ENERGY
+    assert symbols.asset_class("USDCLP") != symbols.ASSET_ENERGY
+
+
+def test_commodities_do_not_swallow_forex() -> None:
+    """Every commodity token must be distinct from every currency token, or a
+    pair would be classified by whichever rule ran first."""
+    for name in ("EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD"):
+        assert symbols.asset_class(name) == symbols.ASSET_FOREX
+
+
+def test_commodities_are_in_the_declared_class_list() -> None:
+    """A class missing from ASSET_CLASSES would be invisible to the grouping
+    code that iterates the tuple rather than the data."""
+    assert symbols.ASSET_COMMODITIES in symbols.ASSET_CLASSES
+    assert len(set(symbols.ASSET_CLASSES)) == len(symbols.ASSET_CLASSES)
 
 
 @pytest.mark.parametrize("name", ["FOOBAR", "AAPL", "", "   ", "???", "12345"])
