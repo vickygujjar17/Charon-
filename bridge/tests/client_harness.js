@@ -18,7 +18,6 @@ class Element {
   constructor(tag) {
     this.tagName = tag.toUpperCase();
     this.children = [];
-    this.className = "";
     this.dataset = {};
     this.textContent = "";
     this.title = "";
@@ -28,21 +27,55 @@ class Element {
     this.scrollHeight = 0;
     this.listeners = {};
     this.id = "";
+    this.parent = null;
+    this.attrs = {};
+    // --- v1.6.1: focus() and closest() are load-bearing now that the ticket's
+    // --- symbol picker is a real popover, so the stub has to model them.
+    this.focused = false;
     this.classList = {
-      _set: new Set(),
-      add: (c) => this.classList._set.add(c),
-      remove: (c) => this.classList._set.delete(c),
-      toggle: (c, on) => (on ? this.classList._set.add(c) : this.classList._set.delete(c)),
+      _element: this,
+      add: (c) => {
+        this.classList._set.add(c);
+        this._syncClassName();
+      },
+      remove: (c) => {
+        this.classList._set.delete(c);
+        this._syncClassName();
+      },
+      toggle: (c, on) => {
+        const want = on === undefined ? !this.classList._set.has(c) : Boolean(on);
+        if (want) this.classList._set.add(c);
+        else this.classList._set.delete(c);
+        this._syncClassName();
+        return want;
+      },
       contains: (c) => this.classList._set.has(c),
     };
+    this.classList._set = new Set();
+    this._className = "";
+  }
+  // --- className and classList must never disagree: the client sets one
+  // --- (className = "hidden") and tests the other (classList.toggle("hidden")),
+  // --- so a stub that kept them in separate boxes would let a real desync pass
+  // --- unnoticed -- including a popover that is "open" by one measure and
+  // --- "hidden" by the other.
+  get className() { return this._className; }
+  set className(next) {
+    this._className = String(next);
+    this.classList._set = new Set(this._className.split(/\s+/).filter(Boolean));
+  }
+  _syncClassName() {
+    this._className = [...this.classList._set].join(" ");
   }
   get childElementCount() { return this.children.length; }
   get firstChild() { return this.children[0] || null; }
+  get parentElement() { return this.parent; }
   append(...nodes) {
     for (const node of nodes) {
       if (node instanceof Element) {
         const at = this.children.indexOf(node);
         if (at !== -1) this.children.splice(at, 1);
+        node.parent = this;
       }
       this.children.push(node);
     }
@@ -51,12 +84,66 @@ class Element {
   removeChild(node) {
     const at = this.children.indexOf(node);
     if (at !== -1) this.children.splice(at, 1);
+    if (node instanceof Element) node.parent = null;
     return node;
   }
   remove() { if (this.parent) this.parent.removeChild(this); }
-  replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
-  setAttribute(name, value) { (this.attrs = this.attrs || {})[name] = String(value); }
-  getAttribute(name) { return (this.attrs || {})[name] ?? null; }
+  replaceChildren(...nodes) {
+    for (const child of this.children) {
+      if (child instanceof Element) child.parent = null;
+    }
+    this.children = [];
+    this.append(...nodes);
+  }
+  // --- focus bookkeeping: the client measures "does a repaint steal the
+  // --- operator's cursor?" with document.activeElement !== node, so the stub has
+  // --- to move that pointer the way a browser does.
+  focus() {
+    if (document.activeElement && document.activeElement !== this) {
+      document.activeElement.focused = false;
+    }
+    this.focused = true;
+    document.activeElement = this;
+  }
+  blur() {
+    this.focused = false;
+    if (document.activeElement === this) document.activeElement = null;
+  }
+  scrollIntoView() {}
+  setAttribute(name, value) {
+    const text = String(value);
+    this.attrs[name] = text;
+    if (name === "id") this.id = text;
+    if (name === "class") this.className = text;
+  }
+  getAttribute(name) { return this.attrs[name] ?? null; }
+  hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name); }
+  removeAttribute(name) { delete this.attrs[name]; }
+  // --- does this node contain `other`? The click-outside listener asks exactly
+  // --- this, and a stub that answered wrongly would dismiss the popover on the
+  // --- very click that opened it.
+  contains(other) {
+    let node = other;
+    while (node) {
+      if (node === this) return true;
+      node = node.parent || null;
+    }
+    return false;
+  }
+  // --- nearest self-or-ancestor matching `[data-x]`. Used for delegated row
+  // --- clicks, so it has to walk up rather than just filter children.
+  closest(selector) {
+    const attr = selector.match(/^\[data-([\w-]+)\]$/);
+    if (!attr) return this._match(selector) ? this : null;
+    let node = this;
+    while (node) {
+      if (node instanceof Element && String(node.dataset[attr[1]] ?? "") !== "") {
+        return node;
+      }
+      node = node.parent || null;
+    }
+    return null;
+  }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   _match(selector) {
     const attr = selector.match(/^(\w+)?\[data-([\w-]+)="?([^"\]]*)"?\]$/);
@@ -114,13 +201,18 @@ const IDS = ["banner", "statusPill", "ageLabel", "latencyLabel", "lastGoodLabel"
   "orderVerdict", "orderPlaceBtn", "orderModifyBtn", "orderCancelBtn", "orderMsg",
   // --- institutional ticket + working orders (v1.4.0)
   "orderRiskUnit", "orderRiskLabel", "orderSideHint", "orderTrailStart",
+  "orderTrailPrice",
   "orderBasketCeiling", "orderBasketCeilingHint", "orderJournal", "journalHint",
-  "orderJournalTag", "orderSymbolFilter", "orderSymbolHint",
+  "orderJournalTag", "orderSymbolHint",
   "stageRows", "stageHint",
   "pendingPanel", "pendingBadge", "pendingSummary", "pendingRows", "noPending",
   "pendingTableWrap",
   // --- symbol picker + unmanaged panel (v1.3.0)
-  "symbolPicker", "symbolSelect", "orderSymbol", "symbolOptions",
+  "symbolPicker", "symbolSelect", "orderSymbol",
+  // --- ticket symbol combobox (v1.6.1)
+  "symbolCombo", "symbolTrigger", "symbolTriggerLabel", "symbolTriggerBadge",
+  "symbolPopover", "symbolSearch", "symbolList", "symbolListFoot",
+  "orderQuote", "orderQuoteSpread",
   "unmanagedPanel", "unmanagedBadge", "unmanagedSummary", "unmanagedBody",
   "unmanagedTableWrap", "unmanagedRows",
   // --- ticker strip + KPI footnotes (v1.6.0)
@@ -143,6 +235,68 @@ for (const id of IDS) {
   registry.set(id, el);
 }
 
+// --- Wire up the symbol combobox's ancestry for real. The client's
+// --- click-outside handler asks whether the event target is inside
+// --- #symbolCombo, so a stub with flat, parentless nodes would dismiss the
+// --- popover on the very click that opened it -- and every combobox assertion
+// --- after that would be testing a closed menu.
+registry.get("symbolCombo").append(
+  registry.get("symbolTrigger"),
+  registry.get("symbolPopover")
+);
+registry.get("symbolTrigger").append(
+  registry.get("symbolTriggerLabel"),
+  registry.get("symbolTriggerBadge")
+);
+registry.get("symbolPopover").append(
+  registry.get("symbolSearch"),
+  registry.get("symbolList"),
+  registry.get("symbolListFoot")
+);
+
+// --- the classes index.html ships with. The popover starts hidden and the badge
+// --- starts suppressed, and the client is expected to be the only thing that
+// --- changes either: a stub that began with everything visible would never catch
+// --- a popover that opens but cannot close.
+for (const [id, cls] of Object.entries({
+  symbolPopover: "combo-popover hidden",
+  symbolTriggerLabel: "truncate",
+  symbolTriggerBadge: "tag hidden",
+  symbolSearch: "combo-search",
+  symbolList: "combo-list",
+  symbolListFoot: "combo-foot",
+  symbolCombo: "relative mt-1",
+})) {
+  registry.get(id).className = cls;
+}
+
+// --- a real dispatch: walks from the target to the document running every
+// --- listener registered on the way, which is how bubbled `click` reaches the
+// --- delegated document handler and how `input` reaches the search box's own.
+function fire(target, type, props) {
+  const event = {
+    type,
+    target,
+    defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() { this.stopped = true; },
+    ...(props || {}),
+  };
+  let node = target;
+  while (node) {
+    const handlers = node.listeners && node.listeners[type];
+    if (handlers) for (const handler of handlers) handler(event);
+    if (event.stopped) break;
+    node = node === document ? null : node.parent || document;
+    if (node === document) {
+      const top = document.listeners[type] || [];
+      for (const handler of top) handler(event);
+      break;
+    }
+  }
+  return event;
+}
+
 const calls = [];
 const snapshot = {
   status: "live",
@@ -152,6 +306,9 @@ const snapshot = {
   snapshot: {
     symbol: "GBPUSD", seq: 7, ea_version: "1.0.4", ready: true, digits: 5,
     currency: "USD", balance: 10000, equity: 10120.5,
+    // --- the EA's last tick. Digits is 5 here, so ask - bid = 0.00012 is
+    // --- 12 points; a "pip" reading would call it 1.2.
+    bid: 1.26010, ask: 1.26022,
     basket: { valid: true, mixed: false, direction: "BUY", legs: 1, lot: 0.3,
       avg_entry: 1.26, open_pl: 120.5, risk_money: 45, risk_pct: 0.4447,
       best: 1.269, ladder: "1.50R 1.26450 | 2.00R 1.26600" },
@@ -193,15 +350,32 @@ function fetchStub(url) {
       symbols: ["GBPUSD"],
     };
   } else if (url.includes("/api/symbols")) {
+    // --- one chart-only name, one name that is both, and one broker-only name.
+    // --- The classes are deliberately mixed so the grouping and the badge map
+    // --- are exercised rather than assumed.
     body = {
       symbols: [
-        { symbol: "GBPUSD", label: "GBPUSD", sources: ["chart"] },
-        { symbol: "EURUSD.a", label: "EURUSD", sources: ["chart", "broker"] },
-        { symbol: "AUDUSD", label: "AUDUSD", sources: ["broker"] },
+        { symbol: "GBPUSD", label: "GBPUSD", sources: ["chart"], asset_class: "forex" },
+        {
+          symbol: "EURUSD.a",
+          label: "EURUSD",
+          sources: ["chart", "broker"],
+          asset_class: "forex",
+        },
+        { symbol: "AUDUSD", label: "AUDUSD", sources: ["broker"], asset_class: "forex" },
+        {
+          symbol: "XAUUSD",
+          label: "XAUUSD",
+          sources: ["broker"],
+          asset_class: "metals",
+        },
+        { symbol: "US30.cash", label: "US30", sources: ["broker"], asset_class: "indices" },
       ],
+      asset_classes: ["forex", "metals", "indices", "energy", "commodities", "crypto",
+        "stocks", "other"],
       charts: ["GBPUSD", "EURUSD.a"],
       broker_available: true,
-      broker_count: 3,
+      broker_count: 5,
     };
   } else if (url.includes("/api/unmanaged")) {
     body = {
@@ -392,19 +566,239 @@ setTimeout(() => {
     problems.push("the picker's value is not the exact broker name");
   }
 
-  // --- the datalist must actually be populated, not left as a text node
-  const suggestions = registry.get("symbolOptions").children;
-  if (suggestions.length !== 3) {
-    problems.push(`the symbol datalist has ${suggestions.length} options, expected 3`);
+  // --- the ticket's symbol is a real combobox (v1.6.1). These assertions are
+  // --- about behaviour, not markup: they open it, type, arrow and press Enter,
+  // --- then check what would actually be posted.
+  const trigger = registry.get("symbolTrigger");
+  const popover = registry.get("symbolPopover");
+  const search = registry.get("symbolSearch");
+  const list = registry.get("symbolList");
+  const triggerLabel = registry.get("symbolTriggerLabel");
+
+  if (!popover.className.includes("hidden")) {
+    problems.push("the symbol popover was open before anything clicked it");
   }
-  if (suggestions.some((node) => node.tagName !== "OPTION")) {
-    problems.push("the datalist contains something other than <option> elements");
-  }
-  // --- and the order field starts on the chart being shown
+  // --- the order field starts on the chart being shown
   if (registry.get("orderSymbol").value !== "GBPUSD") {
     problems.push(
       `the order symbol defaulted to ${JSON.stringify(registry.get("orderSymbol").value)}`
     );
+  }
+  if (triggerLabel.textContent !== "GBPUSD") {
+    problems.push(
+      `the trigger did not show the chosen symbol (got ${JSON.stringify(
+        triggerLabel.textContent
+      )})`
+    );
+  }
+
+  fire(trigger, "click");
+  if (popover.className.includes("hidden")) {
+    problems.push("clicking the trigger did not open the symbol popover");
+  }
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    problems.push("the trigger did not report aria-expanded=true while open");
+  }
+  if (document.activeElement !== search) {
+    problems.push("opening the popover did not move focus into the search box");
+  }
+  // --- 5 instruments over 3 classes: 3 headings + 5 options
+  if (list.children.length !== 8) {
+    problems.push(
+      `the open list rendered ${list.children.length} nodes, expected 8 (5 options + 3 headings)`
+    );
+  }
+  const headings = list.children.filter((n) => n.className === "combo-group");
+  if (headings.length !== 3) {
+    problems.push(`the list has ${headings.length} class headings, expected 3`);
+  }
+  if (headings.some((n) => n.getAttribute("role") !== "presentation")) {
+    problems.push("a class heading was exposed as a selectable option");
+  }
+  const options = list.children.filter((n) => n.getAttribute("role") === "option");
+  if (options.length !== 5) {
+    problems.push(`the list offered ${options.length} options, expected 5`);
+  }
+  // --- the badge is a real chip per asset class, and US30.cash must carry the
+  // --- index badge rather than the equity one
+  const us30 = options.find((n) => n.dataset.symbol === "US30.cash");
+  if (!us30 || us30.children[1].textContent !== "IDX") {
+    problems.push("US30.cash did not carry the index badge");
+  }
+  const eur = options.find((n) => n.dataset.symbol === "EURUSD.a");
+  if (!eur || eur.children[0].textContent !== "EURUSD") {
+    problems.push("a broker suffix bled into the displayed label");
+  }
+  if (search.getAttribute("aria-activedescendant") !== "symbolOption1") {
+    problems.push(
+      `aria-activedescendant was ${JSON.stringify(
+        search.getAttribute("aria-activedescendant")
+      )}, expected symbolOption1 (the first option, not the heading)`
+    );
+  }
+
+  // --- typing filters on the canonical name AND the class heading. The raw row
+  // --- for the typed text is appended last on purpose, so the first option --
+  // --- what Enter takes -- is still a real instrument.
+  search.value = "metal";
+  fire(search, "input");
+  const metalsOnly = list.children.filter((n) => n.getAttribute("role") === "option");
+  const firstMetal = metalsOnly[0];
+  if (!firstMetal || firstMetal.dataset.symbol !== "XAUUSD") {
+    problems.push(
+      `typing "metal" offered ${JSON.stringify(
+        firstMetal && firstMetal.dataset.symbol
+      )} first, expected XAUUSD`
+    );
+  }
+  if (!firstMetal) {
+    // --- a client that never painted the list has already been reported above;
+    // --- every later assertion about a row would throw, and a harness that dies
+    // --- on a TypeError cannot say what was wrong.
+    problems.push("the list painted no rows, so the keyboard could not be checked");
+  } else if (search.getAttribute("aria-activedescendant") !== firstMetal.id) {
+    problems.push("the keyboard cursor did not land on the first real match");
+  }
+  if (registry.get("orderSymbol").value === "metal" && !firstMetal) {
+    problems.push("the filter committed the raw query instead of waiting for a choice");
+  }
+  if (!String(registry.get("symbolListFoot").textContent).includes("instruments match")) {
+    problems.push(
+      `the footer did not disclose a narrowed list (got ${JSON.stringify(
+        registry.get("symbolListFoot").textContent
+      )})`
+    );
+  }
+  // --- and the escape hatch must be REACHABLE, not merely present: arrowing to
+  // --- the bottom of a filtered list is how an operator sends a name the bridge
+  // --- has never heard of even while other rows match. A raw row that exists
+  // --- but cannot be focused is a feature that only looks implemented.
+  fire(search, "keydown", { key: "End" });
+  const rawLast = list.children.filter((n) => n.getAttribute("role") === "option").pop();
+  if (!rawLast || rawLast.dataset.symbol !== "metal") {
+    problems.push("End did not reach the raw row for the typed text");
+  }
+  fire(search, "keydown", { key: "Enter" });
+  if (registry.get("orderSymbol").value !== "metal") {
+    problems.push(
+      `End+Enter sent ${JSON.stringify(
+        registry.get("orderSymbol").value
+      )}, expected the typed text metal`
+    );
+  }
+
+
+
+  // --- a name the bridge does not know is still offered verbatim, and Enter
+  // --- sends exactly that: the escape hatch this picker exists to keep
+  search.value = "GBPJPY.pro";
+  fire(search, "input");
+  const rawOptions = list.children.filter((n) => n.getAttribute("role") === "option");
+  const rawRow = rawOptions.find((n) => n.dataset.symbol === "GBPJPY.pro");
+  if (!rawRow) {
+    problems.push("an unknown typed name was not offered as a selectable row");
+  }
+  fire(search, "keydown", { key: "ArrowDown" });
+  fire(search, "keydown", { key: "Enter" });
+  if (registry.get("orderSymbol").value !== "GBPJPY.pro") {
+    problems.push(
+      `Enter sent ${JSON.stringify(registry.get("orderSymbol").value)}, expected GBPJPY.pro`
+    );
+  }
+  if (!String(registry.get("orderSymbolHint").textContent).includes("verbatim")) {
+    problems.push("the hint did not say an unknown name is sent verbatim");
+  }
+  if (!popover.className.includes("hidden")) {
+    problems.push("choosing a row did not close the popover");
+  }
+  if (trigger.getAttribute("aria-expanded") !== "false") {
+    problems.push("the trigger still reported aria-expanded=true after closing");
+  }
+
+  // --- Escape must abort, not commit: re-open, type, then run away
+  fire(trigger, "click");
+  search.value = "xau";
+  fire(search, "input");
+  fire(search, "keydown", { key: "Escape" });
+  if (registry.get("orderSymbol").value !== "GBPJPY.pro") {
+    problems.push("Escape changed the chosen symbol");
+  }
+  if (document.activeElement !== trigger) {
+    problems.push("Escape did not return focus to the trigger");
+  }
+
+  // --- choosing from the catalogue must send the EXACT name, never the label.
+  // --- EURUSD.a's label is "EURUSD"; posting the label would address a symbol
+  // --- the broker does not list.
+  fire(trigger, "click");
+  search.value = "eurusd.a";
+  fire(search, "input");
+  fire(search, "keydown", { key: "Enter" });
+  if (registry.get("orderSymbol").value !== "EURUSD.a") {
+    problems.push(
+      `an exact-name pick sent ${JSON.stringify(
+        registry.get("orderSymbol").value
+      )}, which is not the broker name`
+    );
+  }
+  if (triggerLabel.textContent !== "EURUSD") {
+    problems.push(
+      `the trigger showed ${JSON.stringify(
+        triggerLabel.textContent
+      )}, expected the label EURUSD`
+    );
+  }
+
+  // --- the quote: bid/ask only for the symbol the bridge is actually reading.
+  // --- Naming anything else must say so rather than borrow a neighbouring tick.
+  const quoteText = String(registry.get("orderQuote").textContent);
+  if (!quoteText.includes("no quote for EURUSD.a")) {
+    problems.push(
+      `the quote borrowed another symbol's price (got ${JSON.stringify(quoteText)})`
+    );
+  }
+  fire(trigger, "click");
+  const gbpRow = list.children.find(
+    (n) => n.getAttribute("role") === "option" && n.dataset.symbol === "GBPUSD"
+  );
+  // --- guarded, because a client that never painted the list is exactly what
+  // --- test_harness_can_fail feeds in: the harness has to report that as a
+  // --- problem, not die on a TypeError before it can say anything.
+  if (!gbpRow) {
+    problems.push("the list never rendered a row for GBPUSD");
+  } else {
+    fire(gbpRow.children[0], "click");
+  }
+  if (registry.get("orderSymbol").value !== "GBPUSD") {
+    problems.push("clicking a row did not choose its symbol");
+  }
+  const ownQuote = String(registry.get("orderQuote").textContent);
+  if (!ownQuote.includes("1.26010") || !ownQuote.includes("1.26022")) {
+    problems.push(
+      `the quote did not show the published bid/ask (got ${JSON.stringify(ownQuote)})`
+    );
+  }
+  const spreadText = String(registry.get("orderQuoteSpread").textContent);
+  if (!spreadText.includes("12") || !spreadText.includes("points")) {
+    problems.push(`the spread read ${JSON.stringify(spreadText)}, expected 12 points`);
+  }
+  if (/pip/i.test(spreadText)) {
+    problems.push(
+      "the spread was labelled in pips, which is wrong on 3-digit JPY and cash indices"
+    );
+  }
+
+  // --- the price boxes are stepped to the instrument's digits, so a 5-digit
+  // --- pair takes 0.00001 increments -- and no price is ever written into them
+  if (registry.get("orderBlockTop").step !== "1e-5") {
+    problems.push(
+      `the block-top step is ${JSON.stringify(
+        registry.get("orderBlockTop").step
+      )}, expected 1e-5 from digits=5`
+    );
+  }
+  if (registry.get("orderBlockTop").value !== "") {
+    problems.push("the quote repaint wrote a price into the block top box");
   }
 
   // --- unmanaged panel: a confirmed orphan must be rendered, and the badge
@@ -497,6 +891,21 @@ setTimeout(() => {
   console.log("  latency     : " + registry.get("latencyLabel").textContent);
   console.log("  lastGood    : " + registry.get("lastGoodLabel").textContent);
   console.log("  eaVersion   : " + registry.get("eaVersion").textContent);
+  // --- the client's own log tail is the only place a thrown error inside a
+  // --- promise surfaces, so print it rather than guess at a blank panel
+  function flatText(node) {
+    if (node === null || node === undefined) return "";
+    if (typeof node === "string") return node;
+    if (node.nodeType === 3) return node.text || "";
+    let text = node.textContent || "";
+    for (const child of node.children || []) text += flatText(child);
+    return text;
+  }
+  const logLines = registry.get("logBox").children;
+  if (logLines.length) {
+    console.log("log tail    :");
+    for (const line of logLines) console.log("  " + flatText(line));
+  }
   console.log("  timers      : " + JSON.stringify(timers));
   console.log("");
 

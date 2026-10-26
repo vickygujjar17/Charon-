@@ -267,21 +267,59 @@
       </div>
 
       <div class="grid gap-2.5 px-3 py-2.5 md:grid-cols-4">
-        <label class="block md:col-span-2">
-          <span class="label">Symbol</span>
-          <!-- The picker offers the known names, grouped by asset class, but
-               does not restrict the field: a broker can list an instrument the
-               bridge cannot see, and refusing a typo-free name would be worse
-               than accepting it. Whatever is selected or typed here is sent
-               verbatim -- it is the exact broker name, never the label. -->
-          <input id="orderSymbol" list="symbolOptions" placeholder="search or pick an instrument"
-                 class="ticket-field mt-1" autocomplete="off" spellcheck="false" />
-          <datalist id="symbolOptions"></datalist>
-          <input id="orderSymbolFilter" placeholder="filter by name or class"
-                 class="ticket-field mt-1 text-[11px]" autocomplete="off"
-                 spellcheck="false" />
+        <div class="block md:col-span-2">
+          <label class="label" for="symbolTrigger" id="symbolFieldLabel">Symbol</label>
+          <!-- The combobox offers the known names, grouped by asset class, but
+               does not restrict the selection: a broker can list an instrument
+               the bridge cannot see, and refusing a correct name would be
+               worse than accepting it. So the search box doubles as free text
+               and offers whatever was typed verbatim when nothing matches.
+
+               The value that is SENT lives in #orderSymbol, which is the exact
+               broker name. The label shown here is never sent. -->
+          <!-- Which element owns role="combobox", and why it is the input:
+               only one element may be the combobox for a given listbox. The
+               collapsed control is a button, so the role belongs to the
+               element that actually accepts typing -- #symbolSearch -- and it
+               is only exposed while the popover is open. The button keeps
+               aria-haspopup/aria-expanded, which is what a collapsed picker
+               needs to announce. -->
+          <div id="symbolCombo" class="relative mt-1">
+            <button type="button" id="symbolTrigger" class="combo-trigger"
+                    aria-haspopup="listbox" aria-expanded="false"
+                    aria-controls="symbolList"
+                    aria-labelledby="symbolFieldLabel symbolTriggerLabel">
+              <span class="flex min-w-0 items-center gap-2">
+                <span id="symbolTriggerLabel" class="truncate">no symbol</span>
+                <span id="symbolTriggerBadge" class="tag hidden">—</span>
+              </span>
+              <svg class="combo-caret" viewBox="0 0 12 12" fill="none"
+                   stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <path d="M2.5 4.5 6 8l3.5-3.5" stroke-linecap="round"
+                      stroke-linejoin="round" />
+              </svg>
+            </button>
+
+            <div id="symbolPopover" class="combo-popover hidden">
+              <input id="symbolSearch" class="combo-search" type="text"
+                     role="combobox" aria-expanded="false" aria-autocomplete="list"
+                     aria-controls="symbolList" autocomplete="off" spellcheck="false"
+                     placeholder="filter by name or class" />
+              <ul id="symbolList" class="combo-list" role="listbox"
+                  aria-label="Instruments"></ul>
+              <div id="symbolListFoot" class="combo-foot"></div>
+            </div>
+          </div>
+          <input type="hidden" id="orderSymbol" />
+          <!-- The quote for the symbol this ticket names. Only the chart the
+               bridge is reading publishes one, so naming anything else says
+               so rather than borrowing a neighbouring number. -->
+          <div class="mt-1 flex items-baseline justify-between gap-2 font-mono text-num-sm">
+            <span id="orderQuote" class="truncate text-tertiary">no symbol chosen</span>
+            <span id="orderQuoteSpread" class="shrink-0 text-tertiary"></span>
+          </div>
           <span id="orderSymbolHint" class="mt-1 block font-mono text-num-sm text-tertiary"></span>
-        </label>
+        </div>
 
         <label class="block">
           <span class="label">Direction</span>

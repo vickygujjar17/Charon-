@@ -221,6 +221,65 @@
     @apply h-auto py-1;
   }
 
+  /* --- symbol combobox --------------------------------------------- */
+  /* --- The trigger is a field-shaped button, so it reads as the input it
+     --- replaces rather than as a second control beside one. */
+  .combo-trigger {
+    @apply flex h-7 w-full items-center justify-between gap-2 rounded-sm
+           border border-borderline bg-surface-lowest px-2 text-left
+           font-mono text-body-md text-primary
+           hover:border-borderline-strong focus:border-brand focus:outline-none;
+  }
+  .combo-trigger[aria-expanded="true"] {
+    @apply border-brand;
+  }
+  .combo-caret {
+    @apply h-3 w-3 shrink-0 text-tertiary transition-transform;
+  }
+  .combo-trigger[aria-expanded="true"] .combo-caret {
+    @apply rotate-180;
+  }
+  /* --- The popover floats over the ticket, never pushing the grid down:
+     --- a panel that reflows on open moves the button out from under the
+     --- cursor that just clicked it. */
+  .combo-popover {
+    @apply absolute left-0 right-0 z-30 mt-1 flex max-h-64 flex-col
+           overflow-hidden rounded-sm border border-borderline-strong
+           bg-surface-container shadow-lg shadow-black/40;
+  }
+  .combo-search {
+    @apply h-7 w-full shrink-0 border-b border-borderline
+           bg-surface-lowest px-2 font-mono text-body-md text-primary
+           placeholder:text-tertiary focus:outline-none;
+  }
+  .combo-list {
+    @apply min-h-0 flex-1 overflow-y-auto py-0.5;
+  }
+  /* --- a group heading, not a separator: it labels the run of rows below
+     --- it, and it is never focusable or selectable. */
+  .combo-group {
+    @apply px-2 pb-0.5 pt-1.5 font-display text-caps uppercase
+           tracking-[0.08em] text-tertiary;
+  }
+  .combo-option {
+    @apply flex cursor-pointer items-center justify-between gap-2 px-2 py-1
+           font-mono text-body-md text-secondary;
+  }
+  /* --- keyed and hovered are the same affordance on purpose: the active
+     --- row must look identical whether the keyboard or the mouse put it
+     --- there, or the operator cannot tell what Enter will choose. */
+  .combo-option[data-active="true"],
+  .combo-option:hover {
+    @apply bg-surface-high text-primary;
+  }
+  .combo-option[aria-selected="true"] {
+    @apply text-brand;
+  }
+  .combo-foot {
+    @apply shrink-0 border-t border-borderline bg-surface-low px-2 py-1
+           font-mono text-num-sm text-tertiary;
+  }
+
   /* --- tables ------------------------------------------------------ */
   /* --- Apex rows are 24px and the header is a tracked caps strip on its
      --- own surface, one step above the basin. */

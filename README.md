@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.6.0**
+Current release: **v1.6.1**
 
 ---
 
@@ -499,6 +499,29 @@ EA is not publishing. `CHARON_SYMBOL_PREFIX` / `CHARON_SYMBOL_SUFFIX` (see
 `POST /api/order` pre-flight refuses (`422`) a ticket for a symbol with no live snapshot.
 Sending one would queue a file that no chart could ever drain — the operator would see
 "queued" and believe something was about to happen.
+
+**The ticket's symbol field is a searchable combobox (v1.6.1).** The collapsed control shows
+the display label; the value it posts lives in a hidden `#orderSymbol` and is always the exact
+broker name. Typing filters on the broker name, the label and the asset class, so `eur`, the
+suffix `eurusd.a` and the heading `forex` all find the same instrument. Rows are grouped under
+their class with a short badge (`FX`, `MET`, `IDX`, …), and the list is capped at 50 painted
+rows with an honest footer — a full MT5 install lists thousands, and a list nobody can scan is
+not more helpful than a filtered one.
+
+The picker does **not** restrict the choice. When nothing in the catalogue matches, whatever was
+typed is offered verbatim as its own row and sent exactly as typed: a broker can list an
+instrument the bridge cannot enumerate, and refusing a correct name would be worse than
+accepting it. The only thing the client will not do is invent a name.
+
+**The spread is labelled in points, never pips.** Points are defined by the instrument's own
+`digits`, so `ask - bid` scaled by `10^digits` is true on a 5-digit FX pair, a 3-digit JPY pair
+and a cash index alike. A "pip" is 10 points on the first, 1 point on the second and undefined
+on the third, so it is the wrong unit on two of the three.
+
+The quote beside the ticket is the one the bridge actually published, and it belongs to the
+symbol the bridge is reading. Naming a different instrument says there is no quote for it rather
+than showing a neighbouring price, and an EA that never published a tick (schema 2/3) says so
+instead of printing a zero.
 
 ### Upgrading to schema 4 (v1.5.0)
 

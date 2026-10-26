@@ -255,6 +255,27 @@ function render(payload) {
   $("symbolLabel").textContent = snap.symbol;
   $("eaVersion").textContent = snap.ea_version ? "EA " + snap.ea_version : "";
 
+  // --- the tick the EA published, kept as the one sanctioned source for the
+  // --- quote beside the ticket. It belongs to snap.symbol only: the bridge
+  // --- polls the chart it is reading, so no other instrument has a price here.
+  quote = {
+    symbol: snap.symbol || null,
+    bid: typeof snap.bid === "number" ? snap.bid : null,
+    ask: typeof snap.ask === "number" ? snap.ask : null,
+    digits: digits,
+  };
+  paintOrderQuote();
+
+  // --- the block and entry boxes accept a price, so their step has to match the
+  // --- instrument's digits: a 3-digit JPY pair stepped at 0.00001 would reject
+  // --- every value the operator types. Only the step changes -- no price is
+  // --- ever written into these boxes.
+  const step = digits > 0 ? "1e-" + digits : "0.00001";
+  $("orderEntry").step = step;
+  $("orderBlockTop").step = step;
+  $("orderBlockBottom").step = step;
+  $("orderTrailPrice").step = step;
+
 
   $("equity").textContent = money(snap.equity, snap.currency);
   $("balance").textContent = money(snap.balance, snap.currency);
@@ -1111,23 +1132,15 @@ function wireOrderPanel() {
     $("orderSideHint").textContent = event.target.value === "BUY" ? "long" : "short";
   });
 
-  // --- the symbol field's own hint tracks what is typed, and the filter box
-  // --- narrows the browser's suggestion list without ever touching the value
-  // --- that will be sent.
-  $("orderSymbol").addEventListener("input", paintSymbolHint);
-  $("orderSymbolFilter").addEventListener("input", () => {
-    const needle = $("orderSymbolFilter").value.trim().toLowerCase();
-    if (needle === "") {
-      paintSymbolOptions(symbolAll);
-      return;
-    }
-    const filtered = symbolAll.filter((entry) => {
-      const haystack =
-        (entry.symbol || "") + " " + (entry.label || "") + " " + assetLabel(entry.asset_class);
-      return haystack.toLowerCase().indexOf(needle) !== -1;
-    });
-    paintSymbolOptions(filtered);
-  });
+  // --- the symbol picker owns its own event surface: the trigger opens the
+  // --- popover, the search box filters it, and Enter commits the exact broker
+  // --- name into the hidden #orderSymbol. Nothing here touches the value, and
+  // --- nothing else may write it, so what is sent cannot drift from the label.
+  wireSymbolCombo();
+
+  // --- the hint under the symbol field has no input of its own to listen to any
+  // --- more: the hidden field is written only by chooseSymbol(), which repaints
+  // --- the trigger, the hint and the quote together.
 
   // --- a stage's trigger means something different per kind, so the
   // --- placeholder says which. Nothing is converted: the operator states a
@@ -1300,29 +1313,36 @@ function wireCommands() {
   });
 
   // --- choosing a chart re-points the poll, and with it every panel. The
-  // --- order field follows only while it is empty: once the operator has
-  // --- typed a different symbol, this must not overwrite it.
+  // --- ticket's symbol follows only while none is chosen: once the operator has
+  // --- named another instrument, this must not overwrite it. It goes through
+  // --- chooseSymbol so the trigger and the quote are repainted with it.
   $("symbolSelect").addEventListener("change", (event) => {
     activeSymbol = event.target.value || null;
     if (!$("orderSymbol").value.trim()) {
-      $("orderSymbol").value = activeSymbol || "";
+      chooseSymbol(activeSymbol, false);
     }
     refresh();
   });
 }
 
 //+------------------------------------------------------------------+
-//| Symbol picker                                                    |
+//| Symbol combobox                                                  |
 //|                                                                  |
 //|  Two independent things are going on and conflating them is how   |
 //|  orders reach the wrong chart:                                    |
 //|                                                                   |
-//|  * which chart's snapshot is on screen  -- the picker;            |
-//|  * which symbol an order ticket names   -- its own field.          |
+//|  * which chart's snapshot is on screen  -- #symbolSelect;          |
+//|  * which symbol an order ticket names   -- #orderSymbol.           |
 //|                                                                   |
-//|  The ticket field defaults to the chart on screen but stays       |
-//|  editable, so a trader can queue for another chart without losing  |
-//|  the readout they are watching.                                    |
+//|  #orderSymbol is a hidden input holding the EXACT broker name. The |
+//|  label painted in the trigger is never sent: it is a display form  |
+//|  the bridge canonicalised, and a broker listing ``EURUSD.a`` will  |
+//|  reject ``EURUSD``.                                               |
+//|                                                                   |
+//|  The picker does not restrict the choice. A broker can list an     |
+//|  instrument the bridge cannot enumerate, and refusing a correct    |
+//|  name would be worse than accepting it -- so whatever was typed is |
+//|  offered verbatim as its own row and sent exactly as typed.        |
 //+------------------------------------------------------------------+
 // --- the classifier's headings, in the order the bridge states. A class the
 // --- bridge did not name still renders under its raw key rather than being
@@ -1339,71 +1359,498 @@ const ASSET_LABELS = {
   other: "Other",
 };
 
+// --- the chip beside each row. A lookup table, not a built string, because
+// --- the Tailwind build scans this file as text: a computed class would emit
+// --- nothing and the badge would render unstyled. Keys mirror ASSET_LABELS.
+const ASSET_BADGE = {
+  forex: "FX",
+  metals: "MET",
+  indices: "IDX",
+  energy: "ENR",
+  commodities: "CMD",
+  crypto: "CRY",
+  stocks: "STK",
+  other: "OTH",
+};
+
+// --- how many catalogue rows to paint before asking the operator to narrow.
+// --- A full MT5 install lists thousands; painting them all costs a visible
+// --- stall on every keystroke, and a list nobody can scan is no more helpful
+// --- than a filtered one.
+const COMBO_MAX_ROWS = 50;
+
 function assetLabel(key) {
   return ASSET_LABELS[key] || key || "Other";
 }
 
-// --- the picker offers the known names grouped by asset class. The grouping
-// --- is a heading, never a filter: every entry is offered regardless of what
-// --- the bridge thinks it is, because a broker names things the textbook does
-// --- not.
-// ---
-// --- Two lists on purpose: ``symbolAll`` is everything the bridge reported and
-// --- is what the filter searches; ``symbolCatalogue`` is what is currently on
-// --- offer. Collapsing them into one would make a filtered paint overwrite the
-// --- source, so clearing the filter could never restore the full list.
-let symbolAll = [];
-let symbolCatalogue = [];
-
-function paintSymbolOptions(catalogue) {
-  // --- a datalist's children are <option> elements, so they are built with
-  // --- createElement rather than innerHTML: the latter would insert text,
-  // --- and the browser would have nothing to offer as a suggestion.
-  const list = $("symbolOptions");
-  const options = [];
-  for (const entry of catalogue) {
-    const option = document.createElement("option");
-    option.value = entry.symbol;                  // what gets sent
-    // --- the class rides along in the label so the browser's own suggestion
-    // --- list reads as a grouped menu even though a datalist cannot nest
-    option.label = (entry.label || entry.symbol) + " \u00b7 " + assetLabel(entry.asset_class);
-    options.push(option);
-  }
-  list.replaceChildren(...options);
-  symbolCatalogue = catalogue;
-  paintSymbolHint();
+function symbolBadge(key) {
+  if (ASSET_BADGE[key]) return ASSET_BADGE[key];
+  const raw = String(key || "other").replace(/[^A-Za-z]/g, "");
+  return (raw.slice(0, 3) || "OTH").toUpperCase();
 }
 
-// --- the hint under the field names the exact broker symbol that will be
-// --- sent, and what the bridge thinks it is. It never rewrites the field: a
-// --- typed name is authoritative.
+// --- ``symbolAll`` is everything the bridge reported, kept whole so every
+// --- paint starts from the full list. ``symbolFiltered`` is the row model of
+// --- the list as it stands (headings included), so the active index can
+// --- address it directly without re-deriving the layout on every arrow press.
+let symbolAll = [];
+let symbolClasses = [];
+let symbolFiltered = [];
+let symbolActive = -1;
+let symbolOpen = false;
+
+// --- What the bridge last published as a quote, and for which symbol. Only the
+// --- chart being polled publishes a tick, so this is the one honest source for
+// --- a bid/ask beside the ticket.
+let quote = { symbol: null, bid: null, ask: null, digits: 5 };
+
+function symbolEntryFor(name) {
+  if (!name) return null;
+  const lower = String(name).toLowerCase();
+  for (const entry of symbolAll) {
+    if (String(entry.symbol || "").toLowerCase() === lower) return entry;
+  }
+  return null;
+}
+
+// --- the searchable text of an entry: the broker name, the display label and
+// --- the class heading, so "eur", "eurusd.a" and "forex" all find it.
+function symbolMatches(needle) {
+  if (!needle) return symbolAll.slice();
+  const lower = String(needle).toLowerCase();
+  return symbolAll.filter((entry) => {
+    const haystack =
+      (entry.symbol || "") + " " + (entry.label || "") + " " + assetLabel(entry.asset_class);
+    return haystack.toLowerCase().indexOf(lower) !== -1;
+  });
+}
+
+// --- Build the row model for the current query.
+// ---
+// --- Rows are one flat list of headings and options rather than nested groups,
+// --- because a flat list has an index the keyboard can walk without re-deriving
+// --- the layout on every arrow press.
+function symbolRows() {
+  const matched = symbolMatches($("symbolSearch").value.trim());
+  const order = symbolClasses.slice();
+  for (const entry of matched) {
+    const key = entry.asset_class || "other";
+    if (order.indexOf(key) === -1) order.push(key);
+  }
+
+  const chosen = $("orderSymbol").value.trim().toLowerCase();
+  const rows = [];
+  let budget = COMBO_MAX_ROWS;
+  let shown = 0;
+
+  for (const key of order) {
+    if (budget <= 0) break;
+    const group = matched.filter((entry) => (entry.asset_class || "other") === key);
+    if (group.length === 0) continue;
+    rows.push({ kind: "group", heading: assetLabel(key) });
+    for (const entry of group) {
+      if (budget <= 0) break;
+      rows.push({
+        kind: "option",
+        symbol: entry.symbol,
+        label: entry.label || entry.symbol,
+        badge: symbolBadge(key),
+        selected: String(entry.symbol || "").toLowerCase() === chosen,
+        chart: (entry.sources || []).indexOf("chart") !== -1,
+      });
+      budget -= 1;
+      shown += 1;
+    }
+  }
+
+  // --- the escape hatch. Offered whenever what was typed is not itself a known
+  // --- broker name, and always appended LAST so the first row -- the one that
+  // --- is active on open and after every keystroke -- stays a real instrument.
+  // --- Enter therefore never sends free text by accident, but an operator who
+  // --- genuinely means "GBP" can still reach it: the row is there, it is
+  // --- labelled, and the hint under the field says it will go out verbatim.
+  const typed = $("symbolSearch").value.trim();
+  if (typed !== "") {
+    const exact = matched.some(
+      (entry) => String(entry.symbol || "").toLowerCase() === typed.toLowerCase()
+    );
+    if (!exact) {
+      rows.push({ kind: "group", heading: "as typed \u2014 not in the bridge's list" });
+      rows.push({
+        kind: "option",
+        symbol: typed,
+        label: typed,
+        badge: "RAW",
+        selected: typed.toLowerCase() === chosen,
+        chart: false,
+      });
+    }
+  }
+
+  return { rows, total: matched.length, shown };
+}
+
+// --- The footer's one job is to never let a filtered list look like the whole
+// --- one. Three separate facts, stated separately: no catalogue at all, nothing
+// --- matched, some matched but more were withheld by the row cap, or the list is
+// --- narrowed by the query.
+function comboFootText(built) {
+  if (symbolAll.length === 0) {
+    return "no instrument list from the bridge \u2014 type a name and press Enter";
+  }
+  if (built.total === 0) {
+    return "no match in " + symbolAll.length + " instruments \u2014 Enter sends what you typed";
+  }
+  if (built.shown < built.total) {
+    return built.shown + " of " + built.total + " matches \u2014 keep typing to narrow";
+  }
+  if (built.total < symbolAll.length) {
+    return built.total + " of " + symbolAll.length + " instruments match";
+  }
+  return built.total + " of " + symbolAll.length + " known instruments";
+}
+
+// --- the row numbers that can be chosen; headings are skipped, so Up and Down
+// --- never land on a label.
+function comboOptionIndexes() {
+  const found = [];
+  for (let index = 0; index < symbolFiltered.length; index += 1) {
+    if (symbolFiltered[index].kind === "option") found.push(index);
+  }
+  return found;
+}
+
+function symbolListNode(index) {
+  for (const node of $("symbolList").children) {
+    if (node.dataset && node.dataset.index === String(index)) return node;
+  }
+  return null;
+}
+
+// --- the active row is the one Enter will take. It is marked here and painted
+// --- by CSS, so the keyboard cursor and a hover lift are the same affordance.
+function setComboActive(index) {
+  symbolActive = index;
+  for (const node of $("symbolList").children) {
+    if (node.dataset && node.dataset.index !== undefined) {
+      node.dataset.active = node.dataset.index === String(index) ? "true" : "false";
+    }
+  }
+  const search = $("symbolSearch");
+  if (index < 0) {
+    search.removeAttribute("aria-activedescendant");
+    return;
+  }
+  search.setAttribute("aria-activedescendant", "symbolOption" + index);
+  const node = symbolListNode(index);
+  if (node && node.scrollIntoView) node.scrollIntoView({ block: "nearest" });
+}
+
+function paintComboRows() {
+  const built = symbolRows();
+  symbolFiltered = built.rows;
+
+  const nodes = [];
+  for (let index = 0; index < symbolFiltered.length; index += 1) {
+    const row = symbolFiltered[index];
+    if (row.kind === "group") {
+      const heading = document.createElement("li");
+      heading.className = "combo-group";
+      heading.setAttribute("role", "presentation");
+      heading.textContent = row.heading;
+      nodes.push(heading);
+      continue;
+    }
+    const option = document.createElement("li");
+    option.id = "symbolOption" + index;
+    option.className = "combo-option";
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", row.selected ? "true" : "false");
+    option.dataset.index = String(index);
+    option.dataset.symbol = row.symbol;
+    option.dataset.active = "false";
+
+    const name = document.createElement("span");
+    name.className = "truncate";
+    name.textContent = row.label;
+
+    const badge = document.createElement("span");
+    badge.className = "tag";
+    badge.textContent = row.badge;
+
+    option.append(name, badge);
+    nodes.push(option);
+  }
+  $("symbolList").replaceChildren(...nodes);
+  $("symbolListFoot").textContent = comboFootText(built);
+
+  // --- the first option is active on open and after every keystroke, so Enter
+  // --- always has an answer and the operator can see what it will be.
+  const options = comboOptionIndexes();
+  setComboActive(options.length ? options[0] : -1);
+}
+
+// --- the hint under the field names the exact broker symbol that will be sent
+// --- and what the bridge thinks it is. It never rewrites the choice: whatever
+// --- was selected or typed is authoritative.
 function paintSymbolHint() {
   const hint = $("orderSymbolHint");
   if (!hint) return;
-  const typed = $("orderSymbol").value.trim();
-  if (typed === "") {
-    hint.textContent = symbolCatalogue.length
-      ? symbolCatalogue.length + " instruments known to the bridge"
+  const chosen = $("orderSymbol").value.trim();
+
+  if (chosen === "") {
+    hint.textContent = symbolAll.length
+      ? symbolAll.length + " instruments known to the bridge"
       : "";
     return;
   }
-  const match = symbolCatalogue.find(
-    (entry) => (entry.symbol || "").toLowerCase() === typed.toLowerCase()
-  );
-  if (match) {
-    hint.textContent =
-      assetLabel(match.asset_class) +
-      " \u00b7 " +
-      ((match.sources || []).indexOf("chart") !== -1
-        ? "live chart, can be driven now"
-        : "listed by the terminal, no chart yet");
+  const entry = symbolEntryFor(chosen);
+  if (!entry) {
+    // --- not in the catalogue is not an error: the bridge may simply not be
+    // --- able to enumerate this broker's list. Saying so is honest.
+    hint.textContent = "sends \"" + chosen + "\" verbatim \u2014 not in the bridge's list";
     return;
   }
-  // --- not in the catalogue is not an error: the bridge may simply not be
-  // --- able to enumerate this broker's list. Saying so is honest.
-  hint.textContent = "not in the bridge's list \u2014 it will be sent exactly as typed";
+  const live = (entry.sources || []).indexOf("chart") !== -1;
+  hint.textContent =
+    "sends " +
+    entry.symbol +
+    " \u00b7 " +
+    assetLabel(entry.asset_class) +
+    (live
+      ? " \u00b7 live chart, can be driven now"
+      : " \u00b7 listed by the terminal, no chart yet");
 }
 
+function paintSymbolTrigger() {
+  const chosen = $("orderSymbol").value.trim();
+  const entry = symbolEntryFor(chosen);
+  const badge = $("symbolTriggerBadge");
+
+  if (chosen === "") {
+    $("symbolTriggerLabel").textContent = "no symbol";
+    badge.textContent = "\u2014";
+    badge.classList.add("hidden");
+    $("symbolTrigger").title = "";
+    return;
+  }
+  // --- the display label when the bridge knows the name, the name itself when
+  // --- it does not: inventing a label for an unknown instrument would imply
+  // --- the bridge had recognised it.
+  $("symbolTriggerLabel").textContent = entry && entry.label ? entry.label : chosen;
+  badge.textContent = entry ? symbolBadge(entry.asset_class) : "RAW";
+  badge.classList.remove("hidden");
+  $("symbolTrigger").title = "sends " + chosen + " exactly";
+}
+
+// --- The quote beside the ticket, and the rule it follows: the bridge polls one
+// --- chart, so it publishes one bid/ask. A ticket naming any other instrument
+// --- has no quote here, and borrowing the neighbour's would be exactly the kind
+// --- of invention this client refuses to do.
+function paintOrderQuote() {
+  const out = $("orderQuote");
+  const spreadOut = $("orderQuoteSpread");
+  if (!out || !spreadOut) return;
+
+  const chosen = $("orderSymbol").value.trim();
+  const digits = quote.digits ?? 5;
+
+  if (chosen === "") {
+    out.className = "truncate text-tertiary";
+    out.textContent = "no symbol chosen";
+    spreadOut.textContent = "";
+    return;
+  }
+
+  const same =
+    quote.symbol !== null && String(quote.symbol).toLowerCase() === chosen.toLowerCase();
+  if (!same) {
+    out.className = "truncate text-tertiary";
+    out.textContent = quote.symbol
+      ? "no quote for " + chosen + " \u2014 the bridge is reading " + quote.symbol
+      : "no quote \u2014 the bridge published no tick";
+    spreadOut.textContent = "";
+    return;
+  }
+
+  if (quote.bid === null || quote.ask === null) {
+    // --- a schema-2/3 EA never published a tick; say so rather than leave a
+    // --- blank that reads as zero
+    out.className = "truncate text-stale";
+    out.textContent = "bid/ask not published by this EA";
+    spreadOut.textContent = "";
+    return;
+  }
+
+  out.className = "truncate text-secondary";
+  out.textContent = "bid " + price(quote.bid, digits) + " \u00b7 ask " + price(quote.ask, digits);
+
+  // --- the spread is a subtraction of two published numbers, nothing more. It
+  // --- is stated in POINTS because that is what the digits field defines: a
+  // --- "pip" is 10 points on a 5-digit pair, 1 point on a 3-digit JPY pair and
+  // --- undefined on US30.cash. Calling it a pip would be wrong on two of three.
+  const points = (quote.ask - quote.bid) * Math.pow(10, digits);
+  if (!isFinite(points) || points < 0) {
+    spreadOut.className = "shrink-0 text-stale";
+    spreadOut.textContent = "spread n/a";
+    return;
+  }
+  spreadOut.className = "shrink-0 text-tertiary";
+  spreadOut.textContent =
+    "spread " + (points < 10 ? points.toFixed(1) : points.toFixed(0)) + " points";
+}
+
+// --- commit a choice. ``name`` goes into the hidden field untouched; this is
+// --- the only place #orderSymbol is written, so what is sent and what is shown
+// --- cannot drift apart.
+function chooseSymbol(name, refocusTrigger) {
+  const exact = String(name === null || name === undefined ? "" : name).trim();
+  $("orderSymbol").value = exact;
+  paintSymbolTrigger();
+  paintSymbolHint();
+  paintOrderQuote();
+  closeCombo(Boolean(refocusTrigger));
+}
+
+function openCombo() {
+  if (symbolOpen) return;
+  symbolOpen = true;
+  $("symbolPopover").classList.remove("hidden");
+  $("symbolTrigger").setAttribute("aria-expanded", "true");
+  $("symbolSearch").setAttribute("aria-expanded", "true");
+  // --- opening offers the whole list: a query left over from last time would
+  // --- silently hide the instrument the operator came to pick.
+  $("symbolSearch").value = "";
+  paintComboRows();
+  $("symbolSearch").focus();
+}
+
+function closeCombo(refocusTrigger) {
+  if (!symbolOpen) return;
+  symbolOpen = false;
+  $("symbolPopover").classList.add("hidden");
+  $("symbolTrigger").setAttribute("aria-expanded", "false");
+  $("symbolSearch").setAttribute("aria-expanded", "false");
+  $("symbolSearch").removeAttribute("aria-activedescendant");
+  symbolActive = -1;
+  if (refocusTrigger) $("symbolTrigger").focus();
+}
+
+// --- walk the choosable rows, wrapping at both ends. Wrapping rather than
+// --- stopping matters: the list is capped at 50 rows, so the operator should be
+// --- able to reach the last one from the first without counting.
+function moveComboActive(step) {
+  const options = comboOptionIndexes();
+  if (options.length === 0) return;
+  if (step === "first") {
+    setComboActive(options[0]);
+    return;
+  }
+  if (step === "last") {
+    setComboActive(options[options.length - 1]);
+    return;
+  }
+  const at = options.indexOf(symbolActive);
+  if (at === -1) {
+    setComboActive(step > 0 ? options[0] : options[options.length - 1]);
+    return;
+  }
+  setComboActive(options[(at + step + options.length) % options.length]);
+}
+
+function activateComboRow() {
+  if (symbolActive >= 0 && symbolActive < symbolFiltered.length) {
+    const row = symbolFiltered[symbolActive];
+    if (row && row.kind === "option") {
+      chooseSymbol(row.symbol, true);
+      return;
+    }
+  }
+  // --- nothing highlighted: treat Enter as "send exactly what I typed".
+  const typed = $("symbolSearch").value.trim();
+  if (typed !== "") chooseSymbol(typed, true);
+}
+
+// --- the multi-chart chooser in the header. Separate from the ticket's
+// --- combobox on purpose: this picks which chart's snapshot is on screen, the
+// --- ticket picks which chart an order names, and the two must stay
+// --- independent so a trader can queue for a chart without losing the readout
+// --- they are watching.
+// --- the popover's own event surface. Kept together so the open/close state
+// --- machine has exactly one owner, and so nothing else can toggle the hidden
+// --- class behind its back.
+function wireSymbolCombo() {
+  $("symbolTrigger").addEventListener("click", () => {
+    if (symbolOpen) {
+      closeCombo(true);
+      return;
+    }
+    openCombo();
+  });
+
+  // --- a button already opens on Enter and Space; only the arrows need adding,
+  // --- and they are what a combobox is expected to answer.
+  $("symbolTrigger").addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    openCombo();
+  });
+
+  $("symbolSearch").addEventListener("input", paintComboRows);
+
+  $("symbolSearch").addEventListener("keydown", (event) => {
+    const key = event.key;
+    if (key === "ArrowDown") {
+      event.preventDefault();
+      moveComboActive(1);
+    } else if (key === "ArrowUp") {
+      event.preventDefault();
+      moveComboActive(-1);
+    } else if (key === "Home") {
+      event.preventDefault();
+      moveComboActive("first");
+    } else if (key === "End") {
+      event.preventDefault();
+      moveComboActive("last");
+    } else if (key === "Enter") {
+      event.preventDefault();
+      activateComboRow();
+    } else if (key === "Escape") {
+      event.preventDefault();
+      closeCombo(true);
+    } else if (key === "Tab") {
+      // --- Tab means "I am leaving", so the popover must not stay open behind
+      // --- the cursor the operator has just moved elsewhere.
+      closeCombo(false);
+    }
+  });
+
+  // --- one listener on the list, not one per row: the rows are rebuilt on every
+  // --- keystroke and per-row handlers would leak on each repaint.
+  $("symbolList").addEventListener("click", (event) => {
+    const option = event.target.closest ? event.target.closest("[data-symbol]") : null;
+    if (!option) return;
+    event.preventDefault();
+    chooseSymbol(option.dataset.symbol, true);
+  });
+
+  // --- clicking elsewhere dismisses, which is what a popup owes the page behind
+  // --- it. The test is on the whole combo rather than the popover so the click
+  // --- that lands on the trigger does not immediately re-close what it opened.
+  document.addEventListener("click", (event) => {
+    if (!symbolOpen) return;
+    const combo = $("symbolCombo");
+    const target = event.target;
+    if (combo && combo.contains && target && combo.contains(target)) return;
+    closeCombo(false);
+  });
+}
+
+// --- the multi-chart chooser in the header. Separate from the ticket's
+// --- combobox on purpose: this picks which chart's snapshot is on screen, the
+// --- ticket picks which chart an order names, and the two must stay
+// --- independent so a trader can queue for another chart without losing the
+// --- readout they are watching.
 function paintSymbolPicker(catalogue) {
   const charts = catalogue.filter(
     (entry) => (entry.sources || []).indexOf("chart") !== -1
@@ -1434,10 +1881,16 @@ async function loadSymbols() {
     const response = await fetch("/api/symbols", { cache: "no-store" });
     if (!response.ok) return;
     const body = await response.json();
-    const catalogue = body.symbols || [];
-    symbolAll = catalogue;
-    paintSymbolOptions(catalogue);
-    paintSymbolPicker(catalogue);
+    symbolAll = Array.isArray(body.symbols) ? body.symbols : [];
+    // --- the grouping order is the bridge's, so the client never keeps a
+    // --- second copy of it in step with charon_bridge/symbols.py
+    symbolClasses = Array.isArray(body.asset_classes) ? body.asset_classes : [];
+    paintSymbolPicker(symbolAll);
+    paintSymbolTrigger();
+    paintSymbolHint();
+    // --- columns can appear and disappear between polls, so a selection made
+    // --- from a stale list must still show its class once the list catches up
+    if (symbolOpen) paintComboRows();
   } catch {
     /* the picker is a convenience; the status poll is what matters */
   }
@@ -2045,10 +2498,12 @@ async function loadHealth() {
 
 // --- the order field starts on the chart being shown, so the common case
 // --- needs no typing. Kept as its own function because boot() is checked
-// --- for only calling declared helpers, and "$" is a const arrow.
+// --- for only calling declared helpers, and "$" is a const arrow. It routes
+// --- through chooseSymbol so the trigger, the hint and the quote are painted
+// --- from the very same value that will be sent.
 function defaultOrderSymbol() {
   if (!$("orderSymbol").value.trim() && activeSymbol) {
-    $("orderSymbol").value = activeSymbol;
+    chooseSymbol(activeSymbol, false);
   }
 }
 

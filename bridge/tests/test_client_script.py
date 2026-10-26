@@ -377,6 +377,186 @@ def test_client_never_calls_the_inbox_endpoints_with_a_verb(source: str) -> None
     for forbidden in ("/api/trade", "order_send", "positions_close"):
         assert forbidden not in source, f"the client references {forbidden}"
 
+#+------------------------------------------------------------------+
+#| The ticket's symbol combobox (v1.6.1)                             |
+#|                                                                  |
+#| The picker replaced a datalist, and a datalist could not go wrong  |
+#| in the way this one can. Two failures are worth a guard each:      |
+#|                                                                   |
+#|  1. Sending the display label instead of the broker name. EURUSD.a |
+#|     is shown as "EURUSD"; posting the label names an instrument    |
+#|     the broker does not list, and the operator would see a refusal |
+#|     for a symbol they can plainly read on screen.                  |
+#|  2. Losing the ARIA wiring that makes it a combobox rather than a  |
+#|     div with a list in it. That failure is invisible: the list     |
+#|     still opens and still works with a mouse.                      |
+#+------------------------------------------------------------------+
+def _element_tag(html: str, element_id: str) -> str:
+    """The opening tag of ``id="element_id"``, across line breaks."""
+    match = re.search(rf'<[^>]*\bid="{element_id}"[^>]*>', html, re.DOTALL)
+    assert match, f'index.html has no element with id="{element_id}"'
+    return match.group(0)
+
+
+def test_symbol_combobox_is_wired_as_a_combobox() -> None:
+    """The markup must declare the roles a screen reader needs.
+
+    Only one element may be the combobox for a given listbox, so the role sits
+    on the search input and the collapsed trigger keeps aria-haspopup. Getting
+    this backwards is not a cosmetic defect: a button claiming role=combobox
+    with aria-expanded but no textbox leaves the keyboard nowhere to type.
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    trigger = _element_tag(html, "symbolTrigger")
+    assert 'aria-haspopup="listbox"' in trigger
+    assert 'aria-expanded="false"' in trigger, "the trigger must start collapsed"
+    assert "aria-controls=" in trigger
+    assert 'role="combobox"' not in trigger, (
+        "the collapsed button must not claim role=combobox: only the search "
+        "input can be the combobox for #symbolList"
+    )
+
+    search = _element_tag(html, "symbolSearch")
+    assert 'role="combobox"' in search, "the search input must own role=combobox"
+    assert 'aria-autocomplete="list"' in search
+    assert "aria-controls=" in search
+
+    assert 'role="listbox"' in _element_tag(html, "symbolList")
+
+    # --- and the value that is posted lives in a hidden input, not in the
+    # --- trigger's text
+    hidden = _element_tag(html, "orderSymbol")
+    assert 'type="hidden"' in hidden, "#orderSymbol must not be a visible field"
+def test_symbol_combobox_sends_the_broker_name_not_the_label(source: str) -> None:
+    """Every write to #orderSymbol must be a name, never a display label.
+
+    The harness proves the behaviour for one payload; this proves the shape
+    cannot drift. A future edit that wrote ``entry.label`` into the field would
+    leave the tab looking right and post an instrument the broker does not list.
+    """
+    writes = re.findall(r'\$\("orderSymbol"\)\.value\s*=\s*([^;]+);', source)
+    assert writes, "nothing ever writes the order symbol field"
+    for write in writes:
+        assert write.strip().startswith("exact"), (
+            "the order symbol field is written from something other than the "
+            f"chosen name: {write.strip()!r}. Only chooseSymbol() may write it, "
+            "and only from the exact broker name in the payload."
+        )
+
+    chosen = re.search(r"function chooseSymbol\(name, refocusTrigger\)\s*\{(.*?)\n\}", source,
+                       re.DOTALL)
+    assert chosen, "chooseSymbol is missing"
+    assert "entry.label" not in chosen.group(1), (
+        "chooseSymbol() references the display label, which must never be sent"
+    )
+    assert "option.dataset.symbol" in source, (
+        "row clicks must read the exact name from the row's data-symbol"
+    )
+
+
+def _without_comments(source: str) -> str:
+    """``source`` with ``//`` and ``/* */`` comments blanked, strings kept.
+
+    ``_strip_literals`` above is the opposite tool: it keeps the code and blanks
+    the strings. For "what text does this function actually write?", the strings
+    are the evidence and the comments are the noise -- a comment explaining why
+    a unit is wrong must not itself trip the check.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(source)
+    while index < length:
+        ch = source[index]
+        nxt = source[index + 1] if index + 1 < length else ""
+        if ch == "/" and nxt == "/":
+            end = source.find("\n", index)
+            end = length if end == -1 else end
+            out.append(_blank(source[index:end]))
+            index = end
+            continue
+        if ch == "/" and nxt == "*":
+            end = source.find("*/", index + 2)
+            if end == -1:
+                return "".join(out) + source[index:]
+            end += 2
+            out.append(_blank(source[index:end]))
+            index = end
+            continue
+        if ch in ("'", '"'):
+            end = _scan_string(source, index)
+            out.append(source[index:end])
+            index = end
+            continue
+        out.append(ch)
+        index += 1
+    return "".join(out)
+
+
+    """The spread must be labelled in points.
+
+    "Pip" is ambiguous across the instruments the bridge lists: 10 points on a
+    5-digit FX pair, 1 on a 3-digit JPY pair, and meaningless on US30.cash. The
+    client therefore states points and scales by the instrument's own digits.
+
+    The check is on what is actually written to the page, not on the function
+    body: the comment above the arithmetic explains why "pip" is wrong, and a
+    test that banned the word outright would forbid explaining the decision.
+    """
+    block = re.search(r"function paintOrderQuote\(\)\s*\{(.*?)\n\}", source, re.DOTALL)
+    assert block, "paintOrderQuote is missing"
+    body = _without_comments(block.group(1))
+
+    assert "Math.pow(10, digits)" in body, (
+        "the spread is scaled by a hard-coded factor instead of the instrument's digits"
+    )
+    assert '" points"' in body, "the spread is not rendered with the unit \"points\""
+    emitted = re.findall(r'"([^"\\]*)"', body)
+    assert not any("pip" in text.lower() for text in emitted), (
+        f"the spread's rendered text mentions pips: {emitted}"
+    )
+
+
+def test_symbol_combobox_never_borrows_another_symbols_quote(source: str) -> None:
+    """A quote belongs to one symbol. Naming another must not inherit it."""
+    block = re.search(r"function paintOrderQuote\(\)\s*\{(.*?)\n\}", source, re.DOTALL)
+    assert block, "paintOrderQuote is missing"
+    body = block.group(1)
+    assert "quote.symbol" in body, "the quote never checks which symbol it belongs to"
+    assert "no quote for" in body, (
+        "a mismatched symbol must say there is no quote rather than showing one"
+    )
+
+
+def test_datalist_symbol_picker_is_gone() -> None:
+    """The replaced control must not linger half-removed.
+
+    A leftover #orderSymbolFilter listener would keep repainting a node that no
+    longer exists, and the ticket's own datalist left in the markup would give
+    the browser a second, unlabelled suggestion list beside the real one.
+
+    The page keeps one other <datalist> on purpose -- #psychOptions feeds the
+    journal's free-text psych field -- so this asserts on the symbol picker's
+    ids and its own datalist, not on the element name.
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert 'id="symbolOptions"' not in html, "the old symbol datalist is still in the page"
+    assert 'id="orderSymbolFilter"' not in html, "the old filter box is still in the page"
+    assert 'list="symbolOptions"' not in html, (
+        "an input still points at the removed symbol datalist"
+    )
+    assert "orderSymbolFilter" not in APP_JS.read_text(encoding="utf-8"), (
+        "app.js still listens to the removed filter box"
+    )
+    assert "paintSymbolOptions" not in APP_JS.read_text(encoding="utf-8"), (
+        "app.js still repaints the removed datalist"
+    )
+
+
+
+
+
+
 
 
 #+------------------------------------------------------------------+

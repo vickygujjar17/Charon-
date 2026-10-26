@@ -9,6 +9,61 @@ Every commit subject starts with the version it ships, for example
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-26
+
+A dashboard-only patch. **No EA change, no schema change:** `SCHEMA_VERSION` stays `4`, the
+`.mqh` headers carry only the version string, and the `/api/order` payload is untouched.
+
+The ticket's symbol field was a `<input list=...>` bound to a datalist. That control had three
+defects that a wider catalogue makes visible rather than causes: it could not show an asset class,
+it could not be driven by a keyboard, and — the one that matters — the browser's own suggestion
+list offers `option.value`, so a name picked from it and a name typed into it arrived by
+different paths with nothing pinning either to the exact broker name.
+
+### Changed
+
+- **The symbol field is a searchable ARIA combobox.** Grouped by asset class with a badge per
+  row (`FX`, `MET`, `IDX`, `ENR`, `CMD`, `CRY`, `STK`, `OTH`), filtering on the broker name, the
+  display label and the class heading. `ArrowUp` / `ArrowDown` / `Home` / `End` / `Enter` /
+  `Escape` / `Tab` all behave as a combobox should, `aria-activedescendant` follows the highlight,
+  and the highlight is the same affordance for pointer and keyboard so Enter never takes a row
+  the operator cannot see.
+- **Only one element claims `role="combobox"`, and it is the search input.** The collapsed
+  control is a button carrying `aria-haspopup` / `aria-expanded` / `aria-controls`; the textbox
+  owns `aria-activedescendant`. A button claiming `role=combobox` with no textbox would leave the
+  keyboard with nowhere to type, and this page is driven from the keyboard.
+- **The value that is posted is the exact broker name, in a hidden `#orderSymbol`.** Clicks read
+  it from the row's `data-symbol` and Enter writes the same string, so a label (`EURUSD` for
+  `EURUSD.a`) can never reach `/api/order`. `test_symbol_combobox_sends_the_broker_name_not_the_label`
+  fails if any future edit writes the field from anything else.
+- **Free text is still accepted.** When nothing in the catalogue matches, what was typed is
+  offered as its own row and sent verbatim. A broker can list an instrument the bridge cannot
+  enumerate; refusing a correct name would be worse than accepting it.
+- **The list is capped at 50 painted rows** with a footer that says which of four states it is in
+  — no catalogue, no match, matches withheld by the cap, or narrowed by the query. A filtered
+  list never looks like the whole one.
+
+### Added
+
+- **An honest bid/ask beside the ticket**, from the `bid` / `ask` the EA already publishes on
+  `/api/status`, with the spread in **points** (`ask - bid` scaled by `10^digits`). Points, not
+  pips: a pip is 10 points on a 5-digit pair, 1 point on a 3-digit JPY pair and undefined on
+  `US30.cash`. The quote belongs to the symbol the bridge is reading, so naming another
+  instrument says there is no quote for it rather than borrowing the neighbour's price, and an
+  EA that never published a tick (schema 2/3) says that instead of printing a zero.
+- **Price boxes step to the instrument's digits.** `digits` from the snapshot drives `step` on
+  the entry, block-top, block-bottom and activation-price inputs, so a 3-digit JPY pair no longer
+  refuses every price the operator types. No price is ever written into them.
+
+### Fixed
+
+- `tests/client_harness.js` gained `focus()` / `document.activeElement`, real `className` ↔
+  `classList` synchronisation, parent links with `contains()` / `closest()`, `removeAttribute()`
+  and a bubbling `fire()` dispatcher. Without those the popover could not be exercised at all —
+  and a stub whose `className` and `classList` disagree would have let a popover that opens but
+  cannot close pass unnoticed. The harness also had no `orderTrailPrice` id, so it had never
+  actually wired that field.
+
 ## [1.6.0] - 2026-10-25
 
 Four modules that had no data source now have one, and the dashboard is rebuilt to the Apex
