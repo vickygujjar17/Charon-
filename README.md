@@ -404,7 +404,7 @@ InpPyramidT4Mult = 0.15
 ## Safety defaults
 
 Charon ships with trailing on and pyramiding available, but every rung that could add
-exposure gated by the risk model:
+exposure is gated by the risk model:
 
 - trailing **on** (`ATR` mode, armed from the first tick — `InpTrailStartRR = 0`)
 - pyramiding **enabled**, ceiling three legs, tier risk capped at `InpPyramidMaxRiskPct`
@@ -417,7 +417,13 @@ exposure gated by the risk model:
 > charts. A chart that was already running keeps whatever it last saved — set
 > `InpTrailMode` and `InpPyramidEnable` once by hand after upgrading.
 
-Nothing moves a stop or opens a trade until you enable it.
+Note what "on by default" does *not* mean. Trailing is on, but it only ever tightens a stop
+that already exists — it never widens one, never crosses to the wrong side of price, and
+refuses a move smaller than `InpTrailStepPoints`. The stop a position gets in the first
+place still comes from the strict-stop rules above, not from the trail. Pyramiding is on,
+but a tier still has to clear all seven gates, so an untouched chart does not scale in
+merely because the switch flipped. What changed is that the *default* now matches what the
+rest of this document describes; the risk model did not move.
 
 ---
 
