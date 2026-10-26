@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 # --- keep in lockstep with #define CHARON_VERSION in CharonDefines.mqh
-BRIDGE_VERSION = "1.7.1"
+BRIDGE_VERSION = "1.7.2"
 
 # --- revision of the JSON channel between the EA and this package.
 # --- Must equal CHARON_BRIDGE_SCHEMA in CharonBridge.mqh; the EA refuses

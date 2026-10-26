@@ -9,6 +9,18 @@ Every commit subject starts with the version it ships, for example
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-10-26
+
+A release-number-only bump. No behaviour changed: apart from this entry, every line in the diff is
+a version string, and the tree is identical to v1.7.1 in everything the EA, the bridge and the
+dashboard actually do. Shipped so the published release identifier matches the build a given copy
+was cut from, rather than leaving an untagged tree that reads as v1.7.1 while containing the
+follow-up edits.
+
+`#property version` stays `1.07` — MetaEditor's form is `major.minor` only, so a patch bump does
+not move it. See v1.7.1 for the functional change (silent publish failures made audible, and the
+opt-in cross-origin path).
+
 ## [1.7.1] - 2026-10-26
 
 The release where the dashboard stops lying about *why* it cannot see the EA.
