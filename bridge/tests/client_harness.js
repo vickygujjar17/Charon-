@@ -168,6 +168,11 @@ const registry = new Map();
 const document = {
   activeElement: null,
   listeners: {},
+  // --- Re-targeting to a non-co-located bridge is configured through a cookie,
+  // --- so the harness has to be able to hand one to the client. Empty by
+  // --- default: the ordinary install serves the page from the bridge and every
+  // --- request stays relative.
+  cookie: process.env.CHARON_HARNESS_COOKIE || "",
   getElementById: (id) => registry.get(id) || null,
   createElement: (tag) => new Element(tag),
   // --- the equity curve is an inline SVG, so the client reaches for the
@@ -193,7 +198,7 @@ const IDS = ["banner", "statusPill", "ageLabel", "latencyLabel", "lastGoodLabel"
   "basketDir", "basketLegs", "basketAvg", "basketLot", "ladder", "pyramidTrigger",
   "armState", "armCountdown", "armBtn", "armHint", "armMsg", "disarmBtn",
   "trailSelect", "trailMsg", "legRows", "noLegs", "logBox",
-  "bridgeVersion", "schemaVersion", "bridgeRoot",
+  "bridgeVersion", "schemaVersion", "bridgeRoot", "bridgeOrigin",
   // --- new order panel (v1.1.0)
   "tagline", "orderStatus", "orderSide", "orderType", "orderEntry", "orderRisk",
   "orderBlockTop", "orderBlockBottom", "orderTrail", "orderRung",
@@ -298,6 +303,7 @@ function fire(target, type, props) {
 }
 
 const calls = [];
+const headersSent = [];
 const snapshot = {
   status: "live",
   age_seconds: 0.4,
@@ -336,8 +342,16 @@ const snapshot = {
 // --- cursor would make Enter send an instrument nobody looked at.
 let symbolsPrepend = [];
 
-function fetchStub(url) {
+function fetchStub(url, init) {
   calls.push(url);
+  // --- the auth and content-type headers ride along on the same call, so the
+  // --- stub records them; a token that reaches only some endpoints is the
+  // --- defect worth catching here.
+  if (init && init.headers) {
+    for (const [name, value] of Object.entries(init.headers)) {
+      headersSent.push([name, value, url]);
+    }
+  }
   let body;
   if (url.includes("/api/health")) {
     body = {
@@ -997,6 +1011,65 @@ setTimeout(async () => {
     );
   }
 
+  // --- Re-targeting (v1.7.1): a page served from anywhere other than the
+  // --- bridge must reach the bridge the cookie names, not its own origin. The
+  // --- harness is handed a cookie for exactly this run; if the resolver is
+  // --- broken the requests stay relative and this fails, which is the whole
+  // --- point of the check.
+  const expectedBase = process.env.CHARON_HARNESS_COOKIE_BASE || "";
+  const expectedToken = process.env.CHARON_HARNESS_COOKIE_TOKEN || "";
+  if (expectedBase) {
+    const stray = calls.filter((url) => !url.startsWith(expectedBase));
+    if (stray.length) {
+      problems.push(
+        "with charon_api set, these requests ignored it: " + JSON.stringify(stray)
+      );
+    }
+  } else {
+    // --- the default must stay relative: an absolute base by accident would
+    // --- break every ordinary loopback install
+    const absolute = calls.filter((url) => !url.startsWith("/"));
+    if (absolute.length) {
+      problems.push(
+        "with no charon_api cookie the requests must stay relative, got: " +
+          JSON.stringify(absolute)
+      );
+    }
+  }
+  if (expectedToken) {
+    // --- every API call the client makes, except the SSE stream (EventSource
+    // --- cannot carry a header) and /api/health, must present the token.
+    const guarded = calls.filter(
+      (url) => url.includes("/api/") && !url.includes("/api/logs")
+    );
+    const withToken = new Set(
+      headersSent
+        .filter(([name]) => name === "X-Charon-Token")
+        .map(([, , url]) => url)
+    );
+    const missing = guarded.filter((url) => !withToken.has(url));
+    if (missing.length) {
+      problems.push(
+        "these requests went out without X-Charon-Token: " + JSON.stringify(missing)
+      );
+    }
+  }
+
+  // --- the footer must name the target, not just the resolved directory: with
+  // --- a wrong origin the health payload never arrives, so this is the only
+  // --- place the operator can see which host the page was asking.
+  const origin = registry.get("bridgeOrigin").textContent;
+  if (expectedBase && origin !== expectedBase) {
+    problems.push(
+      `the footer said via ${JSON.stringify(origin)}, expected ${JSON.stringify(expectedBase)}`
+    );
+  }
+  if (!expectedBase && origin !== "same origin") {
+    problems.push(
+      `with no cookie the footer should say "same origin", got ${JSON.stringify(origin)}`
+    );
+  }
+
   console.log("requests issued:");
   for (const url of calls) console.log("  " + url);
   console.log("");
@@ -1014,6 +1087,7 @@ setTimeout(async () => {
   console.log("  latency     : " + registry.get("latencyLabel").textContent);
   console.log("  lastGood    : " + registry.get("lastGoodLabel").textContent);
   console.log("  eaVersion   : " + registry.get("eaVersion").textContent);
+  console.log("  bridgeOrigin: " + registry.get("bridgeOrigin").textContent);
   // --- the client's own log tail is the only place a thrown error inside a
   // --- promise surfaces, so print it rather than guess at a blank panel
   function flatText(node) {

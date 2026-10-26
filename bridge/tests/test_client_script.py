@@ -16,6 +16,7 @@ tests are built to catch.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -642,6 +643,65 @@ def test_client_actually_runs_and_polls_the_bridge() -> None:
         "app.js loaded but did not behave like a dashboard:\n" + output
     )
     assert "EXECUTION CHECK PASSED" in output, output
+
+
+#+------------------------------------------------------------------+
+#| Re-targeting a page served from somewhere else (v1.7.1)          |
+#|                                                                  |
+#| A page served from a Vercel deployment resolves "/api/status" to  |
+#| Vercel, which has no bridge -- so the request never reaches the   |
+#| operator's PC and the dashboard reports the bridge as down while  |
+#| it is running perfectly. The fix is an explicit base, configured  |
+#| through a cookie so one static bundle serves both layouts.        |
+#|                                                                  |
+#| These two cases pin the contract from both sides: an empty cookie |
+#| must leave every request relative (or loopback installs break),   |
+#| and a set cookie must rewrite every one of them (or the hosted    |
+#| page silently talks to the wrong origin).                         |
+#+------------------------------------------------------------------+
+def _run_harness_with_cookie(cookie: str, base: str = "", token: str = ""):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not on PATH")
+    env = dict(os.environ)
+    env["CHARON_HARNESS_COOKIE"] = cookie
+    env["CHARON_HARNESS_COOKIE_BASE"] = base
+    env["CHARON_HARNESS_COOKIE_TOKEN"] = token
+    return subprocess.run(
+        [node, str(HARNESS)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        env=env,
+    )
+
+
+def test_client_stays_relative_without_a_base_cookie() -> None:
+    """No cookie means same origin -- the ordinary loopback install."""
+    result = _run_harness_with_cookie("")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, (
+        "the client broke when no charon_api cookie was present:\n" + output
+    )
+    assert "EXECUTION CHECK PASSED" in output, output
+
+
+def test_client_retargets_every_request_to_the_configured_base() -> None:
+    """A charon_api cookie must move every request, and carry the token."""
+    base = "https://bridge.example.com"
+    result = _run_harness_with_cookie(
+        "charon_api=https%3A%2F%2Fbridge.example.com; charon_token=s3cret",
+        base=base,
+        token="s3cret",
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, (
+        "the client did not honour the configured bridge base:\n" + output
+    )
+    assert "EXECUTION CHECK PASSED" in output, output
+    # --- proof the run was not vacuous: the URLs really were rewritten
+    assert base + "/api/status" in output, output
 
 
 def test_harness_can_fail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -110,6 +111,21 @@ async def _lifespan(_app: FastAPI):
     _announce("info", f"Charon bridge {BRIDGE_VERSION} (schema {SCHEMA_VERSION})")
     _announce("info", f"common files: {where['common_files']} [{where['common_exists']}]")
     _announce("info", f"bridge root : {where['bridge_root']} [{where['root_exists']}]")
+    # --- cross-origin config is invisible otherwise: the middleware adds no
+    # --- header to a same-origin request, so an operator who set the variable
+    # --- and an operator who forgot both see a working console.
+    if CORS_ENABLED:
+        _announce("info", f"cors        : allowing {', '.join(_ORIGINS)}")
+        if not os.environ.get(TOKEN_ENV):
+            _announce(
+                "warn",
+                f"{ALLOWED_ORIGINS_ENV} is set but {TOKEN_ENV} is not. A served-from-"
+                "elsewhere UI can now read this console; set a token as well. An "
+                "origin allowlist decides which PAGES may call the bridge, not who "
+                "may use them.",
+            )
+    else:
+        _announce("info", "cors        : off (same-origin only)")
     if not mt5_adapter.available():
         _announce("info", "MetaTrader5 package absent - dashboard reads the EA snapshot only")
 
@@ -142,6 +158,66 @@ app = FastAPI(
     ),
     lifespan=_lifespan,
 )
+
+
+#+------------------------------------------------------------------+
+#| Cross-origin access (v1.7.1)                                     |
+#|                                                                  |
+#| A UI served from another origin -- a Vercel preview, a laptop on  |
+#| the LAN -- is a normal browser request to THIS bridge. Without a  |
+#| CORS header the browser blocks the response before the page sees  |
+#| it, and /api/status looks like it is refusing to answer.          |
+#|                                                                  |
+#| Off by default, deliberately. The safe install is a page served   |
+#| from this same server at /, where no CORS header is needed at     |
+#| all, and adding a permissive default would quietly turn a         |
+#| loopback-only console into one any website could read. The        |
+#| operator opts in by naming the exact origins they use.            |
+#|                                                                  |
+#| Origins are matched literally (no wildcards, no regex): an origin |
+#| is a trust decision, and "anything that starts with https://" is  |
+#| not one. Setting at least one origin also means a token should be |
+#| set, because the bridge is now reachable from a page it does not  |
+#| serve -- see ``.env.example``.                                    |
+#+------------------------------------------------------------------+
+ALLOWED_ORIGINS_ENV = "CHARON_ALLOWED_ORIGINS"
+
+
+def _allowed_origins() -> list[str]:
+    """Parse ``CHARON_ALLOWED_ORIGINS`` into an exact-match origin list."""
+    raw = os.environ.get(ALLOWED_ORIGINS_ENV, "")
+    return [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
+
+
+_ORIGINS = _allowed_origins()
+
+
+def _install_cors(target: FastAPI, origins: list[str]) -> bool:
+    """Attach the CORS middleware iff at least one origin was configured.
+
+    Split out of module scope so a test can prove the middleware is absent by
+    default and correct when configured. A CORS header that is quietly present
+    on a loopback install is a security regression, and one that is quietly
+    absent on a configured install is the bug this release exists to fix --
+    neither can be verified by reading the source.
+    """
+    if not origins:
+        return False
+    target.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,
+        # --- GET is the whole read surface; the POSTs and the journal DELETE
+        # --- are the write surface. Omitting DELETE would make the journal's
+        # --- row delete fail cross-origin, in the browser only.
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "X-Charon-Token"],
+        max_age=600,
+    )
+    return True
+
+
+CORS_ENABLED = _install_cors(app, _ORIGINS)
 
 
 #+------------------------------------------------------------------+

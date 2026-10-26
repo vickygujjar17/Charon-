@@ -9,6 +9,67 @@ Every commit subject starts with the version it ships, for example
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-10-26
+
+The release where the dashboard stops lying about *why* it cannot see the EA.
+
+v1.7.0 shipped a bridge that could fail silently in two independent ways, and from the browser
+they looked identical. If `InpBridgeEnable` was false, `ServiceBridge()` returned early and no
+snapshot was ever written — the dashboard reported "EA offline" forever, while the EA was
+running perfectly and had no idea the bridge existed. If a state write failed, `FileWriteString`
+returned short and was ignored, so a half-written `state_<SYM>.json` was reported as a
+successful publish. In both cases `/api/status` answered `503` and neither component said
+anything: no log line in the EA, no line in the dashboard's own log tail.
+
+This release makes both failures audible, and adds the cross-origin path that a hosted UI needs.
+
+### Added
+
+- **`CCharonBridge::LastOk()`** exposes the publish result that `m_lastOk` already tracked and
+  nothing read. `CCharonEngine::PublishBridge()` now logs on *transition* — `FAILED + Note()`
+  when publishing starts failing, `recovered` when it comes back — and stays quiet in the steady
+  state, so a bridge that has been down for an hour produces one line, not 720.
+- **The rates-refresh gate announces itself.** When `m_risk.Refresh()` fails, `OnTimerWork()`
+  returns before `PublishBridge()`, so the snapshot silently stops advancing. That path now logs
+  once on entry and once on recovery. A suspended EA used to be indistinguishable from a hung
+  one — and, worse, from a healthy one whose dashboard had simply gone stale.
+- **`Bridge :` row on the dashboard**, reading `off (InpBridgeEnable=false)` or
+  `ok|FAILED | seq N | <note>` from the EA's own state rather than from a snapshot field.
+- **`CHARON_ALLOWED_ORIGINS`** (bridge). Off by default and exact-match only: origins are
+  trusted literally, so no wildcard and no regex, with `CHARON_TOKEN` recommended alongside it.
+  `DELETE` is included in the allowed methods because the journal's row delete would otherwise
+  fail cross-origin in the browser while working in `curl`.
+- **The bridge says at startup which origins it trusts**, and warns when
+  `CHARON_ALLOWED_ORIGINS` is set without `CHARON_TOKEN`. A same-origin request carries no CORS
+  header, so an operator who configured the allowlist and one who forgot it saw the same working
+  console; the allowlist decides which *pages* may call the bridge, not who may use them, and
+  widening that surface on a live trading account should not be silent.
+- **`charon_api` cookie** (client). One static bundle now serves both layouts: empty means
+  same-origin, and a value such as `https://bridge.example.com` re-points all twelve `fetch()`
+  calls and the `/api/logs` `EventSource` at that bridge. Also `charon_token`, which is sent as
+  `X-Charon-Token` on every request except the SSE stream (which cannot carry a header).
+
+### Fixed
+
+- **A short state write is now a failure.** `WriteStateFile()` compares `FileWriteString`'s
+  return against `StringLen(payload)`, deletes the truncated `.tmp`, records
+  `state write short (...)` in `Note()`, and reports `LastOk() == false`. Previously a partial
+  file was published as a good snapshot.
+- **"Cannot reach the bridge" now names the bridge.** The client's log line includes the
+  resolved base, because the common cause is not a dead bridge but a page asking the wrong host:
+  a hosted page resolving `/api/status` against its own origin, or against its *own*
+  `127.0.0.1` — the browser's loopback, not the operator's PC. That distinction was previously
+  invisible.
+
+### Changed
+
+- The dashboard's unreachable/timeout log line is now asserted by `tests/client_harness.js`,
+  which runs in two modes: relative (the default) and re-targeted (absolute base + token). The
+  re-targeted run fails if any request ignores the configured base, so the resolver cannot rot
+  back to hardcoded paths.
+- CORS installation is a function (`_install_cors`) returning whether it ran, so the *absence*
+  of the header on a loopback install is asserted rather than assumed.
+
 ## [1.7.0] - 2026-10-26
 
 The release where a ticket finally drives the pyramid ladder it described.

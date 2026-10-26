@@ -332,6 +332,12 @@ public:
    string            CommandDir(void) const { return m_cmdDir; }
    string            Note(void) const { return m_lastNote; }
    ulong             Sequence(void) const { return m_seq; }
+   //--- verdict of the last publish attempt. Until v1.7.1 this was written by
+   //--- WriteStateFile and read by nothing, so a terminal that could not
+   //--- rename the snapshot into place looked perfectly healthy on the chart
+   //--- while the dashboard aged into "offline" with no explanation anywhere.
+   //--- DrawDashboard() renders it now.
+   bool              LastOk(void) const { return m_lastOk; }
 
    //--- EA -> Python. legs may be NULL when legCount is 0. MQL5 will not take
    //--- a reference array with a default value, so the leg-only form is an
@@ -895,8 +901,23 @@ bool CCharonBridge::WriteStateFile(const string payload)
       m_lastNote = StringFormat("state open failed (%d)", GetLastError());
       return false;
      }
-   FileWriteString(h, payload);
+   //--- the write result is checked, not assumed. A short write (disk full,
+   //--- antivirus holding the handle) used to be renamed into place anyway,
+   //--- which publishes a TRUNCATED document -- the one failure mode the
+   //--- temp-then-rename dance exists to prevent. If the payload did not land
+   //--- whole, the previous snapshot stays untouched and the temp is dropped.
+   ResetLastError();
+   uint wrote = FileWriteString(h, payload);
+   int  werr  = GetLastError();
    FileClose(h);
+
+   if(wrote != (uint)StringLen(payload))
+     {
+      FileDelete(tmp, FILE_COMMON);
+      m_lastNote = StringFormat("state write short (%u of %d bytes, err %d)",
+                                wrote, StringLen(payload), werr);
+      return false;
+     }
 
    ResetLastError();
    if(!FileMove(tmp, FILE_COMMON, m_stateFile, FILE_COMMON | FILE_REWRITE))

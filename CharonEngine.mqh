@@ -99,6 +99,17 @@ private:
    ulong             m_orderTicket;
    string            m_orderJournalTag;
 
+   //--- toggles on a CHANGE of the bridge publish verdict, because the timer
+   //--- runs once a second: a failure printed 3,600 times an hour is a log
+   //--- nobody reads, and a failure printed never is the bug this fixes.
+   bool              m_bridgeFailing;
+
+   //--- same transition discipline for the rates refresh: when it starts
+   //--- failing the timer stops dead, which also stops the publish, so the
+   //--- silence has to be explained rather than left to look like a healthy
+   //--- EA that simply went quiet.
+   bool              m_refreshFailing;
+
    //--- trail thresholds waiting on a pending order that has not filled yet.
    //--- A pending order has no position ticket, so the values are held
    //--- against the ORDER ticket and claimed by AdoptTicket when the fill
@@ -146,6 +157,8 @@ CCharonEngine::CCharonEngine(void)
    m_ready    = false;
    m_busy     = false;
    m_lastScan = 0;
+   m_bridgeFailing  = false;
+   m_refreshFailing = false;
    m_orderStatus    = "idle";
    m_orderReason    = "";
    m_orderSide      = "";
@@ -1407,6 +1420,22 @@ void CCharonEngine::DrawDashboard(void)
    text += StringFormat("Pyramid trig: %s\n", pyrTrig);
    text += StringFormat("ATR(%d)      : %s\n", InpAtrPeriod,
                         (atr > 0.0 ? DoubleToString(atr, m_risk.Digits()) : "warming up"));
+
+   //--- the publish verdict, shown rather than assumed. Before this the panel
+   //--- could not tell "the dashboard is switched off" from "the dashboard is
+   //--- on and every write is failing", and the second state is precisely what
+   //--- makes /api/status answer 503 with no clue anywhere on the terminal.
+   string bridgeLine = "off (InpBridgeEnable=false)";
+   if(m_bridge.Enabled())
+     {
+      bridgeLine = StringFormat("%s  |  seq %I64u",
+                                (m_bridge.LastOk() ? "ok" : "FAILED"),
+                                m_bridge.Sequence());
+      if(!m_bridge.LastOk())
+         bridgeLine += "  |  " + m_bridge.Note();
+     }
+   text += StringFormat("Bridge      : %s\n", bridgeLine);
+
    text += "------------------------------------------------------------\n";
 
    if(!m_basket.valid)
@@ -1518,13 +1547,35 @@ void CCharonEngine::OnTickWork(void)
 //+------------------------------------------------------------------+
 //| Coarse heartbeat: works without ticks (weekend gaps, thin        |
 //| symbols, or a position opened while no ticks arrive)             |
+//|                                                                  |
+//|  The refresh gate below is deliberately narrow: RefreshRates()    |
+//|  only moves the spread figure, and every consumer of it is        |
+//|  downstream of the early return. A terminal whose symbols have    |
+//|  gone unselected therefore stops the timer -- which also stops the |
+//|  snapshot publish -- so that state is reported on entry and left   |
+//|  reported, instead of looking like an EA that simply went quiet.   |
 //+------------------------------------------------------------------+
 void CCharonEngine::OnTimerWork(void)
   {
    if(!m_ready || m_busy)
       return;
    if(!m_risk.Refresh())
+     {
+      if(!m_refreshFailing)
+        {
+         m_refreshFailing = true;
+         PrintFormat("%s: SymbolInfo refresh failed - the timer pass is "
+                     "suspended until the terminal serves prices for %s "
+                     "again. The bridge stops publishing while this lasts.",
+                     CHARON_NAME, m_symbol);
+        }
       return;
+     }
+   if(m_refreshFailing)
+     {
+      m_refreshFailing = false;
+      PrintFormat("%s: SymbolInfo refresh recovered", CHARON_NAME);
+     }
 
    m_busy = true;
    ScanAndAdopt();
@@ -2553,6 +2604,24 @@ void CCharonEngine::PublishBridge(void)
    snap.ask = m_risk.Ask();
 
    m_bridge.Publish(snap, legs, n, pendings, np, watches, nw);
+
+   //--- surface the verdict. The publish result used to be discarded, so the
+   //--- one failure the operator cannot see on the chart -- the snapshot never
+   //--- reaching disk -- was also the one that was never logged. Both edges are
+   //--- reported and the steady state is silent, so the log stays readable.
+   bool ok = m_bridge.LastOk();
+   if(!ok && !m_bridgeFailing)
+     {
+      m_bridgeFailing = true;
+      PrintFormat("%s: bridge publish FAILED - %s. The dashboard will show "
+                  "offline until this clears; trading is unaffected.",
+                  CHARON_NAME, m_bridge.Note());
+     }
+   else if(ok && m_bridgeFailing)
+     {
+      m_bridgeFailing = false;
+      PrintFormat("%s: bridge publish recovered", CHARON_NAME);
+     }
   }
 
 //+------------------------------------------------------------------+

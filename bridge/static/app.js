@@ -24,6 +24,73 @@ const LOG_MAX_LINES = 300;
 
 const $ = (id) => document.getElementById(id);
 
+
+//+------------------------------------------------------------------+
+//| Where the bridge lives                                           |
+//|                                                                  |
+//|  The normal install serves this page FROM the bridge, so a        |
+//|  relative "/api/status" is already correct and needs no setting.  |
+//|                                                                  |
+//|  A page served from somewhere else -- a Vercel deployment, a      |
+//|  second machine -- must name the bridge explicitly, because a     |
+//|  relative path there resolves to the PAGE's origin and asks       |
+//|  Vercel for a bridge it does not have. That is the failure that   |
+//|  looks exactly like the bridge being down: the request never      |
+//|  reaches your PC.                                                 |
+//|                                                                  |
+//|  Configured with a cookie rather than a build step, so the same   |
+//|  static bundle works in both places and nothing secret ends up in |
+//|  a compiled artefact:                                              |
+//|                                                                  |
+//|    charon_api=https://bridge.example.com                          |
+//|                                                                  |
+//|  An empty value means "same origin", which keeps loopback         |
+//|  installs trivial. Note that the bridge must then be reachable     |
+//|  from the browser at that address -- 127.0.0.1 in a hosted page   |
+//|  means the BROWSER's loopback, not your PC's.                    |
+//+------------------------------------------------------------------+
+function cookieValue(name) {
+  // --- document.cookie is absent in the test harness, and reading it THROWS in
+  // --- a sandboxed/embedded view rather than returning empty. Both cases must
+  // --- fall back to "same origin", or the whole page dies at load time -- the
+  // --- v1.0.3 failure mode, one layer up.
+  let raw = "";
+  try {
+    if (typeof document !== "undefined" && document.cookie) {
+      raw = document.cookie;
+    }
+  } catch (error) {
+    return "";
+  }
+  for (const part of raw.split(";")) {
+    const at = part.indexOf("=");
+    if (at === -1) continue;
+    if (part.slice(0, at).trim() === name) {
+      try {
+        return decodeURIComponent(part.slice(at + 1).trim());
+      } catch (error) {
+        return part.slice(at + 1).trim();
+      }
+    }
+  }
+  return "";
+}
+
+const API_BASE = cookieValue("charon_api").replace(/\/+$/, "");
+const API_TOKEN = cookieValue("charon_token");
+
+// --- every request goes through these two, so a change of origin or token
+// --- cannot be applied to some calls and forgotten on the rest.
+function apiUrl(path) {
+  return API_BASE + path;
+}
+
+function apiHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  if (API_TOKEN) headers["X-Charon-Token"] = API_TOKEN;
+  return headers;
+}
+
 let eventSource = null;
 let lastLogSeq = 0;        // highest seq rendered, so replays never duplicate
 
@@ -723,9 +790,11 @@ async function fetchStatus() {
   const started = performance.now();
   try {
     const response = await fetch(
-      "/api/status" +
-        (activeSymbol ? "?symbol=" + encodeURIComponent(activeSymbol) : ""),
-      { cache: "no-store", signal: controller.signal }
+      apiUrl(
+        "/api/status" +
+          (activeSymbol ? "?symbol=" + encodeURIComponent(activeSymbol) : "")
+      ),
+      { cache: "no-store", signal: controller.signal, headers: apiHeaders() }
     );
 
     if (!response.ok) {
@@ -758,10 +827,16 @@ async function refresh() {
     setLatencyFailed();
     // --- one line, not one per second: a bridge that stayed down for an
     // --- hour should not fill the log with 3600 identical complaints
+    // ---
+    // --- The origin is named because the most common cause of "unreachable"
+    // --- is not a dead bridge but a page asking the wrong host: a mismatched
+    // --- origin, or a hosted page dutifully calling its OWN 127.0.0.1. Without
+    // --- this the operator sees "Failed to fetch" and has nowhere to look.
+    const target = API_BASE || "this page's origin";
     const detail =
       error.name === "AbortError"
-        ? "GET /api/status timed out after " + FETCH_TIMEOUT_MS + " ms."
-        : "Cannot reach the bridge: " + error.message;
+        ? "GET " + target + "/api/status timed out after " + FETCH_TIMEOUT_MS + " ms."
+        : "Cannot reach the bridge at " + target + ": " + error.message;
     if (detail !== lastPollError) {
       lastPollError = detail;
       appendLocalLog("warn", detail);
@@ -979,9 +1054,9 @@ async function postOrder(path, label) {
   }
 
   try {
-    const response = await fetch(path, {
+    const response = await fetch(apiUrl(path), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: apiHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(ticket),
     });
     const body = await response.json().catch(() => ({}));
@@ -1194,7 +1269,7 @@ async function cancelTicket(ticketNumber, message) {
     message.textContent = "sending\u2026";
   }
   try {
-    const response = await fetch(path, { method: "POST" });
+    const response = await fetch(apiUrl(path), { method: "POST", headers: apiHeaders() });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (message) {
@@ -1235,7 +1310,7 @@ async function cancelWatch(watchId, message) {
     message.textContent = "sending\u2026";
   }
   try {
-    const response = await fetch(path, { method: "POST" });
+    const response = await fetch(apiUrl(path), { method: "POST", headers: apiHeaders() });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (message) {
@@ -1279,7 +1354,10 @@ async function postCommand(path, messageEl, label) {
   messageEl.className = "mt-1.5 font-mono text-body-sm text-tertiary";
   messageEl.textContent = "sending…";
   try {
-    const response = await fetch(path, { method: "POST" });
+    const response = await fetch(apiUrl(path), {
+      method: "POST",
+      headers: apiHeaders(),
+    });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       messageEl.className = "mt-1.5 font-mono text-body-sm text-offline";
@@ -1933,7 +2011,10 @@ function paintSymbolPicker(catalogue) {
 
 async function loadSymbols() {
   try {
-    const response = await fetch("/api/symbols", { cache: "no-store" });
+    const response = await fetch(apiUrl("/api/symbols"), {
+      cache: "no-store",
+      headers: apiHeaders(),
+    });
     if (!response.ok) return;
     const body = await response.json();
     symbolAll = Array.isArray(body.symbols) ? body.symbols : [];
@@ -2039,7 +2120,10 @@ function renderUnmanaged(body) {
 
 async function loadUnmanaged() {
   try {
-    const response = await fetch("/api/unmanaged", { cache: "no-store" });
+    const response = await fetch(apiUrl("/api/unmanaged"), {
+      cache: "no-store",
+      headers: apiHeaders(),
+    });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       // --- an HTTP error is not a clean account
@@ -2276,9 +2360,11 @@ async function loadHistory() {
   const days = $("historyDays").value || "30";
   try {
     const response = await fetch(
-      "/api/history?days=" + encodeURIComponent(days) +
-        (activeSymbol ? "&symbol=" + encodeURIComponent(activeSymbol) : ""),
-      { cache: "no-store" }
+      apiUrl(
+        "/api/history?days=" + encodeURIComponent(days) +
+          (activeSymbol ? "&symbol=" + encodeURIComponent(activeSymbol) : "")
+      ),
+      { cache: "no-store", headers: apiHeaders() }
     );
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -2356,8 +2442,10 @@ function renderJournal(rows) {
 async function loadJournal() {
   try {
     const response = await fetch(
-      "/api/status" + (activeSymbol ? "?symbol=" + encodeURIComponent(activeSymbol) : ""),
-      { cache: "no-store" }
+      apiUrl(
+        "/api/status" + (activeSymbol ? "?symbol=" + encodeURIComponent(activeSymbol) : "")
+      ),
+      { cache: "no-store", headers: apiHeaders() }
     );
     if (!response.ok) return;
     const body = await response.json();
@@ -2386,10 +2474,12 @@ async function saveJournal() {
   message.textContent = "saving…";
   try {
     const response = await fetch(
-      "/api/journal" + (activeSymbol ? "?symbol=" + encodeURIComponent(activeSymbol) : ""),
+      apiUrl(
+        "/api/journal" + (activeSymbol ? "?symbol=" + encodeURIComponent(activeSymbol) : "")
+      ),
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: apiHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           ticket: ticket,
           note: $("journalNote").value,
@@ -2414,9 +2504,11 @@ async function deleteJournal(ticket) {
   const message = $("journalMsg");
   try {
     const response = await fetch(
-      "/api/journal?ticket=" + encodeURIComponent(ticket) +
-        (activeSymbol ? "&symbol=" + encodeURIComponent(activeSymbol) : ""),
-      { method: "DELETE" }
+      apiUrl(
+        "/api/journal?ticket=" + encodeURIComponent(ticket) +
+          (activeSymbol ? "&symbol=" + encodeURIComponent(activeSymbol) : "")
+      ),
+      { method: "DELETE", headers: apiHeaders() }
     );
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.detail || "HTTP " + response.status);
@@ -2501,7 +2593,11 @@ function appendLog(entry) {
 
 function startLog() {
   if (eventSource) eventSource.close();
-  eventSource = new EventSource("/api/logs?stream=true");
+  // --- EventSource cannot set request headers, and /api/logs is documented as
+  // --- the one endpoint that does not require the token, so only the origin
+  // --- needs redirecting here.
+  eventSource = new EventSource(apiUrl("/api/logs?stream=true"));
+
   eventSource.onmessage = (event) => {
     try {
       appendLog(JSON.parse(event.data));
@@ -2524,7 +2620,10 @@ function startLog() {
 //+------------------------------------------------------------------+
 async function loadHealth() {
   try {
-    const response = await fetch("/api/health", { cache: "no-store" });
+    const response = await fetch(apiUrl("/api/health"), {
+      cache: "no-store",
+      headers: apiHeaders(),
+    });
     const health = await response.json();
     $("bridgeVersion").textContent = health.bridge_version || "—";
     $("schemaVersion").textContent = health.schema ?? "—";
@@ -2562,10 +2661,32 @@ function defaultOrderSymbol() {
   }
 }
 
+// --- says which bridge the page is talking to, before any request is made.
+// --- The footer already names the directory the SERVER resolved, which cannot
+// --- help when the page is asking a server that is not listening: that failure
+// --- produces no health payload at all. Naming the target here means a
+// --- misconfigured origin reads as "via https://x" next to an empty dashboard,
+// --- instead of looking like a bridge that is down.
+function paintBridgeOrigin() {
+  const el = $("bridgeOrigin");
+  if (!el) return;
+  if (API_BASE) {
+    el.textContent = API_BASE;
+    el.title = "absolute: the charon_api cookie points this page at " + API_BASE;
+  } else {
+    el.textContent = "same origin";
+    el.title = "relative requests: this page was loaded from the bridge it polls";
+  }
+}
+
 async function boot() {
   wireCommands();
   wireJournal();
   setLastGood(0);
+  // --- first, and before any await: the one diagnostic that must survive a
+  // --- bridge that never answers. Everything below can fail silently; this
+  // --- has to be on screen already.
+  paintBridgeOrigin();
   await loadHealth();
   await loadSymbols();
   startLog();

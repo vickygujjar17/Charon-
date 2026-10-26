@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import main
@@ -1226,4 +1227,119 @@ def test_journal_write_does_not_need_a_live_chart(
     )
     assert response.status_code == 200
     assert response.json()["symbol"] == "EURUSD"
+
+
+
+#+------------------------------------------------------------------+
+#| Cross-origin access (v1.7.1)                                     |
+#|                                                                  |
+#| The 503 that opened this release was invisible: the dashboard     |
+#| reported the bridge as unreachable while the bridge was fine, and |
+#| nothing in either component said why. A page served from another  |
+#| origin is one of the two ways that happens -- the other is the    |
+#| EA not publishing at all -- and CORS is the half this file owns.  |
+#|                                                                  |
+#| The default matters as much as the feature: a loopback console    |
+#| that answers every origin is a web page away from leaking a live  |
+#| trading account. So the absence of the header is asserted, not    |
+#| assumed.                                                          |
+#+------------------------------------------------------------------+
+def test_cors_is_off_by_default(client: TestClient) -> None:
+    """No CHARON_ALLOWED_ORIGINS means no CORS header -- the local install."""
+    response = client.get("/api/health", headers={"Origin": "https://evil.example"})
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers, (
+        "the bridge answered a foreign origin without being configured to; "
+        "a loopback console must not be readable by any website"
+    )
+
+
+def test_cors_env_parsing_is_exact_and_tolerant(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whitespace and trailing slashes are forgiven; wildcards are not."""
+    monkeypatch.setenv(
+        "CHARON_ALLOWED_ORIGINS",
+        " https://a.example/ , http://localhost:3000 ,, ",
+    )
+    assert main._allowed_origins() == ["https://a.example", "http://localhost:3000"]
+    monkeypatch.setenv("CHARON_ALLOWED_ORIGINS", "")
+    assert main._allowed_origins() == []
+
+
+def test_cors_answers_a_configured_origin() -> None:
+    """A named origin gets the header; an unnamed one does not."""
+    fresh = FastAPI()
+    assert main._install_cors(fresh, ["https://ui.example"]) is True
+    fresh.get("/api/health")(lambda: {"ok": True})
+
+    allowed = TestClient(fresh).get(
+        "/api/health", headers={"Origin": "https://ui.example"}
+    )
+    assert allowed.headers["access-control-allow-origin"] == "https://ui.example"
+
+    refused = TestClient(fresh).get(
+        "/api/health", headers={"Origin": "https://other.example"}
+    )
+    assert "access-control-allow-origin" not in refused.headers, (
+        "an origin that was never named was answered anyway"
+    )
+
+
+def test_cors_preflight_allows_the_token_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The browser's preflight must be told X-Charon-Token is acceptable.
+
+    Without this the POSTs fail in the browser while working in curl -- the
+    same asymmetry that made the original 503 so hard to place.
+    """
+    fresh = FastAPI()
+    main._install_cors(fresh, ["https://ui.example"])
+    fresh.get("/api/health")(lambda: {"ok": True})
+
+    preflight = TestClient(fresh).options(
+        "/api/health",
+        headers={
+            "Origin": "https://ui.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-charon-token",
+        },
+    )
+    assert preflight.status_code in (200, 204)
+    allowed = preflight.headers["access-control-allow-headers"].lower()
+    assert "x-charon-token" in allowed
+    assert "content-type" in allowed
+    methods = preflight.headers["access-control-allow-methods"].upper()
+    assert "DELETE" in methods, (
+        "the journal's row delete would fail cross-origin without DELETE"
+    )
+
+
+def test_cors_install_reports_whether_it_ran() -> None:
+    """The return value is what a test (or a log line) can rely on."""
+    assert main._install_cors(FastAPI(), []) is False
+    assert main._install_cors(FastAPI(), ["https://ui.example"]) is True
+
+
+def test_cors_without_a_token_is_announced_as_a_warning(
+        caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exposing the bridge to a foreign origin without a token must be said out loud.
+
+    The allowlist decides which pages may call the bridge; it does not
+    authenticate anyone. An operator who sets one and not the other has widened
+    the read surface of a live trading account, and nothing in the console
+    would ever mention it.
+    """
+    monkeypatch.setenv(main.ALLOWED_ORIGINS_ENV, "https://ui.example")
+    monkeypatch.delenv(main.TOKEN_ENV, raising=False)
+    monkeypatch.setenv("CHARON_COMMON_DIR", str(Path(__file__).parent))
+    main._ORIGINS[:] = ["https://ui.example"]
+    main.CORS_ENABLED = True
+    try:
+        with caplog.at_level(logging.WARNING):
+            with TestClient(main.app):
+                pass
+    finally:
+        main._ORIGINS.clear()
+        main.CORS_ENABLED = False
+    text = caplog.text
+    assert "CHARON_TOKEN" in text, "exposing the bridge without a token went unmentioned"
 
