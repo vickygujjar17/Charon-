@@ -9,6 +9,107 @@ Every commit subject starts with the version it ships, for example
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-26
+
+The release where a ticket finally drives the pyramid ladder it described.
+
+v1.4.0 taught the *wire* to carry pyramid stages: `ReadStages()` parsed them, validated each
+one, refused a ladder that did not advance in the trade's direction, and stored the result on
+`SCharonBridgeCommand`. And then nothing read it. `CCharonEngine` never touched
+`cmd.stageCount`, and `CCharonPyramid::Evaluate()` went on resolving every tier from
+`InpPyramidT2RR`/`T3`/`T4`, because `SCharonTierSpec` only knew `activationRR`. A stage could
+say `{"kind": "price", "trigger": 1.29}` and `Evaluate()` would still ask whether 2R had been
+reached. The feature was documented, unit-tested and inert.
+
+v1.7.0 connects it, and closes the gap that made the connection impossible: a tier used to be
+*only* an R multiple, so a PRICE stage had nowhere to live. `SCharonTierSpec` now carries
+`triggerKind` alongside `triggerRR` and `triggerPrice`, `SCharonStagePlan` holds up to three
+stages, and a plan rides on the primary row (`tier == 1`) so it survives a reload.
+
+Also: the two defaults that made the previous behaviour the *only* behaviour are flipped.
+Trailing starts armed (`InpTrailMode = ATR`, `InpTrailStartRR = 0.00`) and pyramiding is on
+(`InpPyramidEnable = true`).
+
+### Added
+
+- **Per-ticket pyramid stages actually fire.** `ApplyTicketPlan()` parses a ticket's `stages`
+  onto the primary row and hands the plan to `CCharonPyramid`; `RestoreTicketPlan()` re-attaches
+  it after a reload. Stage *n* drives tier *n+2* — tier 1 is the primary leg — so a two-stage
+  plan covers tiers 2 and 3. A tier the plan does not name still resolves from the chart input,
+  but only if the ceiling reaches it: `ChPlanLegCeiling` counts `stages + 1`, so the default
+  `InpPyramidMaxLegs = 3` stops a two-stage ticket at tier 3.
+- **PRICE triggers.** A stage may be `{"kind": "price", "trigger": 1.29000}` instead of an R
+  multiple. `CCharonPyramid::Evaluate()` takes the quote the next leg would trade at and judges
+  it against the level, so a price stage fires on the same number the fill sees. A zero price
+  never fires, in either direction: a condition Charon cannot evaluate holds rather than arms.
+- **`ChStageTriggerReached`** — one predicate for both kinds, comparing an RR stage with
+  `CHARON_EPS` so `1.99R` holds at a `2.00R` trigger while `2.00R` fires. An R stage with no
+  usable trigger is never reached.
+- **`ChPlanLegCeiling` / `ChPyramidAllowed`** — the leg ceiling is
+  `max(InpPyramidMaxLegs, stages + 1)`, resolved only when a plan exists, so a plan-less chart
+  is byte-identical to 1.6.3. A plan may **raise** the ceiling and may never **lower** it:
+  `InpPyramidMaxLegs` is the operator's standing decision about exposure.
+- **`ChFormatStagePlan` / `ChParseStagePlan`** — `"kind,trigger,mult;..."`, triggered at 8
+  decimals and multiplied at 4. Empty is "no plan" and not an error; anything malformed refuses
+  the whole plan, because three stages silently becoming one is a lie about the exposure the
+  operator authorised.
+- **Plans persist.** `CharonState` writes `stN` plus three numeric keys per stage
+  (`st0k/st0t/st0m`…). `stN` is always written — `0` when the row has no plan — so an install
+  that never used stages gains no stage keys; a plan that *shrank* also deletes the tail it no
+  longer owns, so a removed stage cannot be resurrected on the next load. `Erase()` sweeps every
+  possible stage key. A stage is re-validated on load — a GlobalVariable is a number on disk and
+  can be edited by hand — and one bad stage drops the whole plan.
+- **Watches carry their ladder.** `SaveWatches()` gains a 17th field. `LoadWatches()` treats it
+  as optional, so a queue written by any older build restores as "no plan".
+- **Filled pending tickets keep their plan.** A LIMIT ticket has no position row until it fills,
+  so the ladder is parked against the order ticket exactly like the trail thresholds and claimed
+  by `AdoptTicket()`.
+
+### Changed
+
+- **Trailing is armed by default.** `InpTrailMode = CHARON_TRAIL_ATR` and
+  `InpTrailStartRR = 0.00`, so a fresh chart trails from its first tick instead of waiting for
+  1R.
+- **Pyramiding is enabled by default.** `InpPyramidEnable = true`. The exposure ceiling is
+  unchanged — three legs, `InpPyramidMaxRiskPct` on the basket — so this widens *when* a scale-in
+  may fire, not *how much* the basket may risk.
+- **Existing charts keep their saved values.** MetaTrader persists input values per chart and in
+  `.set`/`.tpl` templates, so neither flip reaches a chart that was already attached: it goes on
+  publishing `InpTrailMode = OFF` / `InpPyramidEnable = false` until those inputs are set once by
+  hand. Only charts attached after the upgrade inherit the new defaults.
+- `CCharonPyramid::Evaluate()` gained a `price` parameter and now resolves tiers through
+  `ChResolveTierSpec`, so the projection in `MaybePyramid()` and the trigger in `Evaluate()`
+  use one multiplier rather than two.
+- The direction check in `Evaluate()` moved ahead of the trigger check, because a PRICE stage
+  needs to know which side "beyond" means.
+
+### Fixed
+
+- **The self-test asserted a stale schema.** `TestBridgeTicketHelpers` pinned
+  `CHARON_BRIDGE_SCHEMA == 3` against a header that says `4`, so the suite was failing on a
+  clean checkout. It now asserts `4`, and `SCHEMA_VERSION` is unchanged by this release.
+- `CharonState.mqh` includes `CharonPyramid.mqh` explicitly: rows persist a plan, so the header
+  depends on `ChAddStage`/`ChStageIsValid` rather than on the entry point's include order.
+
+### Tests
+
+- Four new MQL5 suites — `TestStagePlan`, `TestStagePlanText`, `TestStageAllowance`,
+  `TestStageTrigger` — covering format/parse round-trip, malformed refusal, empty ⇒ no plan,
+  tier mapping (including `ChResolveTierSpec` falling back to the chart ladder for a tier the
+  plan does not name, which the leg ceiling may still refuse), per-kind field placement, the
+  `ChPyramidAllowed` truth table, `1.99R` versus `2.00R`, PRICE in both directions, zero price,
+  and a plan that raises but never lowers the ceiling. The suite now runs 275 checks.
+- `fake_ea.py` retains `self.stages` and mirrors `ReadStages` + `StagesAdvance`, so the Python
+  suite can prove a ladder arrives in order; `test_order_loop.py` round-trips a mixed `rr` +
+  `price` ticket and asserts the EA's own refusal of a retreating one. The bridge suite now runs
+  461 tests.
+
+### Upgrade
+
+Recompile **every** chart with the v1.7.0 EA, then restart the bridge. Charts on an older build
+refuse a stage-plan watch and an absolute-price activation loudly, naming the field, but a
+half-upgraded install is still a broken one.
+
 ## [1.6.3] - 2026-10-26
 
 A bridge and dashboard patch. **No EA change, no schema change:** `SCHEMA_VERSION` stays `4`,

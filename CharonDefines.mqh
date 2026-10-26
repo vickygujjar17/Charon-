@@ -13,7 +13,7 @@
 //|  target and optionally trails / pyramids.                        |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.06"
+#property version   "1.07"
 #property link      "https://github.com/vickygujjar17/Charon-.git"
 
 #ifndef __CHARON_DEFINES__
@@ -24,7 +24,7 @@
 //| _tools/bump_version.py rewrites this literal and every other     |
 //| version string in the repository in one pass.                    |
 //+------------------------------------------------------------------+
-#define CHARON_VERSION        "1.6.3"
+#define CHARON_VERSION        "1.7.0"
 #define CHARON_NAME           "Charon"
 #define CHARON_REPO           "https://github.com/vickygujjar17/Charon-.git"
 
@@ -109,7 +109,33 @@ enum ENUM_CHARON_STAGE_KIND
 //| Structures                                                       |
 //+------------------------------------------------------------------+
 
-//--- per-ticket management state (no strings: kept in a fixed array)
+//--- one pyramid stage exactly as a ticket stated it
+//|  Numeric only, because it is embedded in SCharonPosState and that struct |
+//|  is kept string-free so the whole table can live in a fixed array.      |
+//|  'trigger' is read according to 'kind', never both ways at once.        |
+struct SCharonStage
+  {
+   int               kind;            // CHARON_STAGE_*
+   double            trigger;         // R multiple, or an absolute price
+   double            lotsMult;        // multiplier of the primary's solved volume
+  };
+
+//+------------------------------------------------------------------+
+//| A ticket's whole pyramid plan                                     |
+//|  count == 0 means the ticket named no stages, so the chart-wide    |
+//|  ladder in [5] PYRAMIDING applies untouched -- that is the entire  |
+//|  compatibility story for every ticket written before v1.7.0.       |
+//|  Stage n drives tier n+2 (tier 1 is the primary leg itself).       |
+//+------------------------------------------------------------------+
+struct SCharonStagePlan
+  {
+   int               count;           // 0..CHARON_MAX_TIERS-1 stages
+   SCharonStage      stage[CHARON_MAX_TIERS - 1];
+  };
+
+//+------------------------------------------------------------------+
+//| Per-ticket management state (no strings: kept in a fixed array)   |
+//+------------------------------------------------------------------+
 struct SCharonPosState
   {
    ulong             ticket;          // position ticket
@@ -136,6 +162,12 @@ struct SCharonPosState
    double            trailStartRR;    // 0 => InpTrailStartRR
    double            trailStartPoints;// 0 => InpTrailStartPoints
    double            trailStartPrice; // 0 => not stated as a price (v1.5.0)
+
+   //--- v1.7.0 per-ticket pyramid plan. Held on the PRIMARY row only
+   //--- (tier == 1), because that is the leg whose 1R every RR trigger is
+   //--- measured against and the leg BasketRefRisk() reads. Empty means the
+   //--- chart-wide tier ladder in [5] PYRAMIDING still governs.
+   SCharonStagePlan  stages;
   };
 
 //--- aggregated view of every managed position on the symbol
@@ -208,8 +240,8 @@ input double          InpRrLadderB          = 2.00;       // RR ladder level B (
 input double          InpRrLadderC          = 3.00;       // RR ladder level C (R, 0 = off)
 
 input group "===== [4] TRAILING STOP ====="
-input ENUM_CHARON_TRAIL_MODE InpTrailMode   = CHARON_TRAIL_OFF; // Trailing mode
-input double          InpTrailStartRR       = 1.00;       // Activation (R)
+input ENUM_CHARON_TRAIL_MODE InpTrailMode   = CHARON_TRAIL_ATR; // Trailing mode
+input double          InpTrailStartRR       = 0.00;       // Activation (R, 0 = trail from the first tick)
 input double          InpTrailStartPoints   = 0.0;        // Activation (points gained, 0 = off)
 input double          InpTrailPoints        = 150.0;      // Trail distance (points)
 input double          InpTrailAtrMult       = 1.50;       // Trail distance (ATR multiple)
@@ -218,7 +250,7 @@ input double          InpTrailGivebackRR    = 0.50;       // RR lock mode: R giv
 input double          InpTrailStepPoints    = 5.0;        // Minimum improvement before a modify
 
 input group "===== [5] PYRAMIDING ====="
-input bool            InpPyramidEnable      = false;      // Enable scale-ins
+input bool            InpPyramidEnable      = true;       // Enable scale-ins
 input int             InpPyramidMaxLegs     = 3;          // Max legs incl. primary (2..4)
 input double          InpPyramidT2RR        = 1.00;       // Tier 2 trigger (R)
 input double          InpPyramidT3RR        = 2.00;       // Tier 3 trigger (R)

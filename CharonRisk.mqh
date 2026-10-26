@@ -4,7 +4,7 @@
 //|  Every monetary decision in Charon flows through this module.    |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.06"
+#property version   "1.07"
 
 #ifndef __CHARON_RISK__
 #define __CHARON_RISK__

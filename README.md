@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.6.3**
+Current release: **v1.7.0**
 
 ---
 
@@ -241,8 +241,8 @@ Charon measures risk and sizes scale-ins; it does not open your first position.
 ### [4] Trailing stop
 | Input | Default | Meaning |
 |---|---|---|
-| `InpTrailMode` | `OFF` | `OFF`, `POINTS`, `ATR`, `HWM_PERCENT`, `RR_LOCK`. |
-| `InpTrailStartRR` | `1.00` | Activation in R. |
+| `InpTrailMode` | `ATR` | `OFF`, `POINTS`, `ATR`, `HWM_PERCENT`, `RR_LOCK`. |
+| `InpTrailStartRR` | `0.00` | Activation in R. `0` trails from the first tick. |
 | `InpTrailStartPoints` | `0.0` | Alternative activation in points (`0` = off). |
 | `InpTrailPoints` | `150` | Distance for `POINTS` mode. |
 | `InpTrailAtrMult` | `1.50` | Distance for `ATR` mode. |
@@ -253,8 +253,8 @@ Charon measures risk and sizes scale-ins; it does not open your first position.
 ### [5] Pyramiding
 | Input | Default | Meaning |
 |---|---|---|
-| `InpPyramidEnable` | `false` | Master switch. Off by default. |
-| `InpPyramidMaxLegs` | `3` | Total legs including the primary (2–4). |
+| `InpPyramidEnable` | `true` | Master switch. On by default since v1.7.0. |
+| `InpPyramidMaxLegs` | `3` | Total legs including the primary (2–4). A ticket's own stage plan may raise this, never lower it. |
 | `InpPyramidT2RR` / `T3` / `T4` | `1.0 / 2.0 / 3.0` | R trigger for each tier. |
 | `InpPyramidT2Mult` / `T3` / `T4` | `0.50` | Lot multiplier vs the primary size. |
 | `InpPyramidMaxRiskPct` | `1.50` | Refuse a tier that pushes basket risk above this. |
@@ -320,13 +320,18 @@ an execution decision, and out of scope.
 
 A tier fires only when **all** gates pass, evaluated in this order:
 
-1. enabled, and `legs + 1 ≤ InpPyramidMaxLegs`
+1. enabled, and `legs + 1 ≤ max(InpPyramidMaxLegs, stages + 1)` — a ticket's
+   own stage count may raise the ceiling, never lower it
 2. (MANUAL trigger only) the trader has armed the ladder
-3. the tier's R trigger is reached
-4. the basket has an unambiguous direction
+3. the basket has an unambiguous direction
+4. the tier's trigger is reached: an R multiple, or an absolute price
 5. the cooldown has elapsed
 6. spread is inside the ceiling
 7. projected basket risk stays under `InpPyramidMaxRiskPct`
+
+Direction is settled before the trigger because a PRICE stage has to know which side
+"beyond the level" means; reporting *wrong way* rather than *not reached* is also the more
+useful answer.
 
 Tier volume is `primarySize × tierMultiplier`, sized against that leg's own strict stop.
 The leg is sent with its stop already attached, so the basket is never unprotected — not
@@ -350,6 +355,39 @@ add that the risk model would otherwise refuse. The dashboard shows the live sta
 > focus. Click the chart before pressing the key. The dashboard row is the confirmation
 > that the press registered — if it still reads `disarmed`, the chart did not have focus.
 
+### Per-ticket stages
+
+A ticket may state its own ladder — up to three stages, each an R trigger or an absolute
+price, each with its own volume multiplier. Stage *n* drives tier *n+2*, because tier 1 is
+the primary leg the operator already opened:
+
+```json
+"stages": [
+  {"kind": "rr",    "trigger": 1.5,     "lots_mult": 0.50},
+  {"kind": "price", "trigger": 1.29000, "lots_mult": 0.75}
+]
+```
+
+That ticket produces two scale-ins: one at 1.5R, one when the market trades through
+`1.29000`. It stops there — a two-stage plan needs `3` legs, which the default
+`InpPyramidMaxLegs = 3` already allows, and nothing beyond it. Raise `InpPyramidMaxLegs` to
+`4` and the chart-wide `InpPyramidT4RR` / `InpPyramidT4Mult` would govern a fourth leg,
+because the plan names no stage for tier 4.
+
+The rules a plan lives under:
+
+- **all-or-nothing.** A malformed stage refuses the whole plan rather than dropping it, so
+  a three-stage ticket can never silently become a one-stage ticket;
+- **it may raise the leg ceiling, never lower it.** The ceiling is
+  `max(InpPyramidMaxLegs, stages + 1)`, so three stages reach tier 4 even on the default
+  ceiling of 3, while a one-stage ticket on a four-leg chart still reaches tier 4.
+  `InpPyramidMaxLegs` is the operator's standing decision about exposure; a ticket is not the
+  place to narrow it;
+- **it lives on the primary row** (`tier == 1`), because that is the leg whose 1R every RR
+  trigger is measured against, and it survives a reload through the state file;
+- **absent means absent.** A ticket with no `stages` behaves exactly as it did before
+  v1.7.0 — the chart-wide ladder in [5] Pyramiding governs.
+
 ### Lot decay preset
 
 Tier volume scales linearly on the shared `refRiskPrice`, so no extra input is needed for
@@ -365,14 +403,19 @@ InpPyramidT4Mult = 0.15
 
 ## Safety defaults
 
-Charon ships in its least dangerous configuration:
+Charon ships with trailing on and pyramiding available, but every rung that could add
+exposure gated by the risk model:
 
-- trailing **off**
-- pyramiding **disabled**
+- trailing **on** (`ATR` mode, armed from the first tick — `InpTrailStartRR = 0`)
+- pyramiding **enabled**, ceiling three legs, tier risk capped at `InpPyramidMaxRiskPct`
 - targets **off** (`InpTpUnit = NONE`)
 - half-risk ladder **off**
 - missing stop → **attach**, never silently ignore
 - `InpMaxRiskPct = 2.00` hard ceiling
+
+> MetaTrader persists input values per chart, so these defaults reach only newly attached
+> charts. A chart that was already running keeps whatever it last saved — set
+> `InpTrailMode` and `InpPyramidEnable` once by hand after upgrading.
 
 Nothing moves a stop or opens a trade until you enable it.
 
@@ -579,8 +622,8 @@ refused. Two things are gated at 4:
 refusal is synchronous and readable instead of a silent no-op visible only in the Experts
 log.
 
-**Upgrade in this order:** recompile *every* chart with the v1.5.0 EA first, then restart
-the bridge. Restarting the bridge first leaves schema-3 charts refusing watches and
+**Upgrade in this order:** recompile *every* chart with the v1.7.0 EA first, then restart
+the bridge. Restarting the bridge first leaves older charts refusing stage-plan watches and
 absolute-price activation — loudly, with a message naming the field.
 
 The command vocabulary is nine verbs: four state-only (`arm`, `disarm`, `trail_mode`,
@@ -592,7 +635,8 @@ The order verbs carry **intent, never size**. A ticket states a side, the block 
 is derived from, a risk figure (a percentage **or** an amount of money, never both), the
 rung it is stated against, and -- since v1.4.0 -- up to three pyramid stages, an optional
 trail activation threshold, an optional basket-wide risk ceiling and a journal note. Since
-v1.5.0 the trail threshold may also be stated as an absolute price. A ticket does not
+v1.5.0 the trail threshold may also be stated as an absolute price, and since v1.7.0 a
+pyramid stage may be stated as an R multiple *or* an absolute price. A ticket does not
 contain a lot, a stop distance, a take-profit or an R multiple, because those are the EA's
 answers: `CCharonRisk::LotForBudget` solves the volume from the block height and the
 ticket's budget, clamps that budget to `InpMaxRiskPct`, and re-verifies the applied risk
@@ -707,14 +751,15 @@ vendored rather than pulled from a CDN.
 `CharonSelfTest.mq5` asserts the pure arithmetic: money conversion, lot rounding (always
 down), stop geometry for all three SL units, R projection and progress, the improvement
 gate, HWM tracking, clamps, the pyramid tier model, the RR ladder projection, manual arm
-expiry, and the bridge's command vocabulary and JSON helpers. It performs no trades and
-needs no market data. Run it on any chart and read the log:
+expiry, per-ticket stage plans (format, parse, tier mapping, trigger predicates and the
+leg ceiling), and the bridge's command vocabulary and JSON helpers. It performs no trades
+and needs no market data. Run it on any chart and read the log:
 
 ```
-SELFTEST RESULT: PASS (147/147)
+SELFTEST RESULT: PASS (275/275)
 ```
 
-The bridge's 168 Python tests run offline:
+The bridge's 461 Python tests run offline:
 
 ```powershell
 cd bridge

@@ -7,7 +7,7 @@
 //|  order of operations is auditable in a single place.              |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.06"
+#property version   "1.07"
 
 #ifndef __CHARON_ENGINE__
 #define __CHARON_ENGINE__
@@ -67,6 +67,9 @@ private:
    bool              HasOwnPending(void);
    int               CollectPending(SCharonBridgePending &out[], const int maxRows);
    void              ApplyTicketTrail(const SCharonBridgeCommand &cmd, const ulong positionTicket);
+   void              ApplyTicketPlan(const SCharonBridgeCommand &cmd, const ulong positionTicket);
+   bool              PlanFromTicket(const SCharonBridgeCommand &cmd, SCharonStagePlan &plan);
+   void              RestoreTicketPlan(void);
    void              PublishBridge(void);
 
    //--- v1.5.0 watch queue
@@ -104,6 +107,11 @@ private:
    double            m_pendingTrailRR;
    double            m_pendingTrailPoints;
    double            m_pendingTrailPrice;
+
+   //--- pyramid stages waiting on the same pending fill. Held for the same
+   //--- reason as the thresholds above: there is no position row yet.
+   SCharonStagePlan  m_pendingPlan;
+   bool              m_pendingPlanValid;
 
    //--- helpers
    bool              WantsTicket(const ulong magic) const;
@@ -153,6 +161,8 @@ CCharonEngine::CCharonEngine(void)
    m_pendingTrailRR     = 0.0;
    m_pendingTrailPoints = 0.0;
    m_pendingTrailPrice  = 0.0;
+   ZeroMemory(m_pendingPlan);
+   m_pendingPlanValid = false;
    m_watchCount = 0;
    m_nextWatchId = 1;
    m_opts.symbol   = "";
@@ -254,6 +264,9 @@ bool CCharonEngine::Init(void)
    //--- still fires there.
    ScanAndAdopt();
    LoadWatches();
+   //--- a reload must keep the ladder the operator authorised, so the plan
+   //--- the primary row persisted is re-attached before the first tick.
+   RestoreTicketPlan();
 
    m_ready = true;
 
@@ -352,7 +365,7 @@ bool CCharonEngine::SaveWatches(void)
       //---   0 id        1 side       2 orderType   3 created   4 price
       //---   5 entry     6 blockTop   7 blockBottom 8 riskPct   9 riskMoney
       //---  10 ceiling  11 startRR   12 startPts   13 startPrc 14 rung
-      //---  15 journalTag
+      //---  15 journalTag 16 stages
       //--- Prices use the symbol's own digits, so a reload reproduces the exact
       //--- doubles the operator sent rather than a rounded copy of them.
       const SCharonBridgeCommand c = m_watch[i].cmd;
@@ -369,7 +382,13 @@ bool CCharonEngine::SaveWatches(void)
       row += DoubleToString(c.trailStartRR, 4) + "\t";
       row += DoubleToString(c.trailStartPoints, 2) + "\t";
       row += DoubleToString(c.trailStartPrice, dg) + "\t";
-      row += StringFormat("%d\t%s", c.rung, c.journalTag);
+      row += StringFormat("%d\t%s\t", c.rung, c.journalTag);
+      //--- v1.7.0: the watch's pyramid ladder, or "" when it named none. The
+      //--- trailing field is appended last so a pre-1.7.0 reader that stops at
+      //--- field 15 still sees a complete record.
+      SCharonStagePlan watchPlan;
+      PlanFromTicket(c, watchPlan);
+      row += ChFormatStagePlan(watchPlan);
       FileWrite(h, row);
      }
    FileClose(h);
@@ -424,6 +443,37 @@ bool CCharonEngine::LoadWatches(void)
       c.trailStartPrice  = StringToDouble(f[13]);
       c.rung        = (int)StringToInteger(f[14]);
       c.journalTag  = f[15];
+
+      //--- v1.7.0: the pyramid ladder, when the record carries one. A queue
+      //--- written by an older build has only 16 fields, and an empty 17th is
+      //--- a watch that named no stages -- both restore as "no plan", which is
+      //--- the old chart-wide behaviour.
+      c.stageCount = 0;
+      for(int s = 0; s < CHARON_BRIDGE_MAX_STAGES; s++)
+        {
+         c.stages[s].kind     = (int)CHARON_STAGE_RR;
+         c.stages[s].trigger  = 0.0;
+         c.stages[s].lotsMult = 0.0;
+        }
+      if(ArraySize(f) >= 17 && f[16] != "")
+        {
+         SCharonStagePlan plan;
+         if(!ChParseStagePlan(f[16], plan) || plan.count <= 0)
+           {
+            //--- a corrupt ladder costs the watch: firing it with the chart
+            //--- inputs would send exposure the operator never authorised.
+            PrintFormat("%s watches: skipping a watch with an unreadable stage plan",
+                        CHARON_NAME);
+            continue;
+           }
+         for(int s = 0; s < plan.count; s++)
+           {
+            c.stages[s].kind     = plan.stage[s].kind;
+            c.stages[s].trigger  = plan.stage[s].trigger;
+            c.stages[s].lotsMult = plan.stage[s].lotsMult;
+           }
+         c.stageCount = plan.count;
+        }
 
       //--- a row that would not have passed the parser is not worth keeping:
       //--- restoring it would submit a ticket the operator never validated.
@@ -716,6 +766,25 @@ void CCharonEngine::AdoptTicket(const ulong ticket)
         }
      }
 
+   //--- a pending order may also have carried pyramid stages. Same matching
+   //--- rule as the trail thresholds: one Charon pending order at a time, so a
+   //--- fill claims the plan and the plan travels with the primary leg.
+   if(m_pendingPlanValid && m_pendingPlan.count > 0)
+     {
+      SCharonPosState pending;
+      if(m_state.Get(idx, pending) && pending.tier == 1)
+        {
+         ChCopyPlan(pending.stages, m_pendingPlan);
+         if(m_state.Set(idx, pending))
+            m_state.Save(idx, true);
+         m_pyramid.SetPlan(pending.stages);
+         PrintFormat("%s #%I64u pyramid plan from a filled pending: %s", CHARON_NAME,
+                     ticket, ChFormatStagePlan(pending.stages));
+        }
+      m_pendingPlanValid = false;
+      ZeroMemory(m_pendingPlan);
+     }
+
    if(haveState)
      {
       SCharonPosState row;
@@ -784,6 +853,11 @@ void CCharonEngine::AdoptTicket(const ulong ticket)
                   m_risk.MoneyAtDistance(riskPrice, lot), AccountInfoString(ACCOUNT_CURRENCY),
                   row.tier);
      }
+
+   //--- a reloaded chart has just recovered this ticket's plan from the state
+   //--- file; re-attaching it here is what makes the ladder survive a
+   //--- recompile rather than silently reverting to the chart inputs.
+   RestoreTicketPlan();
   }
 
 //+------------------------------------------------------------------+
@@ -1086,7 +1160,11 @@ void CCharonEngine::MaybePyramid(void)
 
    SCharonTierSpec spec;
    double projected = m_basket.riskMoney;
-   if(ChTierSpec(nextTier, spec))
+   //--- the same resolution Evaluate() uses: the ticket's own stage when it
+   //--- has one, otherwise the chart ladder. Projecting with a different
+   //--- multiplier than the one that will actually be sent would understate
+   //--- the basket risk the ceiling check is about to approve.
+   if(m_pyramid.ResolveSpec(nextTier, spec))
      {
       bool sized = false;
       double probeLot = m_risk.LotForStop(MathMax(refRiskPrice, m_risk.StopDistanceWithBuffer()),
@@ -1099,8 +1177,12 @@ void CCharonEngine::MaybePyramid(void)
    //--- direction as a signed integer: POSITION_TYPE_BUY is 0, so passing the
    //--- raw type would be indistinguishable from "no direction".
    int dirSign = (m_basket.dir == (long)POSITION_TYPE_BUY ? 1 : -1);
+   //--- the price the stage is judged against: the quote the next leg would
+   //--- trade at, so a PRICE stage fires on the same number the fill sees.
+   double stagePrice = (isLong ? m_risk.Bid() : m_risk.Ask());
    ENUM_CHARON_TIER_DECISION decision = m_pyramid.Evaluate(m_basket.legs, nextTier, dirSign,
-                                                           progress, projected, base);
+                                                           progress, projected, base,
+                                                           stagePrice);
    if(decision != CH_TIER_READY)
      {
       if(InpVerbose && decision != CH_TIER_NOTRIGGER && decision != CH_TIER_DISABLED
@@ -1658,6 +1740,129 @@ void CCharonEngine::ApplyTicketTrail(const SCharonBridgeCommand &cmd,
   }
 
 //+------------------------------------------------------------------+
+//| Build a plan from the stages a ticket carried                    |
+//|                                                                  |
+//|  The wire parser already rejected every malformed stage, so a     |
+//|  stage that reaches here is individually valid. What is decided   |
+//|  here is whether the plan as a whole is worth keeping: a plan is  |
+//|  all-or-nothing, because a three-stage ticket that silently       |
+//|  becomes one stage is a lie about the exposure the operator        |
+//|  authorised.                                                      |
+//+------------------------------------------------------------------+
+bool CCharonEngine::PlanFromTicket(const SCharonBridgeCommand &cmd,
+                                   SCharonStagePlan &plan)
+  {
+   ZeroMemory(plan);
+   if(cmd.stageCount <= 0)
+      return false;
+
+   for(int i = 0; i < cmd.stageCount && i < CHARON_BRIDGE_MAX_STAGES; i++)
+     {
+      if(!ChAddStage(plan, cmd.stages[i].kind,
+                     cmd.stages[i].trigger, cmd.stages[i].lotsMult))
+        {
+         ZeroMemory(plan);
+         return false;
+        }
+     }
+   return (plan.count > 0);
+  }
+
+//+------------------------------------------------------------------+
+//| Attach a ticket's pyramid stages to the primary leg              |
+//|                                                                  |
+//|  The plan lives on the tier-1 row because that is the leg whose   |
+//|  1R every RR trigger is measured against. A ticket that named no   |
+//|  stages clears the plan outright: the chart-wide ladder governs,   |
+//|  which is exactly the pre-1.7.0 behaviour.                        |
+//|                                                                  |
+//|  Two deliberate rules:                                            |
+//|   * a scale-in leg (tier > 1) never owns a plan, so a ticket that  |
+//|     arrives against one is ignored rather than overwriting the     |
+//|     primary's;                                                    |
+//|   * the plan is written whether or not it changed, because the     |
+//|     persisted copy is the only thing a restart can recover from.   |
+//+------------------------------------------------------------------+
+void CCharonEngine::ApplyTicketPlan(const SCharonBridgeCommand &cmd,
+                                    const ulong positionTicket)
+  {
+   if(positionTicket == 0)
+      return;
+
+   int idx = m_state.Find(positionTicket);
+   if(idx < 0)
+      return;
+
+   SCharonPosState row;
+   if(!m_state.Get(idx, row))
+      return;
+   if(row.tier != 1)
+      return;
+
+   SCharonStagePlan plan;
+   bool have = PlanFromTicket(cmd, plan);
+
+   if(have)
+     {
+      m_pyramid.SetPlan(plan);
+      ChCopyPlan(row.stages, plan);
+      PrintFormat("%s #%I64u pyramid plan: %s", CHARON_NAME, positionTicket,
+                  ChFormatStagePlan(plan));
+     }
+   else
+     {
+      //--- nothing stated: drop any plan the row was carrying, so a reload
+      //--- or a re-issued ticket cannot resurrect a stale ladder.
+      m_pyramid.ClearPlan();
+      ZeroMemory(row.stages);
+     }
+
+   if(m_state.Set(idx, row))
+      m_state.Save(idx, true);
+  }
+
+//+------------------------------------------------------------------+
+//| Re-attach the plan the primary row persisted                     |
+//|                                                                  |
+//|  Called after adoption and on init, so a reload keeps the ladder   |
+//|  the operator authorised. The plan is taken from the tier-1 row    |
+//|  only: it is the row BasketRefRisk() reads, and a scale-in row     |
+//|  carrying a plan would mean the table is inconsistent.            |
+//|                                                                  |
+//|  Idempotent, and cheap when there is nothing to do: a plan already |
+//|  in place is left alone rather than cleared and rebuilt, so        |
+//|  calling this from every adoption pass cannot churn state or spam  |
+//|  the log.                                                          |
+//+------------------------------------------------------------------+
+void CCharonEngine::RestoreTicketPlan(void)
+  {
+   for(int i = 0; i < m_state.Count(); i++)
+     {
+      SCharonPosState row;
+      if(!m_state.Get(i, row))
+         continue;
+      if(row.tier != 1)
+         continue;
+      if(row.stages.count <= 0)
+         continue;
+
+      //--- already attached: nothing to redo
+      if(m_pyramid.PlanText() == ChFormatStagePlan(row.stages))
+         return;
+
+      m_pyramid.SetPlan(row.stages);
+      if(InpVerbose)
+         PrintFormat("%s #%I64u pyramid plan restored: %s", CHARON_NAME,
+                     row.ticket, ChFormatStagePlan(row.stages));
+      return;
+     }
+
+   //--- no primary row carries a plan, so nothing should be driving tiers.
+   //--- Clearing here is what stops a closed ticket's ladder from outliving it.
+   m_pyramid.ClearPlan();
+  }
+
+//+------------------------------------------------------------------+
 //| Record the verdict of the last attended ticket                   |
 //|  Every field is what the EA actually used or produced, so the     |
 //|  dashboard never has to derive a lot, a stop or an R multiple.    |
@@ -2079,6 +2284,16 @@ bool CCharonEngine::ApplyOrderCommand(const SCharonBridgeCommand &cmd)
          m_pendingTrailPrice  = cmd.trailStartPrice;
         }
 
+      //--- the plan is parked the same way: no row exists to hang it on yet,
+      //--- and a limit ticket that specifies its ladder must not lose it.
+      SCharonStagePlan pendingPlan;
+      ZeroMemory(pendingPlan);
+      if(PlanFromTicket(cmd, pendingPlan))
+        {
+         ChCopyPlan(m_pendingPlan, pendingPlan);
+         m_pendingPlanValid = true;
+        }
+
       SetOrderVerdict("pending",
                       StringFormat("limit working at %.5f, stop %.5f", entry, stop),
                       side, lot, entry, stop, riskMoney, riskPct, cmd.rung, ticket);
@@ -2143,6 +2358,9 @@ bool CCharonEngine::ApplyOrderCommand(const SCharonBridgeCommand &cmd)
    //--- attached to the row that was just adopted so the threshold travels
    //--- with the position rather than with the chart.
    ApplyTicketTrail(cmd, opened);
+   //--- the ticket's own pyramid ladder lands on the primary row, so a ticket
+   //--- that named stages drives scale-ins instead of the chart inputs.
+   ApplyTicketPlan(cmd, opened);
 
    double shownEntry = (fill > 0.0 ? fill : entry);
    SetOrderVerdict("accepted",

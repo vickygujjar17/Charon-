@@ -9,7 +9,7 @@
 //|  Run it on any chart. The verdict line is "SELFTEST RESULT: ..." |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.06"
+#property version   "1.07"
 #property script_show_inputs
 
 //--- Same angle-include contract as Charon.mq5: headers live in Include\Charon\.
@@ -509,7 +509,7 @@ void TestBridgeJson(void)
 void TestBridgeTicketHelpers(void)
   {
    Check(CHARON_BRIDGE_MAX_STAGES == 3, "ticket: three pyramid stages");
-   Check(CHARON_BRIDGE_SCHEMA == 3, "ticket: the wire revision is 3");
+   Check(CHARON_BRIDGE_SCHEMA == 4, "ticket: the wire revision is 4");
 
    //--- the journal tag is what rides in a broker comment, so it must be
    //--- printable ASCII and nothing else.
@@ -578,6 +578,203 @@ void TestBridgeTicketHelpers(void)
 //+------------------------------------------------------------------+
 //| Script entry point                                               |
 //+------------------------------------------------------------------+
+//| v1.7.0: per-ticket pyramid stage plans                           |
+//|                                                                  |
+//|  Everything here is pure, so it asserts the exact rules the       |
+//|  engine relies on: what a plan means, how it maps onto tiers, and |
+//|  when a stage fires. The persistence format is round-tripped      |
+//|  because it is the only thing a restart has to work from.         |
+//+------------------------------------------------------------------+
+void TestStagePlan(void)
+  {
+   //--- kind and validity are per-kind: a PRICE stage has no R trigger at
+   //--- all, so the old "activationRR > 0" test would reject every one.
+   SCharonStage rr;
+   rr.kind = (int)CHARON_STAGE_RR;    rr.trigger = 2.0;    rr.lotsMult = 0.5;
+   SCharonStage px;
+   px.kind = (int)CHARON_STAGE_PRICE; px.trigger = 1.2650; px.lotsMult = 1.0;
+   Check(ChStageIsValid(rr), "stage: an RR stage is valid");
+   Check(ChStageIsValid(px), "stage: a PRICE stage is valid");
+
+   SCharonStage bad = rr;
+   bad.trigger = 0.0;
+   Check(!ChStageIsValid(bad), "stage: a zero trigger is refused");
+   bad = rr;
+   bad.lotsMult = 0.0;
+   Check(!ChStageIsValid(bad), "stage: a zero multiplier is refused");
+   bad = rr;
+   bad.kind = 7;
+   Check(!ChStageIsValid(bad), "stage: an unknown kind is refused");
+
+   //--- building a plan: the ceiling is the tier count, not the array size
+   SCharonStagePlan plan;
+   ZeroMemory(plan);
+   Check(ChAddStage(plan, (int)CHARON_STAGE_RR, 1.5, 0.5), "plan: first stage added");
+   Check(ChAddStage(plan, (int)CHARON_STAGE_PRICE, 1.2650, 1.0), "plan: second stage added");
+   Check(plan.count == 2, "plan: count tracks the additions");
+   Check(!ChAddStage(plan, (int)CHARON_STAGE_RR, 0.0, 1.0),
+         "plan: an invalid stage is refused");
+   Check(plan.count == 2, "plan: a refused stage does not grow the plan");
+
+   //--- tier mapping: stage 0 drives tier 2, stage 1 drives tier 3
+   SCharonTierSpec spec;
+   Check(ChPlanSpec(plan, 2, spec), "plan: tier 2 resolves from stage 0");
+   Check(spec.triggerKind == CHARON_STAGE_RR, "plan: tier 2 is an RR stage");
+   Check(Near(spec.triggerRR, 1.5), "plan: tier 2 R trigger");
+   Check(Near(spec.activationRR, 1.5), "plan: legacy alias kept in step");
+   Check(Near(spec.lotMultiplier, 0.5), "plan: tier 2 multiplier");
+
+   Check(ChPlanSpec(plan, 3, spec), "plan: tier 3 resolves from stage 1");
+   Check(spec.triggerKind == CHARON_STAGE_PRICE, "plan: tier 3 is a PRICE stage");
+   Check(Near(spec.triggerPrice, 1.2650), "plan: tier 3 price trigger");
+   Check(Near(spec.activationRR, 0.0), "plan: a price stage has no R trigger");
+
+   //--- a two-stage plan stops at tier 3; tier 4 falls back to the chart
+   Check(!ChPlanSpec(plan, 4, spec), "plan: tier 4 is not in a two-stage plan");
+   Check(ChResolveTierSpec(plan, 4, spec), "plan: tier 4 falls back to the chart ladder");
+   Check(Near(spec.activationRR, InpPyramidT4RR), "plan: the fallback uses InpPyramidT4RR");
+   Check(!ChPlanSpec(plan, 1, spec), "plan: tier 1 is never a plan stage");
+  }
+
+//+------------------------------------------------------------------+
+//| v1.7.0: the persistable stage-plan text                          |
+//|                                                                  |
+//|  This is the only representation a restart has, so it must round- |
+//|  trip exactly and must never restore a partial ladder. A three-   |
+//|  stage ticket that silently becomes a one-stage ticket is a lie    |
+//|  about the exposure the operator authorised.                      |
+//+------------------------------------------------------------------+
+void TestStagePlanText(void)
+  {
+   SCharonStagePlan plan;
+   ZeroMemory(plan);
+   ChAddStage(plan, (int)CHARON_STAGE_RR, 1.5, 0.5);
+   ChAddStage(plan, (int)CHARON_STAGE_PRICE, 1.2650, 1.0);
+
+   string text = ChFormatStagePlan(plan);
+   Check(text == "0,1.50000000,0.5000;1,1.26500000,1.0000",
+         "plan text: kind,trigger,mult joined by ';' and ','", text);
+
+   SCharonStagePlan back;
+   Check(ChParseStagePlan(text, back), "plan text: formatted text parses back");
+   Check(back.count == 2, "plan text: round-trip keeps the count");
+   Check(back.stage[0].kind == (int)CHARON_STAGE_RR, "plan text: round-trip keeps kind 0");
+   Check(Near(back.stage[0].trigger, 1.5), "plan text: round-trip keeps the R trigger");
+   Check(Near(back.stage[0].lotsMult, 0.5), "plan text: round-trip keeps the multiplier");
+   Check(back.stage[1].kind == (int)CHARON_STAGE_PRICE, "plan text: round-trip keeps kind 1");
+   Check(Near(back.stage[1].trigger, 1.2650, 1e-8), "plan text: a 5-digit price stays exact");
+
+   //--- empty means "no plan", and that is not an error: it is how every
+   //--- watch and row written before v1.7.0 reloads.
+   Check(ChParseStagePlan("", back), "plan text: empty is not an error");
+   Check(back.count == 0, "plan text: empty clears the plan");
+   Check(ChParseStagePlan("   ", back), "plan text: whitespace-only is not an error");
+   Check(back.count == 0, "plan text: whitespace-only clears the plan");
+   Check(ChFormatStagePlan(back) == "", "plan text: an empty plan formats as \"\"");
+
+   //--- malformed refuses the WHOLE plan, never a surviving prefix
+   Check(!ChParseStagePlan("0,2.0", back), "plan text: a missing multiplier is refused");
+   Check(!ChParseStagePlan("0,2.0,0.5;garbage", back),
+         "plan text: a bad second stage refuses the plan");
+   Check(back.count == 0, "plan text: a refused parse leaves no partial plan");
+   Check(!ChParseStagePlan("0,2.0,0.5;", back), "plan text: a trailing separator is refused");
+   Check(!ChParseStagePlan("0,2.0,0.5;1,1.2,1.0;2,1.3,1.0;3,1.4,1.0", back),
+         "plan text: a fourth stage exceeds the ceiling");
+   Check(!ChParseStagePlan("9,2.0,0.5", back), "plan text: an unknown kind is refused");
+   Check(!ChParseStagePlan("0,-1.0,0.5", back), "plan text: a negative trigger is refused");
+   Check(!ChParseStagePlan("0,2.0,0.0", back), "plan text: a zero multiplier is refused");
+  }
+
+//+------------------------------------------------------------------+
+//| v1.7.0: the leg ceiling and the stage trigger                    |
+//|                                                                  |
+//|  ChPlanLegCeiling / ChPyramidAllowed decide HOW MANY scale-ins a  |
+//|  ticket may reach; ChStageTriggerReached decides WHEN one fires.  |
+//|  Both are pure, so the whole truth table is asserted here rather  |
+//|  than discovered on a live chart.                                 |
+//+------------------------------------------------------------------+
+void TestStageAllowance(void)
+  {
+   //--- a plan may raise the ceiling, never lower it
+   Check(ChPlanLegCeiling(0, 2) == 2, "ceiling: no plan keeps the chart ceiling");
+   Check(ChPlanLegCeiling(3, 2) == 4, "ceiling: three stages raise 2 legs to 4");
+   Check(ChPlanLegCeiling(3, 4) == 4, "ceiling: a plan never lowers a higher ceiling");
+   Check(ChPlanLegCeiling(1, 4) == 4, "ceiling: a short plan never lowers the ceiling");
+   Check(ChPlanLegCeiling(3, 99) == CHARON_MAX_TIERS, "ceiling: CHARON_MAX_TIERS binds");
+   Check(ChPlanLegCeiling(0, 0) == 1, "ceiling: zero configured clamps to the primary");
+
+   //--- the gate itself
+   Check(!ChPyramidAllowed(false, 1, 2, 0, 4), "allow: disabled is never allowed");
+   Check(ChPyramidAllowed(true, 1, 2, 0, 4), "allow: primary plus tier 2");
+   Check(!ChPyramidAllowed(true, 4, 5, 0, 4), "allow: a fifth tier is never allowed");
+   Check(!ChPyramidAllowed(true, 1, 1, 0, 4), "allow: tier 1 is not a scale-in");
+   Check(ChPyramidAllowed(true, 1, 4, 3, 2), "allow: a plan raises the ceiling to 4");
+   Check(ChPyramidAllowed(true, 2, 3, 3, 2), "allow: legs below the raised ceiling may add");
+   Check(!ChPyramidAllowed(true, 3, 4, 3, 2), "allow: legs at the ceiling is refused");
+   Check(!ChPyramidAllowed(true, 1, 3, 1, 2), "allow: a one-stage plan cannot reach tier 3");
+  }
+
+//+------------------------------------------------------------------+
+//| v1.7.0: when does a stage fire?                                  |
+//|  RR compares against progress with CHARON_EPS, so 1.99R holds at  |
+//|  2R while 2.00R fires -- exactly, not approximately. PRICE is     |
+//|  direction-sensitive because "beyond" names a different side for  |
+//|  a long and a short.                                              |
+//+------------------------------------------------------------------+
+void TestStageTrigger(void)
+  {
+   SCharonTierSpec rrSpec;
+   ZeroMemory(rrSpec);
+   rrSpec.index         = 2;
+   rrSpec.triggerKind   = CHARON_STAGE_RR;
+   rrSpec.triggerRR     = 2.0;
+   rrSpec.activationRR  = 2.0;
+   rrSpec.lotMultiplier = 0.5;
+   Check(!ChStageTriggerReached(rrSpec, 1.99, 1.10000, true), "trigger: 1.99R holds at 2R");
+   Check(ChStageTriggerReached(rrSpec, 2.00, 1.10000, true), "trigger: 2.00R fires at 2R");
+   Check(ChStageTriggerReached(rrSpec, 2.40, 1.10000, true), "trigger: beyond 2R fires");
+   Check(!ChStageTriggerReached(rrSpec, 0.00, 1.10000, true), "trigger: no progress holds");
+
+   //--- RR is direction-agnostic: progress is already signed by the caller
+   Check(ChStageTriggerReached(rrSpec, 2.10, 1.10000, false),
+         "trigger: an RR stage fires for a SHORT too");
+
+   //--- PRICE, both directions. A BUY fires up through the level, a SELL down.
+   SCharonTierSpec pxSpec;
+   ZeroMemory(pxSpec);
+   pxSpec.index         = 2;
+   pxSpec.triggerKind   = CHARON_STAGE_PRICE;
+   pxSpec.triggerPrice  = 1.26500;
+   pxSpec.lotMultiplier = 1.0;
+   Check(!ChStageTriggerReached(pxSpec, 99.0, 1.26499, true),
+         "trigger: a BUY below the price level holds");
+   Check(ChStageTriggerReached(pxSpec, 0.0, 1.26500, true),
+         "trigger: a BUY at the price level fires");
+   Check(ChStageTriggerReached(pxSpec, 0.0, 1.26600, true),
+         "trigger: a BUY beyond the price level fires");
+   Check(ChStageTriggerReached(pxSpec, 99.0, 1.26500, false),
+         "trigger: a SELL at the price level fires");
+   Check(ChStageTriggerReached(pxSpec, 99.0, 1.26400, false),
+         "trigger: a SELL beyond the price level fires");
+   Check(!ChStageTriggerReached(pxSpec, 99.0, 1.26600, false),
+         "trigger: a SELL above the price level holds");
+
+   //--- a zero price never fires in either direction: a condition Charon
+   //--- cannot evaluate must hold rather than arm.
+   Check(!ChStageTriggerReached(pxSpec, 99.0, 0.0, true), "trigger: zero price never fires (long)");
+   Check(!ChStageTriggerReached(pxSpec, 99.0, 0.0, false), "trigger: zero price never fires (short)");
+
+   //--- a stage with no usable trigger is never reached
+   SCharonTierSpec empty;
+   ZeroMemory(empty);
+   empty.triggerKind   = CHARON_STAGE_RR;
+   empty.triggerRR     = 0.0;
+   empty.lotMultiplier = 1.0;
+   Check(!ChStageTriggerReached(empty, 99.0, 1.10000, true),
+         "trigger: an RR stage with no trigger holds");
+  }
+
+//+------------------------------------------------------------------+
 //| Bridge: file-name sanitising                                     |
 //|                                                                  |
 //|  SafeName() must match paths.sanitize_symbol() character for      |
@@ -634,6 +831,11 @@ void OnStart(void)
    TestBridgeJson();
    TestBridgeTicketHelpers();
    TestBridgeSafeName();
+   //--- v1.7.0 per-ticket stage plans
+   TestStagePlan();
+   TestStagePlanText();
+   TestStageAllowance();
+   TestStageTrigger();
 
    PrintFormat("==================================================");
    PrintFormat("passed: %d   failed: %d", g_pass, g_fail);

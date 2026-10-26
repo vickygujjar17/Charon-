@@ -73,6 +73,77 @@ def test_limit_ticket_is_reported_as_pending_not_filled(common_dir: Path) -> Non
     assert ea.order["status"] == "pending"
 
 
+def test_mixed_rr_and_price_stages_survive_the_loop(common_dir: Path) -> None:
+    """A ladder that mixes both trigger kinds must arrive unchanged.
+
+    v1.7.0 lets one ticket state an R trigger for one scale-in and an absolute
+    price for the next. The two kinds are ordered against their own peers
+    only, so a mixed ladder is legal -- and nothing in the pipe is allowed to
+    reorder, drop or re-coerce a stage, because the EA's whole plan depends on
+    stage n meaning tier n+2.
+    """
+    ea = FakeEA(common_dir)
+    ea.publish()
+
+    ticket = build_order_intent(
+        side="BUY", order_type="MARKET", entry=None,
+        block_top=1.27000, block_bottom=1.25000,
+        risk_pct=0.5, trail_trigger=4, rung=0,
+        stages=[
+            {"kind": "rr", "trigger": 1.5, "lots_mult": 0.5},
+            {"kind": "price", "trigger": 1.29000, "lots_mult": 0.75},
+        ],
+    )
+    sent = commands.submit("order_open", ea.symbol, order=ticket)
+    assert sent["sent"]["stages"] == [
+        {"kind": "rr", "trigger": 1.5, "lots_mult": 0.5},
+        {"kind": "price", "trigger": 1.29, "lots_mult": 0.75},
+    ]
+
+    verdict = ea.poll()
+    assert verdict is not None
+    assert verdict["accepted"] is True, verdict["reason"]
+
+    # --- order preserved and values intact: an R multiple stays an R
+    # --- multiple, a price stays a price, neither is rescaled in flight
+    assert [row["kind"] for row in ea.stages] == ["rr", "price"]
+    assert ea.stages[0]["trigger"] == 1.5
+    assert ea.stages[0]["lots_mult"] == 0.5
+    assert ea.stages[1]["trigger"] == 1.29
+    assert ea.stages[1]["lots_mult"] == 0.75
+
+
+def test_ea_refuses_a_retreating_stage_ladder(common_dir: Path) -> None:
+    """The second line of defence for the ladder.
+
+    ``build_order_intent`` already refuses this, so the file is written by
+    hand: a plan whose second R trigger sits below the first could never fire,
+    which would quietly turn a two-stage ticket into a one-stage ticket.
+    """
+    ea = FakeEA(common_dir)
+    (ea.inbox / "00000000000000000003-000003-bad.json").write_text(json.dumps({
+        "schema": SCHEMA,
+        "id": "retreating-ladder",
+        "verb": "order_open",
+        "symbol": ea.symbol,
+        "issued": local_epoch(),
+        "side": "BUY",
+        "order_type": "MARKET",
+        "block_top": 1.27000,
+        "block_bottom": 1.25000,
+        "risk_pct": 0.5,
+        "stages": [
+            {"kind": "rr", "trigger": 3.0, "lots_mult": 0.5},
+            {"kind": "rr", "trigger": 2.0, "lots_mult": 0.5},
+        ],
+    }), encoding="utf-8")
+
+    verdict = ea.poll()
+    assert verdict is not None
+    assert verdict["accepted"] is False
+    assert "advance" in verdict["reason"]
+
+
 def test_ea_refuses_a_ticket_the_bridge_forgot_to_validate(common_dir: Path) -> None:
     """Defence in depth: the EA is not allowed to trust the writer.
 

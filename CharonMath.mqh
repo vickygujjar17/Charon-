@@ -6,7 +6,7 @@
 //|  risk / RR mathematics is defined.                               |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.06"
+#property version   "1.07"
 
 #ifndef __CHARON_MATH__
 #define __CHARON_MATH__

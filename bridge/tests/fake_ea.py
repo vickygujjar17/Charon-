@@ -118,6 +118,10 @@ class FakeEA:
             "entry": 0.0, "stop": 0.0, "risk_money": 0.0, "risk_pct": 0.0,
             "rung": 0, "ticket": 0, "journal_tag": "",
         }
+        # --- v1.7.0: the pyramid ladder the last ticket carried, exactly as it
+        # --- arrived. Kept separate from ``order`` because a plan outlives the
+        # --- verdict that accepted it: the leg it drives opens later.
+        self.stages: list[dict[str, Any]] = []
         # --- working pending orders, as CollectPending would report them.
         # --- Tests that need one append a row rather than relying on a
         # --- default, because a pending ticket is something the dashboard
@@ -299,6 +303,51 @@ class FakeEA:
             if entry is None:
                 return "watch_add needs an entry price to watch for"
 
+        # --- v1.7.0 pyramid stages. Mirrors ReadStages + StagesAdvance: a stage
+        # --- is per-kind valid, the ladder must advance in the trade's
+        # --- direction, and like kinds must be monotonic so no stage is
+        # --- unreachable. An absent array is not an error.
+        raw_stages = doc.get("stages")
+        if raw_stages is not None:
+            if not isinstance(raw_stages, list):
+                return "stages is not an array"
+            if len(raw_stages) > 3:
+                return "a ticket may carry at most 3 pyramid stages"
+            last_price = float("inf") if side == "SELL" else float("-inf")
+            last_rr = float("inf") if side == "SELL" else float("-inf")
+            for raw in raw_stages:
+                if not isinstance(raw, dict):
+                    return "a pyramid stage is not an object"
+                kind = raw.get("kind")
+                if kind not in ("rr", "price"):
+                    return f"stage kind '{kind}' is not supported"
+                trigger = raw.get("trigger")
+                if (not isinstance(trigger, (int, float)) or isinstance(trigger, bool)
+                        or not trigger > 0):
+                    return "a pyramid stage has no positive trigger"
+                mult = raw.get("lots_mult", 1.0)
+                if (not isinstance(mult, (int, float)) or isinstance(mult, bool)
+                        or not mult > 0):
+                    return "a pyramid stage has a non-positive volume multiplier"
+                direction = "pyramid stages do not advance in the trade's direction"
+                if kind == "price":
+                    # --- beyond the block, then strictly monotonic
+                    if side == "BUY" and trigger <= top:
+                        return direction
+                    if side == "SELL" and trigger >= bottom:
+                        return direction
+                    if side == "BUY" and trigger <= last_price:
+                        return direction
+                    if side == "SELL" and trigger >= last_price:
+                        return direction
+                    last_price = float(trigger)
+                else:
+                    if side == "BUY" and trigger <= last_rr:
+                        return direction
+                    if side == "SELL" and trigger >= last_rr:
+                        return direction
+                    last_rr = float(trigger)
+
         tag = doc.get("journal_tag")
         if tag is not None:
             if not isinstance(tag, str):
@@ -454,6 +503,11 @@ class FakeEA:
             # --- ticket's budget, never taken from the command, which is
             # --- exactly the property the tests below assert.
             side = document["side"]
+            # --- v1.7.0: the ladder the ticket carried is retained verbatim;
+            # --- the real EA parses it onto the primary row, and the dashboard
+            # --- reads it back from the snapshot. Retaining it here is what
+            # --- lets a test prove nothing was dropped or reordered in flight.
+            self.stages = [dict(row) for row in (document.get("stages") or [])]
             # --- risk is stated once; the fake honours whichever form arrived,
             # --- exactly as ApplyOrderCommand does. A money budget is used
             # --- as-is (the real EA clamps it first).

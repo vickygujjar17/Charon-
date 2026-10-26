@@ -7,13 +7,18 @@
 //|  the high-water mark and the latches for every live position.     |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.06"
+#property version   "1.07"
 
 #ifndef __CHARON_STATE__
 #define __CHARON_STATE__
 
 #include "CharonDefines.mqh"
 #include "CharonMath.mqh"
+//--- the stage-plan helpers (ChAddStage / ChStageIsValid) live with the
+//--- pyramid model. Rows persist a plan, so this header depends on them; the
+//--- include is explicit rather than relying on the entry point's ordering,
+//--- and the guards make it free when CharonPyramid is already loaded.
+#include "CharonPyramid.mqh"
 
 //+------------------------------------------------------------------+
 //| CCharonState                                                     |
@@ -237,6 +242,33 @@ void CCharonState::Save(const int index, const bool force)
    //--- v1.5.0 activation expressed as an absolute price. 0 means the row
    //--- still derives its threshold from the chart input.
    GlobalVariableSet(Key(tk, "trX"),      m_rows[index].trailStartPrice);
+   //--- v1.7.0 per-ticket pyramid plan, on the primary row only. Written as
+   //--- a count plus three numeric triples rather than one packed string:
+   //--- GlobalVariables hold doubles, and a string field would need a parser
+   //--- here as well as on the wire. 0 stages writes stN = 0 and nothing else,
+   //--- so an install that never used plans gains no clutter.
+   int planCount = ChClampI(m_rows[index].stages.count, 0, CHARON_MAX_TIERS - 1);
+   GlobalVariableSet(Key(tk, "stN"), (double)planCount);
+   for(int s = 0; s < CHARON_MAX_TIERS - 1; s++)
+     {
+      string sfx = IntegerToString(s);
+      if(s >= planCount)
+        {
+         //--- a plan that shrank must not leave its tail behind: a later
+         //--- load would otherwise resurrect stages the operator removed.
+         string stale[] = {"st" + sfx + "k", "st" + sfx + "t", "st" + sfx + "m"};
+         for(int f = 0; f < 3; f++)
+           {
+            string k = Key(tk, stale[f]);
+            if(GlobalVariableCheck(k))
+               GlobalVariableDel(k);
+           }
+         continue;
+        }
+      GlobalVariableSet(Key(tk, "st" + sfx + "k"), (double)m_rows[index].stages.stage[s].kind);
+      GlobalVariableSet(Key(tk, "st" + sfx + "t"), m_rows[index].stages.stage[s].trigger);
+      GlobalVariableSet(Key(tk, "st" + sfx + "m"), m_rows[index].stages.stage[s].lotsMult);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -279,6 +311,27 @@ bool CCharonState::Load(const ulong ticket, const int tierDefault, SCharonPosSta
    out.trailStartRR     = GlobalVariableGet(Key(ticket, "trR"));
    out.trailStartPoints = GlobalVariableGet(Key(ticket, "trP"));
    out.trailStartPrice  = GlobalVariableGet(Key(ticket, "trX"));
+   //--- v1.7.0 pyramid plan. Absent stN means "no plan", which is how every
+   //--- row written before 1.7.0 restores. A stored stage is re-validated
+   //--- before it is trusted: a global variable is just a number on disk and
+   //--- can be edited by hand.
+   ZeroMemory(out.stages);
+   int planCount = ChClampI((int)GlobalVariableGet(Key(ticket, "stN")),
+                            0, CHARON_MAX_TIERS - 1);
+   for(int s = 0; s < planCount; s++)
+     {
+      string sfx = IntegerToString(s);
+      if(!ChAddStage(out.stages,
+                     (int)GlobalVariableGet(Key(ticket, "st" + sfx + "k")),
+                     GlobalVariableGet(Key(ticket, "st" + sfx + "t")),
+                     GlobalVariableGet(Key(ticket, "st" + sfx + "m"))))
+        {
+         //--- a corrupt or edited stage drops the whole plan. Restoring the
+         //--- surviving prefix would fire scale-ins nobody authorised.
+         ZeroMemory(out.stages);
+         break;
+        }
+     }
 
    if(out.tier <= 0)
       out.tier = ChClampI(tierDefault, 1, CHARON_MAX_TIERS);
@@ -292,12 +345,27 @@ void CCharonState::Erase(const ulong ticket)
   {
    if(ticket == 0)
       return;
-   string fields[] = {"sl","risk","hwm","tier","time","trail","half","be","tp","cur","applies","trR","trP","trX"};
+   string fields[] = {"sl","risk","hwm","tier","time","trail","half","be","tp","cur","applies","trR","trP","trX","stN"};
    for(int i = 0; i < ArraySize(fields); i++)
      {
       string k = Key(ticket, fields[i]);
       if(GlobalVariableCheck(k))
          GlobalVariableDel(k);
+     }
+
+   //--- v1.7.0 stage triples. Each stage owns three keys and there are at most
+   //--- CHARON_MAX_TIERS-1 stages, so every possible key is named rather than
+   //--- read back: a row whose stN was lost still gets its stages cleaned up.
+   for(int s = 0; s < CHARON_MAX_TIERS - 1; s++)
+     {
+      string sfx = IntegerToString(s);
+      string stageKeys[] = {"st" + sfx + "k", "st" + sfx + "t", "st" + sfx + "m"};
+      for(int f = 0; f < ArraySize(stageKeys); f++)
+        {
+         string k = Key(ticket, stageKeys[f]);
+         if(GlobalVariableCheck(k))
+            GlobalVariableDel(k);
+        }
      }
   }
 
