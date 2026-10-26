@@ -221,6 +221,12 @@ def test_mt5_adapter_reads_are_an_explicit_allow_list() -> None:
     v1.3.0 adds ``symbols_get`` and ``positions_get``, both reads. Neither
     can change an account, which is the only thing this module is allowed
     to be part of.
+
+    v1.6.0 adds ``history_deals_get`` and ``copy_rates_from_pos``, also
+    reads. History and bars are what let the dashboard report realized
+    results instead of only floating ones; neither call can place, close or
+    modify anything. The allow-list is extended here rather than relaxed,
+    so the next addition still has to be argued for in a diff.
     """
     import ast
 
@@ -228,6 +234,7 @@ def test_mt5_adapter_reads_are_an_explicit_allow_list() -> None:
         "initialize", "shutdown", "last_error",
         "terminal_info", "account_info", "symbol_info",
         "symbols_get", "positions_get",
+        "history_deals_get", "copy_rates_from_pos",
     }
 
     source = Path(mt5_adapter.__file__).read_text(encoding="utf-8")
@@ -248,13 +255,20 @@ def test_mt5_adapter_reads_are_an_explicit_allow_list() -> None:
     )
     # --- and the reads the module claims to make must actually be there,
     # --- so this test cannot pass by the code being deleted
-    assert {"symbols_get", "positions_get"} <= reached
+    assert {
+        "symbols_get",
+        "positions_get",
+        "history_deals_get",
+        "copy_rates_from_pos",
+    } <= reached
 
 
 def test_mt5_adapter_degrades_to_empty_lists_without_the_package() -> None:
     """No package means no data, never an exception and never an invention."""
     assert mt5_adapter.symbols() == []
     assert mt5_adapter.positions() == []
+    assert mt5_adapter.deals() == []
+    assert mt5_adapter.rates("EURUSD") == []
 
 
 def test_mt5_adapter_is_importable_without_the_package() -> None:
@@ -803,4 +817,278 @@ def test_startup_stays_quiet_when_a_snapshot_is_present(
         with TestClient(main.app):
             pass
     assert not [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
+
+
+#+------------------------------------------------------------------+
+#| GET /api/history                                                 |
+#+------------------------------------------------------------------+
+def _deal_row(**overrides) -> dict:
+    """One synthetic MT5 deal, in the adapter's field names."""
+    row = {
+        "ticket": 1, "position_id": 1, "symbol": "GBPUSD", "type": 0,
+        "entry": 0, "volume": 1.0, "price": 1.2650, "profit": 0.0,
+        "swap": 0.0, "commission": 0.0, "time": 1_760_000_000,
+        "magic": 7, "comment": "",
+    }
+    row.update(overrides)
+    return row
+
+
+def _closed_pair(position_id: int = 1, *, profit: float = 100.0,
+                 opened: int = 1_760_000_000, closed: int = 1_760_003_600) -> list[dict]:
+    """The two deals MT5 writes for one closed long position."""
+    return [
+        _deal_row(ticket=position_id * 10, position_id=position_id, time=opened),
+        _deal_row(
+            ticket=position_id * 10 + 1, position_id=position_id, type=1,
+            entry=1, price=1.2660, profit=profit, time=closed,
+        ),
+    ]
+
+
+def test_history_is_unavailable_without_the_mt5_package(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    """No package is not "no losing trades"; the payload must say so."""
+    write_snapshot()
+    body = client.get("/api/history").json()
+
+    assert body["available"] is False
+    assert "MetaTrader5" in body["reason"]
+    # --- a zeroed summary would read as a clean account, so ratios stay null
+    assert body["metrics"]["win_rate"] is None
+    assert body["metrics"]["profit_factor"] is None
+    assert body["trades"] == []
+
+
+def test_history_unavailable_payload_keeps_every_key(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    """The degraded shape matches the healthy one, so the client needs no guard."""
+    write_snapshot()
+    body = client.get("/api/history").json()
+    assert set(body) == {
+        "available", "reason", "symbol", "days", "trades", "metrics",
+        "sessions", "equity", "tz_offset_minutes", "tz_source",
+        "session_windows",
+    }
+    assert [row["session"] for row in body["sessions"]] == [
+        "ASIAN", "LONDON", "NEW_YORK",
+    ]
+
+
+def test_history_reports_closed_trades_and_metrics(
+        client: TestClient, write_snapshot, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_snapshot()
+    monkeypatch.setattr(main.mt5_adapter, "available", lambda: True)
+    monkeypatch.setattr(
+        main.mt5_adapter, "deals",
+        lambda days=30, symbol="": _closed_pair(1, profit=100.0)
+        + _closed_pair(2, profit=-40.0),
+    )
+
+    body = client.get("/api/history?symbol=GBPUSD").json()
+
+    assert body["available"] is True
+    assert body["symbol"] == "GBPUSD"
+    assert body["metrics"]["total"] == 2
+    assert body["metrics"]["wins"] == 1
+    assert body["metrics"]["net_realized"] == 60.0
+    # --- newest close first, so the table reads like a statement
+    assert [row["position_id"] for row in body["trades"]] == [2, 1]
+
+
+def test_history_accepts_an_explicit_clock(
+        client: TestClient, write_snapshot, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The session label is only meaningful with the clock it was cut on."""
+    write_snapshot()
+    monkeypatch.setattr(main.mt5_adapter, "available", lambda: True)
+    monkeypatch.setattr(
+        main.mt5_adapter, "deals", lambda days=30, symbol="": _closed_pair()
+    )
+
+    body = client.get("/api/history?symbol=GBPUSD&tz_offset_minutes=-240").json()
+    assert body["tz_source"] == "request"
+    assert body["tz_offset_minutes"] == -240
+
+
+def test_history_infers_the_broker_clock_from_the_snapshot(
+        client: TestClient, write_snapshot, monkeypatch: pytest.MonkeyPatch) -> None:
+    """server_time minus the bridge clock recovers a UTC+3 broker."""
+    monkeypatch.setattr(main.time, "time", lambda: 1_760_000_000)
+    write_snapshot(make_snapshot(server_time=1_760_000_000 + 3 * 3600))
+    monkeypatch.setattr(main.mt5_adapter, "available", lambda: True)
+    monkeypatch.setattr(
+        main.mt5_adapter, "deals", lambda days=30, symbol="": _closed_pair()
+    )
+
+    body = client.get("/api/history?symbol=GBPUSD").json()
+    assert body["tz_source"] == "snapshot"
+    assert body["tz_offset_minutes"] == 180
+
+
+def test_history_rejects_an_impossible_clock(
+        client: TestClient) -> None:
+    assert client.get("/api/history?tz_offset_minutes=5000").status_code == 422
+
+
+def test_history_rejects_an_out_of_range_window(client: TestClient) -> None:
+    assert client.get("/api/history?days=0").status_code == 422
+    assert client.get("/api/history?days=400").status_code == 422
+
+
+def test_history_limit_caps_rows_not_the_summary(
+        client: TestClient, write_snapshot, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_snapshot()
+    monkeypatch.setattr(main.mt5_adapter, "available", lambda: True)
+    monkeypatch.setattr(
+        main.mt5_adapter, "deals",
+        lambda days=30, symbol="": _closed_pair(1) + _closed_pair(2) + _closed_pair(3),
+    )
+
+    body = client.get("/api/history?symbol=GBPUSD&limit=1").json()
+    assert len(body["trades"]) == 1
+    assert body["metrics"]["total"] == 3
+
+
+#+------------------------------------------------------------------+
+#| GET /api/candles                                                 |
+#+------------------------------------------------------------------+
+def test_candles_is_unavailable_without_the_mt5_package(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    write_snapshot()
+    body = client.get("/api/candles?symbol=GBPUSD").json()
+
+    assert body["available"] is False
+    assert body["bars"] == []
+    assert "MetaTrader5" in body["reason"]
+
+
+def test_candles_rejects_an_unknown_timeframe(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    """A silent fallback to M15 would draw the wrong chart without saying so."""
+    write_snapshot()
+    response = client.get("/api/candles?symbol=GBPUSD&timeframe=M7")
+    assert response.status_code == 422
+    assert "unknown timeframe" in response.json()["detail"]
+
+
+def test_candles_returns_bars_oldest_first(
+        client: TestClient, write_snapshot, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_snapshot()
+    monkeypatch.setattr(main.mt5_adapter, "available", lambda: True)
+    monkeypatch.setattr(
+        main.mt5_adapter, "rates",
+        lambda symbol, timeframe="M15", count=120: [
+            main.mt5_adapter.Rate(
+                time=1_760_000_000 + i * 900, open=1.26, high=1.2602,
+                low=1.2598, close=1.2601, tick_volume=100 + i,
+            )
+            for i in range(3)
+        ],
+    )
+
+    body = client.get("/api/candles?symbol=GBPUSD&timeframe=m15&count=3").json()
+    assert body["available"] is True
+    assert body["timeframe"] == "M15"
+    assert [bar["time"] for bar in body["bars"]] == [
+        1_760_000_000, 1_760_000_900, 1_760_001_800,
+    ]
+    assert body["reason"] is None
+
+
+def test_candles_explains_an_empty_result_rather_than_drawing_flat(
+        client: TestClient, write_snapshot, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty list must not render as 'price did not move'."""
+    write_snapshot()
+    monkeypatch.setattr(main.mt5_adapter, "available", lambda: True)
+    monkeypatch.setattr(
+        main.mt5_adapter, "rates", lambda symbol, timeframe="M15", count=120: []
+    )
+
+    body = client.get("/api/candles?symbol=GBPUSD").json()
+    assert body["available"] is True
+    assert body["bars"] == []
+    assert "no M15 bars" in body["reason"]
+
+
+#+------------------------------------------------------------------+
+#| POST/DELETE /api/journal                                         |
+#+------------------------------------------------------------------+
+def test_journal_write_persists_the_note_and_tags(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    write_snapshot()
+    response = client.post(
+        "/api/journal?symbol=GBPUSD",
+        json={"ticket": 555, "note": "held through the retest",
+              "psych": "patient", "tags": [" playbook-a ", ""]},
+    )
+
+    assert response.status_code == 200
+    entry = response.json()["entry"]
+    assert entry["ticket"] == 555
+    assert entry["psych"] == "patient"
+    # --- blank tags are dropped rather than rendered as empty chips
+    assert entry["tags"] == ["playbook-a"]
+    assert entry["tag"], "a broker-comment tag is still derived"
+
+    # --- and it is readable back through the status endpoint
+    listed = client.get("/api/status?symbol=GBPUSD").json()["journal"]
+    assert [row["ticket"] for row in listed] == [555]
+    assert listed[0]["note"] == "held through the retest"
+    assert listed[0]["tags"] == ["playbook-a"]
+
+
+def test_journal_write_replaces_an_existing_note(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    write_snapshot()
+    client.post("/api/journal?symbol=GBPUSD", json={"ticket": 700, "note": "first"})
+    client.post("/api/journal?symbol=GBPUSD", json={"ticket": 700, "note": "second"})
+
+    listed = client.get("/api/status?symbol=GBPUSD").json()["journal"]
+    assert [row["note"] for row in listed] == ["second"]
+
+
+def test_journal_write_needs_a_real_ticket(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    """Ticket 0 queues an order; it is not a place to file a reflection."""
+    write_snapshot()
+    assert client.post(
+        "/api/journal?symbol=GBPUSD", json={"ticket": 0, "note": "x"}
+    ).status_code == 422
+
+
+def test_journal_write_rejects_an_overlong_note(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    write_snapshot()
+    assert client.post(
+        "/api/journal?symbol=GBPUSD", json={"ticket": 1, "note": "x" * 501}
+    ).status_code == 422
+
+
+def test_journal_delete_removes_the_entry(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    write_snapshot()
+    client.post("/api/journal?symbol=GBPUSD", json={"ticket": 808, "note": "gone soon"})
+
+    body = client.delete("/api/journal?symbol=GBPUSD&ticket=808").json()
+    assert body["deleted"] is True
+    assert client.get("/api/status?symbol=GBPUSD").json()["journal"] == []
+
+
+def test_journal_delete_is_404_when_nothing_was_written(
+        client: TestClient, common_dir: Path, write_snapshot) -> None:
+    """A cheerful 200 would make a mistyped ticket look successful."""
+    write_snapshot()
+    response = client.delete("/api/journal?symbol=GBPUSD&ticket=999")
+    assert response.status_code == 404
+    assert "999" in response.json()["detail"]
+
+
+def test_journal_write_does_not_need_a_live_chart(
+        client: TestClient, common_dir: Path) -> None:
+    """A trade that already closed still deserves its note."""
+    response = client.post(
+        "/api/journal?symbol=EURUSD", json={"ticket": 42, "note": "after hours"}
+    )
+    assert response.status_code == 200
+    assert response.json()["symbol"] == "EURUSD"
 

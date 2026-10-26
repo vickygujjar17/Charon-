@@ -2,119 +2,248 @@
 @tailwind components;
 @tailwind utilities;
 
+/* --- Vendored faces ---------------------------------------------------
+   Real .woff2 files live in static/fonts and are served by the same
+   StaticFiles mount as the stylesheet, so the dashboard has no network
+   dependency at runtime and no FOUT against a third-party host. Only the
+   Latin subset is shipped: the UI is English, and four Inter weights plus
+   three JetBrains Mono weights are the entire type ramp.
+
+   `font-display: swap` means text is readable immediately in the fallback
+   face rather than invisible while the woff2 loads -- on a trading panel an
+   unrendered number is worse than a differently-shaped one. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/inter-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/fonts/inter-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/fonts/inter-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/fonts/inter-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/jetbrains-mono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/fonts/jetbrains-mono-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/fonts/jetbrains-mono-600.woff2") format("woff2");
+}
+
 /* --- A handful of component classes, so index.html stays readable and
    --- the Tailwind build still sees every utility it must emit.
 
    The classes that app.js constructs at runtime (`.pill`, `.rung`, the
    `.btn*` variants) appear here as complete literals as well: Tailwind
    scans app.js as text, so renaming one here without renaming it there
-   leaves an element unstyled with no error anywhere. */
+   leaves an element unstyled with no error anywhere.
+
+   Apex says depth is a border and a background step, never a shadow. Every
+   surface below therefore carries an explicit 1px edge; nothing floats. */
 @layer base {
   ::selection {
-    @apply bg-accent/25 text-shade-100;
+    @apply bg-brand/25 text-primary;
   }
   /* --- the panel is a terminal: square-ish scrollbars, no light chrome */
   * {
     scrollbar-width: thin;
-    scrollbar-color: #2c3c5c transparent;
+    scrollbar-color: #313540 transparent;
   }
   *::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
   *::-webkit-scrollbar-thumb {
-    background-color: #2c3c5c;
-    border-radius: 4px;
+    background-color: #313540;
+    border-radius: 2px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: #424754;
+  }
+  /* --- numbers are read, not skimmed: fixed-width digits everywhere, so a
+     --- ticking value cannot make a column twitch */
+  body {
+    @apply bg-surface font-mono text-body-md text-secondary antialiased;
+  }
+  h1,
+  h2,
+  h3 {
+    @apply font-display text-primary;
   }
 }
 
 @layer components {
   /* --- surfaces ---------------------------------------------------- */
-  /* --- `.card` / `.card-tight` are the v1.1.0 surface classes. The
-     --- current page uses `.panel`, but `.card` is still named in
-     --- app.js's DIMMABLE_SELECTOR and both are cheap to keep, so a
-     --- browser holding a cached v1.1.0 index.html still styles. */
+  /* --- `.panel` is the page's main container: one step above the page,
+     --- with a hairline edge doing the separating instead of a shadow.
+     ---
+     --- `.card` / `.card-tight` are the v1.1.0 names. `.card` is still
+     --- named in app.js's DIMMABLE_SELECTOR, so it is emitted and a
+     --- browser holding a cached v1.1.0 index.html still dims correctly.
+     --- `.card-tight` has no remaining reference and is therefore purged;
+     --- it is not kept as dead weight here. */
   .card {
-    @apply rounded-lg border border-ink-700 bg-ink-850 p-4;
+    @apply rounded border border-borderline bg-surface-container p-4;
   }
-  .card-tight {
-    @apply rounded-lg border border-ink-700 bg-ink-850 px-3 py-2;
-  }
-  /* --- a panel is the page's main container; slightly darker than the
-     --- card wells it holds, so nesting reads without extra borders */
+  /* --- a panel is the page's main container: one step above the page,
+     --- with a hairline edge doing the separating instead of a shadow */
   .panel {
-    @apply rounded-lg border border-ink-700 bg-ink-925 shadow-panel;
+    @apply rounded border border-borderline bg-surface-low;
+  }
+  /* --- the header strip of a panel: title left, controls right */
+  .panel-head {
+    @apply flex items-center justify-between gap-2 border-b border-borderline
+           px-3 py-2;
+  }
+  /* --- the inset basin a panel's data sits in */
+  .well {
+    @apply rounded-sm border border-borderline bg-surface-lowest;
   }
   /* --- 1px separator that survives a dark background without shouting */
   .hairline {
-    @apply border-ink-700/80;
+    @apply border-borderline;
   }
 
   /* --- typography -------------------------------------------------- */
   .label {
-    @apply text-[10px] font-semibold uppercase tracking-[0.14em] text-shade-400;
+    @apply font-display text-caps uppercase text-tertiary;
+  }
+  .mark {
+    @apply font-display text-caps uppercase tracking-[0.12em] text-tertiary;
   }
   .value {
-    @apply font-mono text-sm text-shade-100;
-  }
-  .value-lg {
-    @apply font-mono text-xl font-semibold text-shade-100;
+    @apply font-mono text-body-md text-primary;
   }
   /* --- a readout is a number meant to be read at a glance: fixed-width
      --- digits so a ticking value cannot make the layout twitch */
   .readout {
-    @apply font-mono tabular-nums tracking-tight text-shade-100;
+    @apply font-mono tabular-nums tracking-tight text-primary;
   }
-  .mark {
-    @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-shade-400;
+  /* --- a KPI cell: label above, value below, optional footnote. The grid
+     --- carries the dividers, so the cell itself draws no border. */
+  .kpi {
+    @apply flex flex-col justify-between gap-1 px-3 py-2.5;
+  }
+  .kpi-label {
+    @apply font-display text-caps uppercase text-tertiary;
+  }
+  .kpi-value {
+    @apply font-mono text-headline-lg font-semibold tabular-nums
+           tracking-tight text-primary;
+  }
+  .kpi-foot {
+    @apply font-mono text-num-sm tabular-nums text-tertiary;
   }
 
   /* --- status ------------------------------------------------------ */
-  /* --- the dot is a pseudo-element, not a DOM node: app.js assigns the
+  /* --- Apex pills are 2px chips of tracked mono, not round capsules.
+     --- The dot is a pseudo-element, not a DOM node: app.js assigns the
      --- pill's whole textContent and className on every poll, so anything
      --- inside the pill would be destroyed. currentColor makes the dot
      --- inherit whatever tone the poll chose. */
   .pill {
-    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1
-           text-[11px] font-semibold uppercase tracking-wider;
+    @apply inline-flex items-center gap-1.5 rounded-sm border px-1.5 py-0.5
+           font-mono text-num-sm font-semibold uppercase tracking-[0.06em];
   }
   .pill::before {
     content: "";
-    @apply h-1.5 w-1.5 shrink-0 rounded-full bg-current;
+    @apply h-1 w-1 shrink-0 rounded-full bg-current;
   }
   /* --- only the live pill breathes. A stale, refused or connecting state
      --- must hold still, because motion reads as "working" at a glance. */
   #statusPill[class*="text-live"]::before {
     animation: charon-pulse 2.4s ease-in-out infinite;
   }
+  /* --- a tag is a classification chip: no dot, no urgency */
+  .tag {
+    @apply inline-flex items-center rounded-sm border border-borderline
+           bg-surface-high px-1.5 py-0.5 font-mono text-num-sm
+           uppercase tracking-[0.04em] text-secondary;
+  }
 
   /* --- controls ---------------------------------------------------- */
   .btn {
-    @apply rounded-md border px-3 py-1.5 text-xs font-semibold
+    @apply inline-flex h-[30px] items-center justify-center gap-1.5 rounded
+           border px-3 font-display text-body-sm font-semibold
            transition-colors disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-primary {
-    @apply btn border-accent/40 bg-accent/15 text-accent hover:bg-accent/25;
+    @apply btn border-brand/50 bg-brand/15 text-brand hover:bg-brand/25;
   }
   .btn-ghost {
-    @apply btn border-ink-600 bg-ink-800 text-shade-300 hover:bg-ink-700;
+    @apply btn border-borderline bg-surface-container text-secondary
+           hover:bg-surface-high hover:text-primary;
   }
   .btn-danger {
-    @apply btn border-offline/40 bg-offline/10 text-offline hover:bg-offline/20;
+    @apply btn border-bear/50 bg-bear/10 text-bear hover:bg-bear/20;
   }
-  /* --- inputs in the ticket: a dark well with a cyan focus ring, so the
-     --- active field is obvious without a bright background */
+  /* --- inputs: a dark inset well with a brand focus ring and zero shadow
+     --- spread, so the active field is obvious without a bright background */
   .ticket-field {
-    @apply w-full rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5
-           font-mono text-xs text-shade-100 placeholder:text-shade-400/60
-           focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/40
+    @apply h-7 w-full rounded-sm border border-borderline
+           bg-surface-lowest px-2 font-mono text-body-md text-primary
+           placeholder:text-tertiary focus:border-brand focus:outline-none
            disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  textarea.ticket-field {
+    @apply h-auto py-1;
+  }
+
+  /* --- tables ------------------------------------------------------ */
+  /* --- Apex rows are 24px and the header is a tracked caps strip on its
+     --- own surface, one step above the basin. */
+  .data-table {
+    @apply w-full border-collapse text-left font-mono text-body-md
+           tabular-nums text-secondary;
+  }
+  .data-table thead th {
+    @apply h-6 bg-surface-container px-3 font-display text-caps uppercase
+           font-bold text-tertiary;
+  }
+  .data-table tbody td {
+    @apply h-6 border-b border-borderline/70 px-3;
+  }
+  .data-table tbody tr:hover {
+    @apply bg-surface-high;
   }
 
   /* --- ladder ------------------------------------------------------ */
   .rung {
-    @apply flex items-center justify-between rounded border border-ink-700
-           bg-ink-900 px-2.5 py-1.5 text-xs;
+    @apply flex items-center justify-between rounded-sm border
+           border-borderline bg-surface-lowest px-2 py-1 font-mono
+           text-body-md tabular-nums;
   }
 
   /* --- log feed ---------------------------------------------------- */
@@ -125,7 +254,33 @@
   }
   .log-line::before {
     content: "";
-    @apply absolute left-0 top-0 h-full w-px bg-ink-600;
+    @apply absolute left-0 top-0 h-full w-px bg-surface-highest;
+  }
+
+  /* --- chrome ------------------------------------------------------ */
+  /* --- the fixed 64px icon rail down the left edge */
+  .rail {
+    @apply flex flex-col items-center gap-1 border-r border-borderline
+           bg-surface-low py-2;
+  }
+  .rail-item {
+    @apply flex h-10 w-10 items-center justify-center rounded text-tertiary
+           transition-colors hover:bg-surface-container hover:text-primary;
+  }
+  .rail-item.is-active {
+    @apply bg-surface-container text-brand;
+  }
+  /* --- header nav tabs: text, not icons, so they read as a tool bar */
+  .tab {
+    @apply relative flex h-full items-center px-3 font-display text-body-sm
+           font-medium text-tertiary transition-colors hover:text-primary;
+  }
+  .tab.is-active {
+    @apply text-brand;
+  }
+  .tab.is-active::after {
+    content: "";
+    @apply absolute inset-x-0 -bottom-px h-0.5 bg-brand;
   }
 }
 
@@ -135,11 +290,11 @@
   0%,
   100% {
     opacity: 1;
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55);
+    box-shadow: 0 0 0 0 rgba(78, 222, 163, 0.55);
   }
   50% {
     opacity: 0.55;
-    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0);
+    box-shadow: 0 0 0 3px rgba(78, 222, 163, 0);
   }
 }
 

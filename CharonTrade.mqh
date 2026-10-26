@@ -6,7 +6,7 @@
 //|  protective stop update. There is no signal logic here.           |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.05"
+#property version   "1.06"
 
 #ifndef __CHARON_TRADE__
 #define __CHARON_TRADE__

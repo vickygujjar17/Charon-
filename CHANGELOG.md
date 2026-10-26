@@ -9,6 +9,74 @@ Every commit subject starts with the version it ships, for example
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-25
+
+Four modules that had no data source now have one, and the dashboard is rebuilt to the Apex
+Institutional Terminal design. **No EA change:** the snapshot still describes open risk only, so
+realized results are read from MT5's deal history by the bridge instead.
+
+`SCHEMA_VERSION` stays `4` and the `.mqh` headers are untouched apart from the version string.
+The new terminal calls are reads, and the allow-list test that guards them was extended rather
+than relaxed.
+
+### Added
+
+- **Closed-trade history (`GET /api/history`).** `history_deals_get` over a 1-365 day window,
+  folded into one trade per closed position. `IN` and `OUT` legs are paired by `position_id`,
+  partial closes are summed, and realized is `profit + swap + commission` across **both** legs
+  — reading only the closing deal understates every loss by the entry commission.
+- **The statistics it implies.** Win rate, profit factor, expectancy, average R:R, best/worst,
+  longest win and loss streaks, average hold, and a per-session matrix.
+- **`charon_bridge/history.py`, with no MetaTrader5 import.** The arithmetic is separated from
+  the terminal so it can be unit-tested on a machine with no MT5 installed — which is the only
+  way it gets exercised before it meets a real account.
+- **Session attribution on broker-server time.** London / New York / Asian, with the offset
+  either inferred from the EA's `server_time` against the bridge clock or passed explicitly.
+  `tz_offset_minutes` and `tz_source` are echoed back, so the UI states the clock it used
+  instead of implying UTC.
+- **Equity curve** in `GET /api/history`, cumulative from zero — the strategy's result, not the
+  account balance, which would drag in deposits and other EAs.
+- **Journal write-back.** `POST /api/journal` and `DELETE /api/journal` create or remove a note
+  against a real ticket, with optional `psych` and `tags`. This is a local sidecar write: it
+  never reaches the EA and cannot move money, so it needs no live chart.
+- **`GET /api/candles`** for OHLC bars, behind the same availability contract.
+- **Vendored Inter and JetBrains Mono** (`static/fonts/*.woff2`, ~160 KB, Latin subset) with
+  `@font-face` in the stylesheet. `font-display: swap` means a number is readable immediately
+  rather than invisible while the face loads.
+- **Apex design system** — 56px header, 32px ticker strip, 64px icon rail, 5-cell KPI grid,
+  hairline panel heads, 24px table rows, 2px status chips, meters and tags.
+
+### Fixed
+
+- **An undefined ratio rendered as a confident zero.** Win rate, profit factor and average R:R
+  now return `null` when their denominator is zero, never `0` and never infinity. "0% win rate"
+  reads as "you have lost every trade" and a profit factor of `999` reads as perfection; both
+  are lies about someone's money. The panel prints `—` and says why.
+- **A deposit could have been counted as trading profit.** Balance operations carry no symbol,
+  and `history_deals_get` returns them; they are skipped.
+
+### Changed
+
+- **The palette tokens were aliased, not renamed.** `ink-*`, `shade-*`, `live`, `offline`,
+  `stale`, `accent` and `violet` still resolve — now to the Apex values — because `app.js`
+  builds those class names at runtime as complete literals and the test suite asserts on them.
+  Renaming would strip the colour from every status pill with no error anywhere. The Apex names
+  (`surface`, `borderline`, `bull`, `bear`, `warn`, `brand`, `alt`) are what new markup uses.
+- **`shadow-panel` and `shadow-glow-*` are gone.** Apex is flat: depth is a border and a
+  background step. Old markup referencing them would reintroduce a look the design rejects.
+- **Typography is no longer system-only.** The vendored faces replace the `Bahnschrift` /
+  system-ui stack. The fallbacks stay in the stack for a browser that refuses the woff2.
+
+### Notes
+
+- **The live path is untested here.** `history_deals_get` and `copy_rates_from_pos` require a
+  running terminal, which this build machine does not have. The degradation path — package
+  absent, empty result, HTTP error — is covered by tests; the happy path is not, and should be
+  watched on first run against a real account.
+- **`_tools/bridge_check.ps1` still forbids CDN references.** The design reference used Tailwind
+  via CDN, Google Fonts and Material Symbols; all three were re-implemented into the vendored
+  build with inline SVG icons.
+
 ## [1.5.0] - 2026-10-25
 
 Four gaps closed, one of them a live trap. A `MARKET` ticket that names an `entry` price no

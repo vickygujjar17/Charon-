@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.5.0**
+Current release: **v1.6.0**
 
 ---
 
@@ -75,13 +75,16 @@ Charon/
       state.py            reads the snapshot, decides live / stale / offline
       commands.py         atomic command writes, FIFO names, audit trail
       logs.py             ring buffer behind the SSE log tail
-      mt5_adapter.py      optional read-only terminal diagnostic
+      mt5_adapter.py      optional read-only terminal diagnostic + deal/bars reads
+      history.py          closed-trade pairing and statistics; no MT5 import
+      journal.py          notes beside the ticket, never sent to the EA
     static/
       index.html          the dashboard
       app.js              renders it; never recomputes a price
       favicon.svg         inline mark as a file: obol + ferryman's pole
       tailwind.css        PREBUILT — no CDN, works offline
-    tests/                168 pytest tests
+      fonts/              vendored Inter + JetBrains Mono woff2 (Latin subset)
+    tests/                pytest tests
       fake_ea.py          stand-in EA: drains the inbox like CCharonBridge
       client_harness.js   executes app.js in node and checks it polls
       test_integration.py real uvicorn + fake EA across the file bridge
@@ -426,7 +429,63 @@ refused outright.
 | Select the trailing mode | Move a stop directly |
 | Pick which chart to drive, and search symbols | Send a display label as a symbol name |
 | List positions no live chart accounts for (`/api/unmanaged`) | Close, size or modify any of them |
+| Read closed deals and the statistics they imply (`/api/history`) | Change what was booked, or reopen anything |
+| Attribute results to a session | Decide which session a trade "should" have been in |
+| Write a journal note against a ticket (`POST /api/journal`) | Send that note to the chart, or turn it into an order |
 | Tail the bridge log | Substitute for the Experts log |
+
+### Closed trades, and what "not available" means
+
+`GET /api/history` is the only source of realized results. The snapshot describes **open**
+risk and nothing else: the moment a position closes it leaves the snapshot entirely, so win
+rate, profit factor and the equity curve cannot be derived from it.
+
+The endpoint reports `available: false` with a `reason` in three distinct cases, and they are
+deliberately not merged:
+
+* the MetaTrader5 package is not installed;
+* the package is installed but the terminal could not be read;
+* the symbol is not one the bridge can address.
+
+None of those is the same as "no closed trades", which is `available: true` with
+`metrics.total: 0`. A zeroed summary would be read as "you have lost nothing", so it is never
+returned.
+
+**Undefined ratios are `null`, not `0`.** With no losing trade, `profit_factor` is `null` rather
+than a large number or infinity; with no closed trades, `win_rate` is `null` rather than `0.0`.
+The panel prints `—` and names the reason. A profit factor of `999` reads as perfection and a
+0% win rate reads as total failure; both are claims the data does not support.
+
+**Sessions are cut on broker-server time.** MT5 deal times carry no offset, so the bridge
+either infers it from the EA's `server_time` against its own clock or accepts
+`tz_offset_minutes` explicitly. Either way `tz_offset_minutes` and `tz_source`
+(`snapshot` / `request` / `assumed`) come back in the response, and the panel prints the clock
+it used. A session bucket computed against an unstated clock is a label, not a fact.
+
+### The journal is a sidecar, not a command
+
+`POST /api/journal` writes
+`<Common>\Files\Charon\journal_<SYMBOL>.json`. It cannot reach the EA, cannot open a position
+and cannot close one. That is why it needs no live chart: a trade that closed an hour ago still
+deserves a note, and refusing the write because the chart was removed would lose exactly the
+reflection a journal exists for.
+
+A ticket of `0` is refused here. Ticket `0` means "queue this note with the next order", which
+is `POST /api/order`'s job; filing it as a completed entry would hide it from the row the
+operator was looking at.
+
+### Design notes
+
+The dashboard is rebuilt to the Apex Institutional Terminal design, re-implemented into the
+vendored stylesheet. The reference used Tailwind via CDN, Google Fonts and Material Symbols;
+`_tools/bridge_check.ps1` forbids all three, and a panel that needs a network to render is not
+a panel. Fonts are real `.woff2` files in `static/fonts/` with `@font-face` in
+`src/input.css`; icons are inline SVG.
+
+The v1.x colour tokens (`ink-*`, `shade-*`, `live`, `offline`, `stale`, `accent`, `violet`) are
+**kept as aliases** onto the Apex values. `app.js` builds those class names at runtime as
+complete literals and the test suite asserts on them, so renaming rather than aliasing would
+strip the colour from every status pill with no error anywhere.
 
 ### Symbol names and the picker
 

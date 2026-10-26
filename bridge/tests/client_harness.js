@@ -55,6 +55,8 @@ class Element {
   }
   remove() { if (this.parent) this.parent.removeChild(this); }
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
+  setAttribute(name, value) { (this.attrs = this.attrs || {})[name] = String(value); }
+  getAttribute(name) { return (this.attrs || {})[name] ?? null; }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   _match(selector) {
     const attr = selector.match(/^(\w+)?\[data-([\w-]+)="?([^"\]]*)"?\]$/);
@@ -81,6 +83,9 @@ const document = {
   listeners: {},
   getElementById: (id) => registry.get(id) || null,
   createElement: (tag) => new Element(tag),
+  // --- the equity curve is an inline SVG, so the client reaches for the
+  // --- namespaced factory rather than createElement
+  createElementNS: (_ns, tag) => new Element(tag),
   createTextNode: (text) => ({ nodeType: 3, text }),
   querySelectorAll: () => [],
   // --- delegated listeners (v1.4.0 row actions) attach to the document, so the
@@ -117,7 +122,20 @@ const IDS = ["banner", "statusPill", "ageLabel", "latencyLabel", "lastGoodLabel"
   // --- symbol picker + unmanaged panel (v1.3.0)
   "symbolPicker", "symbolSelect", "orderSymbol", "symbolOptions",
   "unmanagedPanel", "unmanagedBadge", "unmanagedSummary", "unmanagedBody",
-  "unmanagedTableWrap", "unmanagedRows"];
+  "unmanagedTableWrap", "unmanagedRows",
+  // --- ticker strip + KPI footnotes (v1.6.0)
+  "tickSymbol", "tickBasket", "tickPl", "tickEquity", "tickRisk", "tickSession",
+  "equityFoot", "balanceFoot", "openPlFoot", "closedPl", "closedFoot",
+  // --- closed-trade history (v1.6.0)
+  "history", "historyBadge", "historyDays", "histTrades", "histTradesFoot",
+  "histWinRate", "histWinRateFoot", "histProfitFactor", "histProfitFactorFoot",
+  "histExpectancy", "histExpectancyFoot", "histAvgRr", "histAvgRrFoot",
+  "histClock", "histEquityFoot", "equityCurve", "sessionRows",
+  "historyTableWrap", "historyRows", "historyEmpty",
+  // --- journal write-back (v1.6.0)
+  "journal", "journalBadge", "journalFoot", "journalTicket", "journalNote",
+  "journalPsych", "journalTags", "journalSaveBtn", "journalClearBtn",
+  "journalMsg", "journalTableWrap", "journalRows", "journalEmpty"];
 
 for (const id of IDS) {
   const el = new Element(id === "legRows" ? "tbody" : "div");
@@ -149,6 +167,11 @@ const snapshot = {
       risk_price: 0.003, hwm: 1.269, progress_rr: 3.0, trail_active: true,
       be_done: true, half_risk_done: true, ladder: "1.50R 1.26450" }],
   },
+  // --- the journal travels with /api/status, newest ticket first
+  journal: [
+    { ticket: 555, note: "held through the retest", tag: "HELD THROUGH",
+      psych: "patient", tags: ["playbook-a"] },
+  ],
 };
 
 function fetchStub(url) {
@@ -190,6 +213,69 @@ function fetchStub(url) {
       }],
       pending: [],
       summary: { state: "ok", confirmed: 1, pending: 0, clean: false, confirmations: 3 },
+    };
+  } else if (url.includes("/api/history")) {
+    // --- a closed round trip, so the history panel has something real to
+    // --- format. Ratios are present (not null) because both a win and a loss
+    // --- closed; the null case is covered by the Python API tests.
+    body = {
+      available: true,
+      reason: null,
+      symbol: "GBPUSD",
+      days: 30,
+      tz_source: "snapshot",
+      tz_offset_minutes: 180,
+      trades: [
+        {
+          position_id: 2, symbol: "GBPUSD", side: "BUY", volume: 0.5,
+          entry_price: 1.26450, exit_price: 1.26950, opened_at: 1_760_000_000,
+          closed_at: 1_760_003_600, profit: 250.0, swap: 0.0, commission: -7.0,
+          realized: 243.0, outcome: "win", duration_seconds: 3600,
+          session: "LONDON", comment: "tp1",
+        },
+        {
+          position_id: 1, symbol: "GBPUSD", side: "SELL", volume: 0.5,
+          entry_price: 1.26500, exit_price: 1.26650, opened_at: 1_759_990_000,
+          closed_at: 1_759_996_400, profit: -75.0, swap: -1.0, commission: -7.0,
+          realized: -83.0, outcome: "loss", duration_seconds: 6400,
+          session: "NEW_YORK", comment: "",
+        },
+      ],
+      metrics: {
+        total: 2, wins: 1, losses: 1, flat: 0, net_realized: 160.0,
+        gross_profit: 243.0, gross_loss: 83.0, win_rate: 0.5,
+        profit_factor: 2.9277, avg_win: 243.0, avg_loss: 83.0,
+        avg_rr: 2.9277, expectancy: 80.0, max_win_streak: 1,
+        max_loss_streak: 1, best: 243.0, worst: -83.0, avg_hold_seconds: 5000,
+      },
+      sessions: [
+        { session: "ASIAN", window: "00:00-08:00", total: 0, wins: 0, losses: 0,
+          flat: 0, net_realized: 0, win_rate: null, profit_factor: null },
+        { session: "LONDON", window: "08:00-13:00", total: 1, wins: 1, losses: 0,
+          flat: 0, net_realized: 243.0, win_rate: 1.0, profit_factor: null },
+        { session: "NEW_YORK", window: "13:00-22:00", total: 1, wins: 0, losses: 1,
+          flat: 0, net_realized: -83.0, win_rate: 0.0, profit_factor: 0 },
+      ],
+      equity: [
+        { closed_at: 1_759_990_000, cumulative: 0.0, position_id: 0 },
+        { closed_at: 1_759_996_400, cumulative: -83.0, position_id: 1 },
+        { closed_at: 1_760_003_600, cumulative: 160.0, position_id: 2 },
+      ],
+      session_windows: [
+        { session: "ASIAN", from: 0, to: 8 },
+        { session: "LONDON", from: 8, to: 13 },
+        { session: "NEW_YORK", from: 13, to: 22 },
+      ],
+    };
+  } else if (url.includes("/api/journal")) {
+    // --- a write never reaches the EA; the stub answers like the real route
+    body = {
+      saved: true,
+      symbol: "GBPUSD",
+      entry: {
+        ticket: 555, note: "held through the retest", tag: "HELD THROUGH",
+        psych: "patient", tags: ["playbook-a"],
+      },
     };
   } else {
     body = snapshot;
@@ -339,6 +425,61 @@ setTimeout(() => {
     problems.push("the unmanaged panel stayed hidden with a finding to show");
   }
 
+  // --- closed-trade history: the panel must have fetched, formatted the
+  // --- realized figure, and never print a ratio it was not given
+  if (!calls.some((url) => url.includes("/api/history"))) {
+    problems.push("the client never requested /api/history");
+  }
+  const closedPl = registry.get("closedPl").textContent;
+  if (!String(closedPl).includes("160")) {
+    problems.push(`the realized total was not rendered (got ${JSON.stringify(closedPl)})`);
+  }
+  if (registry.get("histWinRate").textContent !== "50.0%") {
+    problems.push(
+      `the win rate did not format as a percentage (got ${JSON.stringify(
+        registry.get("histWinRate").textContent
+      )})`
+    );
+  }
+  if (registry.get("histProfitFactor").textContent !== "2.93") {
+    problems.push(
+      `the profit factor did not format (got ${JSON.stringify(
+        registry.get("histProfitFactor").textContent
+      )})`
+    );
+  }
+  if (registry.get("sessionRows").children.length !== 3) {
+    problems.push(
+      `the session matrix has ${registry.get("sessionRows").children.length} rows, expected 3`
+    );
+  }
+  if (registry.get("historyRows").children.length !== 2) {
+    problems.push(
+      `the closed-trade table has ${registry.get("historyRows").children.length} rows, expected 2`
+    );
+  }
+  if (!registry.get("histClock").textContent.includes("+3:00")) {
+    problems.push(
+      `the session clock was not stated (got ${JSON.stringify(
+        registry.get("histClock").textContent
+      )})`
+    );
+  }
+  if (registry.get("equityCurve").children.length < 2) {
+    problems.push("the equity curve was not drawn");
+  }
+
+  // --- journal: entries from /api/status must appear, and a save must post
+  const journalRows = registry.get("journalRows").children.length;
+  if (journalRows !== 1) {
+    problems.push(`the journal table has ${journalRows} rows, expected 1`);
+  }
+  if (registry.get("journalBadge").textContent !== "1") {
+    problems.push(
+      `the journal badge read ${JSON.stringify(registry.get("journalBadge").textContent)}`
+    );
+  }
+
   console.log("requests issued:");
   for (const url of calls) console.log("  " + url);
   console.log("");
@@ -347,6 +488,9 @@ setTimeout(() => {
   console.log("  balance     : " + registry.get("balance").textContent);
   console.log("  openPl      : " + registry.get("openPl").textContent);
   console.log("  riskPct     : " + registry.get("riskPct").textContent);
+  console.log("  closedPl    : " + registry.get("closedPl").textContent);
+  console.log("  winRate     : " + registry.get("histWinRate").textContent);
+  console.log("  profitFactor: " + registry.get("histProfitFactor").textContent);
   console.log("  statusPill  : " + registry.get("statusPill").textContent);
   console.log("  legRows     : " + registry.get("legRows").children.length);
   console.log("  ladder rungs: " + registry.get("ladder").children.length);

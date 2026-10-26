@@ -7,7 +7,7 @@
 //|  order of operations is auditable in a single place.              |
 //+------------------------------------------------------------------+
 #property copyright "Charon"
-#property version   "1.05"
+#property version   "1.06"
 
 #ifndef __CHARON_ENGINE__
 #define __CHARON_ENGINE__

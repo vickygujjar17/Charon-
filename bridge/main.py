@@ -37,7 +37,16 @@ from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from charon_bridge import commands, journal, mt5_adapter, paths, reconcile, state, symbols
+from charon_bridge import (
+    commands,
+    history,
+    journal,
+    mt5_adapter,
+    paths,
+    reconcile,
+    state,
+    symbols,
+)
 from charon_bridge.logs import LOG
 from charon_bridge.schema import (
     ALLOWED_VERBS,
@@ -478,6 +487,233 @@ def unmanaged() -> dict[str, Any]:
     _reconcile_cache["at"] = now
     _reconcile_cache["payload"] = payload
     return payload
+
+
+#+------------------------------------------------------------------+
+#| History, candles, journal                                        |
+#+------------------------------------------------------------------+
+# --- MT5 deal times are broker-server time and carry no offset, so the
+# --- session buckets are only meaningful once the clock is stated. A broker
+# --- server is always within a day of UTC, so an inference outside this
+# --- band is a stale or wrong reading and is not believed.
+_TZ_MIN_MINUTES = -12 * 60
+_TZ_MAX_MINUTES = 14 * 60
+_TZ_SNAP_MINUTES = 15
+
+
+def _infer_tz_offset(symbol: str) -> tuple[int, str]:
+    """Guess the broker's UTC offset from a live snapshot's ``server_time``.
+
+    The EA publishes ``server_time`` as the server's own clock, so comparing
+    it with the bridge's clock recovers the offset without asking the user
+    to know it. That makes the session matrix correct by default instead of
+    quietly mislabelling every trade.
+
+    Returns ``(offset_minutes, source)`` where source is ``"snapshot"`` when
+    a fresh snapshot was used and ``"assumed"`` (offset 0) otherwise. The
+    caller echoes both, so a dashboard can say which clock it drew on
+    rather than implying one.
+    """
+    snapshot = _snapshot_for(symbol)
+    if snapshot is None:
+        return 0, "assumed"
+    raw = (int(snapshot.server_time) - int(time.time())) / 60.0
+    offset = int(round(raw / _TZ_SNAP_MINUTES) * _TZ_SNAP_MINUTES)
+    if not _TZ_MIN_MINUTES <= offset <= _TZ_MAX_MINUTES:
+        return 0, "assumed"
+    return offset, "snapshot"
+
+
+def _history_unavailable(reason: str) -> dict[str, Any]:
+    """The ``/api/history`` shape when there is nothing to read.
+
+    Every field is present and the ratios are ``None``, so a client renders
+    one layout and never has to guard for a missing key. ``available`` is
+    what separates "cannot read the account" from "read it, no closed
+    trades" -- those two must never look the same.
+    """
+    return {
+        "available": False,
+        "reason": reason,
+        "symbol": None,
+        "days": 0,
+        "trades": [],
+        "metrics": history.metrics([]),
+        "sessions": history.by_session([]),
+        "equity": history.equity_curve([]),
+        "tz_offset_minutes": 0,
+        "tz_source": "assumed",
+        "session_windows": [
+            {"session": name, "from": start, "to": end}
+            for name, start, end in history.SESSIONS
+        ],
+    }
+
+
+@app.get("/api/history", dependencies=[Depends(require_token)])
+def closed_history(
+    symbol: str | None = Query(default=None),
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=200, ge=1, le=1000),
+    tz_offset_minutes: int | None = Query(default=None, ge=-720, le=840),
+) -> dict[str, Any]:
+    """Closed trades over the last ``days``, with the statistics they imply.
+
+    This is the data the dashboard cannot derive on its own. The snapshot
+    describes *open* risk; nothing in it survives a position closing, so win
+    rate, profit factor and the equity curve have to come from deal history.
+
+    ``tz_offset_minutes`` may be passed explicitly; otherwise it is inferred
+    from the live snapshot's ``server_time`` and reported back with
+    ``tz_source``. Sessions are computed from **broker-server** time, which
+    is neither UTC nor the operator's local clock, so silence about it would
+    mislabel every trade.
+
+    Degrades to ``available: false`` with a ``reason`` -- never to a zeroed
+    summary, which would read as "you have lost nothing".
+    """
+    if not mt5_adapter.available():
+        return _history_unavailable(
+            "the MetaTrader5 package is not installed, so deal history "
+            "cannot be read. Statistics need closed deals; the snapshot "
+            "only carries open positions."
+        )
+
+    resolved = _symbol_or_404(symbol)
+    deals = mt5_adapter.deals(days=days)
+
+    if tz_offset_minutes is None:
+        offset, source = _infer_tz_offset(resolved)
+    else:
+        offset, source = int(tz_offset_minutes), "request"
+
+    payload = history.report(
+        deals, symbol=resolved, offset_minutes=offset, limit=limit
+    )
+    return {
+        "available": True,
+        "reason": None,
+        "symbol": resolved,
+        "days": days,
+        "tz_source": source,
+        **payload,
+    }
+
+
+@app.get("/api/candles", dependencies=[Depends(require_token)])
+def candles(
+    symbol: str | None = Query(default=None),
+    timeframe: str = Query(default="M15"),
+    count: int = Query(default=120, ge=1, le=500),
+) -> dict[str, Any]:
+    """Recent OHLC bars for the chart module, oldest first.
+
+    ``available: false`` when the package is missing, and ``reason`` when no
+    bars came back. A chart drawn from an empty list is a chart that says
+    price did not move, so the client is told why it has nothing instead.
+    """
+    resolved = _symbol_or_404(symbol)
+    name = (timeframe or "").upper()
+    if name not in mt5_adapter.TIMEFRAMES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"unknown timeframe {timeframe!r}; "
+                f"expected one of {', '.join(mt5_adapter.TIMEFRAMES)}"
+            ),
+        )
+
+    if not mt5_adapter.available():
+        return {
+            "available": False,
+            "symbol": resolved,
+            "timeframe": name,
+            "bars": [],
+            "reason": (
+                "the MetaTrader5 package is not installed, so bars cannot be "
+                "read from the terminal."
+            ),
+        }
+
+    bars = mt5_adapter.rates(resolved, name, count)
+    return {
+        "available": True,
+        "symbol": resolved,
+        "timeframe": name,
+        "bars": [bar.as_dict() for bar in bars],
+        "reason": None
+        if bars
+        else (
+            f"no {name} bars returned for {resolved!r}. A broker-only name "
+            "with no open chart can fail here; check it against GET /api/symbols."
+        ),
+    }
+
+
+class JournalWrite(BaseModel):
+    """A note written against a ticket that already exists."""
+
+    ticket: int = Field(gt=0, description="Position ticket the note belongs to")
+    note: str | None = Field(
+        default=None,
+        max_length=MAX_JOURNAL_LEN,
+        description="Free text; kept by the bridge, never sent to the EA",
+    )
+    psych: str = Field(
+        default="",
+        max_length=32,
+        description="Operator's own state label, e.g. 'patient' or 'fomo'",
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description="Playbook labels for this trade",
+    )
+
+
+@app.post("/api/journal", dependencies=[Depends(require_token)])
+def write_journal(
+    body: JournalWrite, symbol: str | None = Query(default=None)
+) -> dict[str, Any]:
+    """Attach or replace the note for an existing ticket.
+
+    This writes a **local sidecar file**; it is not a trading command and
+    never reaches the EA. That is why it needs no live chart -- a trade that
+    closed an hour ago still deserves a note, and refusing it because the
+    chart was removed would lose exactly the reflection a journal is for.
+
+    A ticket is required (``> 0``). Notes for orders that do not exist yet
+    are queued through ``POST /api/order``, which is the only path that can
+    legitimately pair a note with a ticket the EA has not yet reported.
+    """
+    resolved = _symbol_or_404(symbol)
+    # --- tags are the operator's vocabulary, but a blank or whitespace tag
+    # --- is not a label; dropping it keeps the UI from rendering empty chips
+    cleaned = [tag.strip() for tag in body.tags if tag and tag.strip()]
+    entry = journal.set_note(
+        resolved,
+        body.ticket,
+        body.note,
+        psych=body.psych.strip(),
+        tags=cleaned,
+    )
+    LOG.info(f"journal written for {resolved} ticket {body.ticket}")
+    return {"saved": True, "symbol": resolved, "entry": entry}
+
+
+@app.delete("/api/journal", dependencies=[Depends(require_token)])
+def delete_journal(
+    ticket: int = Query(gt=0), symbol: str | None = Query(default=None)
+) -> dict[str, Any]:
+    """Delete a note. ``404`` when that ticket was never annotated."""
+    resolved = _symbol_or_404(symbol)
+    if not journal.delete_note(resolved, ticket):
+        raise HTTPException(
+            status_code=404,
+            detail=f"no journal entry for ticket {ticket} on {resolved!r}",
+        )
+    LOG.info(f"journal entry deleted for {resolved} ticket {ticket}")
+    return {"deleted": True, "symbol": resolved, "ticket": ticket}
 
 
 def _require_live_chart(symbol: str) -> Any:

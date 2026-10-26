@@ -3,6 +3,21 @@
  * The generated CSS is committed to static/tailwind.css so the dashboard
  * never fetches a CDN at runtime. A trading panel must render identically
  * with no network access.
+ *
+ * Token naming, and why there are two sets
+ * ----------------------------------------
+ * v1.6.0 adopts the Apex Institutional Terminal palette. The Apex names
+ * (``surface``, ``borderline``, ``text-*``, ``bull``, ``bear``, ``warn``,
+ * ``brand``, ``alt``) are the ones new markup should use.
+ *
+ * The v1.x names (``ink-*``, ``shade-*``, ``live``, ``offline``, ``stale``,
+ * ``accent``, ``violet``) are **kept as aliases pointing at the same
+ * values**. They are not dead weight: app.js builds runtime class strings
+ * from complete literals (``text-live``, ``text-offline``, ``text-stale``,
+ * ``bg-ink-700``), and both the CSS gate and the client test suite assert
+ * on them. Renaming instead of aliasing would strip the colour from every
+ * status pill with no error anywhere -- the exact silent failure the
+ * client tests exist to prevent.
  */
 module.exports = {
   // --- app.js is scanned too: the status pill colours and the .rung
@@ -13,54 +28,111 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        // --- Charon palette: obsidian surfaces, low-glare, tuned for a
-        // --- second monitor sitting next to the terminal. Colour is never
-        // --- decoration here -- emerald is live/long/profit, crimson is
-        // --- offline/short/loss/refused, cyan is technical (latency,
-        // --- commands), violet is rung and tier metadata. If a number is
-        // --- coloured, the colour is making a claim about it.
+        /* --- Apex surfaces ------------------------------------------- */
+        // --- the page itself, and the deepest well inside a panel
+        surface: {
+          DEFAULT: "#0f131d",
+          dim: "#0f131d",
+          bright: "#353944",
+          lowest: "#0a0e18",
+          low: "#171b26",
+          container: "#1c1f2a",
+          high: "#262a35",
+          highest: "#313540",
+        },
+        borderline: {
+          DEFAULT: "#424754", // --- hairline between rows
+          strong: "#8c909f", // --- control outline
+        },
+        /* --- Apex text ----------------------------------------------- */
+        // --- `primary` and `secondary` are the two text weights; the third
+        // --- is the dimmest label that is still legible on the page
+        primary: "#dfe2f1",
+        secondary: "#c2c6d6",
+        tertiary: "#8c909f",
+        /* --- Apex semantics ------------------------------------------ */
+        bull: "#4edea3", // --- long / profit / live
+        bear: "#ffb4ab", // --- short / loss / offline / refused
+        warn: "#f59e0b", // --- stale: warnable, never fatal
+        brand: "#adc6ff", // --- primary action / focus
+        alt: "#4cd7f6", // --- technical: latency, commands
+
+        /* --- v1.x aliases (do not remove: app.js emits these) -------- */
         ink: {
-          950: "#030712",   // page
-          925: "#0a0f1d",   // panel
-          900: "#0b1222",   // well inside a panel
-          850: "#0f1728",   // raised row
-          800: "#141e33",   // hover
-          700: "#1e2a44",   // hairline
-          600: "#2c3c5c",   // control border
+          950: "#0f131d", // page        <- surface
+          925: "#171b26", // panel       <- surface-low
+          900: "#0a0e18", // well        <- surface-lowest
+          850: "#1c1f2a", // raised row  <- surface-container
+          800: "#262a35", // hover       <- surface-high
+          700: "#424754", // hairline    <- borderline
+          600: "#313540", // control     <- surface-highest
         },
         shade: {
-          400: "#7d8ba3",
-          300: "#a3aec2",
-          200: "#c8d0de",
-          100: "#e6ebf3",
+          400: "#8c909f", // <- tertiary
+          300: "#c2c6d6", // <- secondary
+          200: "#dfe2f1", // <- primary
+          100: "#eef1fa", // --- the one step brighter than body text
         },
-        live: "#10b981",     // live / long / profit
-        stale: "#f59e0b",    // stale is warnable, not fatal -- never red
-        offline: "#f43f5e",  // offline / short / loss / refused
-        accent: "#38bdf8",   // latency and commands
-        violet: "#818cf8",   // rungs and tiers
+        live: "#4edea3", // <- bull
+        stale: "#f59e0b", // <- warn
+        offline: "#ffb4ab", // <- bear
+        accent: "#adc6ff", // <- brand
+        violet: "#4cd7f6", // <- alt
       },
       fontFamily: {
-        mono: ["ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
-        // --- no webfont: the bridge gate forbids CDN references, and a
-        // --- panel must render offline. System display faces only, so
-        // --- weight and tracking do the typographic work instead.
+        // --- both faces are vendored into static/fonts and declared with
+        // --- @font-face in src/input.css. The fallbacks stay in the stack
+        // --- so a browser that refuses the woff2 still renders readable
+        // --- text rather than waiting on a face that will not arrive.
         display: [
-          "Bahnschrift",
-          "DIN Alternate",
-          "Segoe UI Variable Display",
-          "Segoe UI",
+          "Inter",
           "system-ui",
+          "-apple-system",
+          "Segoe UI",
           "sans-serif",
         ],
+        mono: [
+          "JetBrains Mono",
+          "ui-monospace",
+          "SFMono-Regular",
+          "Menlo",
+          "Consolas",
+          "monospace",
+        ],
+      },
+      fontSize: {
+        /* --- Apex type ramp, as named utilities --------------------- */
+        "headline-xl": ["24px", { lineHeight: "28px", letterSpacing: "-0.02em", fontWeight: "600" }],
+        "headline-lg": ["18px", { lineHeight: "22px", letterSpacing: "-0.015em", fontWeight: "600" }],
+        "headline-sm": ["14px", { lineHeight: "18px", letterSpacing: "-0.01em", fontWeight: "600" }],
+        "body-lg": ["14px", { lineHeight: "20px", letterSpacing: "-0.01em" }],
+        "body-md": ["12px", { lineHeight: "16px" }],
+        "body-sm": ["11px", { lineHeight: "14px" }],
+        "num-lg": ["16px", { lineHeight: "18px", letterSpacing: "-0.01em", fontWeight: "600" }],
+        "num-md": ["12px", { lineHeight: "14px", fontWeight: "500" }],
+        "num-sm": ["10px", { lineHeight: "12px", letterSpacing: "0.02em", fontWeight: "500" }],
+        caps: ["10px", { lineHeight: "12px", letterSpacing: "0.05em", fontWeight: "700" }],
+      },
+      borderRadius: {
+        // --- Apex geometry is architectural: 4px frames, 2px chips.
+        // --- `full` is reserved for status pings and avatars only.
+        sm: "0.125rem",
+        DEFAULT: "0.25rem",
+        md: "0.375rem",
+        lg: "0.5rem",
+        xl: "0.75rem",
+      },
+      spacing: {
+        // --- fixed chrome heights, so the header and rail never reflow
+        header: "56px",
+        rail: "64px",
+        ticker: "32px",
       },
       boxShadow: {
-        // --- a panel sits above the page rather than on it
-        panel: "inset 0 1px 0 0 rgba(255,255,255,0.035), 0 18px 40px -28px rgba(0,0,0,0.95)",
-        "glow-live": "0 0 0 1px rgba(16,185,129,0.35), 0 0 22px -6px rgba(16,185,129,0.55)",
-        "glow-offline": "0 0 0 1px rgba(244,63,94,0.35), 0 0 22px -6px rgba(244,63,94,0.55)",
-        "glow-accent": "0 0 0 1px rgba(56,189,248,0.35), 0 0 22px -6px rgba(56,189,248,0.55)",
-        "glow-violet": "0 0 0 1px rgba(129,140,248,0.35), 0 0 22px -6px rgba(129,140,248,0.5)",
+        // --- Apex is flat: depth is a border and a background step, not a
+        // --- drop shadow. v1.x's `panel` / `glow-*` are gone; keeping them
+        // --- would let old markup reintroduce a look the design rejects.
+        inset: "inset 0 1px 0 0 rgba(255,255,255,0.02)",
       },
     },
   },

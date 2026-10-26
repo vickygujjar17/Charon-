@@ -102,13 +102,13 @@ function renderLadder(container, text) {
 
     const level = document.createElement("span");
     level.className = rung.missing
-      ? "text-[11px] italic text-shade-400"
-      : "text-[11px] font-semibold uppercase tracking-wider text-violet";
+      ? "text-body-sm italic text-tertiary"
+      : "font-display text-caps uppercase text-alt";
     level.textContent = rung.level;
 
     const px = document.createElement("span");
     px.className = rung.missing
-      ? "font-mono text-[11px] text-shade-400"
+      ? "font-mono text-body-sm text-tertiary"
       : "readout text-xs font-semibold";
     px.textContent = rung.price ?? "—";
 
@@ -124,12 +124,15 @@ function renderLadder(container, text) {
 //| failure, so the panel can say *when* it last told the truth        |
 //| instead of only that it is currently lying.                       |
 //+------------------------------------------------------------------+
+// --- Apex is flat: a status pill is a 2px chip with a coloured border, not
+// --- a glowing capsule. Every class below is a complete literal, because the
+// --- Tailwind build scans this file as text.
 const STATUS_STYLE = {
-  live: "bg-live/15 text-live shadow-glow-live",
-  stale: "bg-stale/15 text-stale",
-  offline: "bg-offline/15 text-offline shadow-glow-offline",
-  starting: "bg-accent/15 text-accent shadow-glow-accent",
-  error: "bg-offline/15 text-offline shadow-glow-offline",
+  live: "bg-live/15 text-live border-live/50",
+  stale: "bg-stale/15 text-stale border-stale/50",
+  offline: "bg-offline/15 text-offline border-offline/50",
+  starting: "bg-accent/15 text-brand border-accent/50",
+  error: "bg-offline/15 text-offline border-offline/50",
 };
 
 let lastGoodAt = 0;   // epoch seconds of the last good payload
@@ -227,14 +230,14 @@ function setLatency(ms) {
   label.textContent = rounded + " ms";
   label.title = "Round trip for GET /api/status. Poll interval " + REFRESH_MS + " ms.";
   label.className =
-    "font-mono text-[11px] " + (rounded > SLOW_FETCH_MS ? "text-stale" : "text-shade-400");
+    "font-mono text-body-sm " + (rounded > SLOW_FETCH_MS ? "text-stale" : "text-tertiary");
 }
 
 function setLatencyFailed() {
   const label = $("latencyLabel");
   label.textContent = "—";
   label.title = "The last GET /api/status did not complete.";
-  label.className = "font-mono text-[11px] text-offline";
+  label.className = "font-mono text-body-sm text-offline";
 }
 
 //+------------------------------------------------------------------+
@@ -261,9 +264,30 @@ function render(payload) {
 
   // --- a negative P/L reads red, positive green, flat neutral
   const pl = snap.basket.open_pl;
-  $("openPl").className =
-    "readout mt-1 text-lg font-semibold " +
-    (pl > 0 ? "text-live" : pl < 0 ? "text-offline" : "text-shade-100");
+  const plTone = pl > 0 ? "text-live" : pl < 0 ? "text-offline" : "text-primary";
+  $("openPl").className = "kpi-value " + plTone;
+
+  // --- the floating result, in words, under the number: a bare figure
+  // --- coloured green does not say whether it is booked or still at risk
+  const floating = snap.basket.valid ? "floating on " + snap.basket.legs + " leg(s)" : "flat";
+  $("openPlFoot").textContent = floating;
+  $("equityFoot").textContent = snap.currency ? "in " + snap.currency : "—";
+  $("openPl").title = "Unrealized. Realized results are in Closed trades below.";
+
+  // --- the ticker strip repeats the four figures a desk watches, because
+  // --- it stays on screen while the KPI grid scrolls away
+  $("tickSymbol").textContent = snap.symbol || "—";
+  $("tickBasket").textContent = snap.basket.valid
+    ? snap.basket.direction + " " + Number(snap.basket.lot ?? 0).toFixed(2)
+    : "flat";
+  $("tickPl").className = "readout truncate text-num-md font-semibold " + plTone;
+  $("tickPl").textContent = money(snap.basket.open_pl, snap.currency);
+  $("tickEquity").textContent = money(snap.equity, snap.currency);
+  $("tickRisk").textContent = pct(snap.basket.risk_pct);
+  $("tickRisk").className =
+    "readout truncate text-num-md " +
+    (snap.basket.risk_pct > 0 ? "text-stale" : "text-primary");
+  $("tickSession").textContent = snap.basket.valid ? "in play" : "idle";
 
   // --- basket
   const dir = $("basketDir");
@@ -271,10 +295,10 @@ function render(payload) {
   dir.className =
     "pill " +
     (snap.basket.direction === "BUY"
-      ? "bg-live/15 text-live shadow-glow-live"
+      ? "bg-live/15 text-live border-live/50"
       : snap.basket.direction === "SELL"
-        ? "bg-offline/15 text-offline shadow-glow-offline"
-        : "bg-ink-700 text-shade-300");
+        ? "bg-offline/15 text-offline border-offline/50"
+        : "bg-surface-high text-secondary");
 
   $("basketLegs").textContent = snap.basket.legs;
   $("basketAvg").textContent = price(snap.basket.avg_entry, digits);
@@ -299,15 +323,15 @@ function render(payload) {
 
   if (pyr.armed) {
     armState.textContent = "ARMED";
-    armState.className = "text-sm font-semibold text-live";
+    armState.className = "font-display text-headline-sm text-live";
     countdown.textContent =
       pyr.secs_left !== null && pyr.secs_left >= 0 ? pyr.secs_left + "s" : "∞";
-    countdown.className = "readout text-lg font-bold text-live";
+    countdown.className = "readout text-num-lg font-semibold text-live";
   } else {
     armState.textContent = pyr.enabled ? "disarmed" : "pyramiding off";
-    armState.className = "text-sm font-semibold text-shade-400";
+    armState.className = "font-display text-headline-sm text-tertiary";
     countdown.textContent = "";
-    countdown.className = "readout text-lg font-bold text-shade-300";
+    countdown.className = "readout text-num-lg font-semibold text-secondary";
   }
 
   const canArm = pyr.enabled && pyr.trigger === "MANUAL" && snap.basket.valid;
@@ -349,20 +373,20 @@ function render(payload) {
 //+------------------------------------------------------------------+
 function legRow(leg) {
   const tr = document.createElement("tr");
-  tr.className = "border-b border-ink-800 transition-colors hover:bg-ink-800/40";
+  tr.className = "transition-colors";
   tr.dataset.ticket = String(leg.ticket);
 
   // --- ticket, side, tier, entry, vol, stop, 1R, progress, flags
   for (let index = 0; index < 9; index += 1) {
     const td = document.createElement("td");
-    td.className = index === 0 ? "py-2 pl-4 pr-3" : "py-2 pr-3";
+    td.className = index === 0 ? "pl-3" : "";
     td.dataset.cell = String(index);
     tr.append(td);
   }
 
   // --- the ladder cell keeps its own small stack of rungs
   const tdLadder = document.createElement("td");
-  tdLadder.className = "py-2 pr-3";
+  tdLadder.className = "";
   const box = document.createElement("div");
   box.className = "space-y-1";
   box.dataset.role = "leg-ladder";
@@ -374,7 +398,7 @@ function legRow(leg) {
   // --- point: v1.3.0's buttons only ever addressed whatever the last verdict
   // --- happened to name.
   const tdActions = document.createElement("td");
-  tdActions.className = "py-2 pr-4";
+  tdActions.className = "text-right";
   const actions = document.createElement("div");
   actions.className = "flex gap-1";
   actions.append(rowButton("modify", "Modify", "btn-ghost", leg.ticket));
@@ -391,7 +415,7 @@ function legRow(leg) {
 function rowButton(action, label, variant, ticket) {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = variant + " px-2 py-0.5 text-[10px]";
+  button.className = variant + " px-2 py-0.5 font-mono text-num-sm";
   button.dataset.rowAction = action;
   button.dataset.ticket = String(ticket);
   button.textContent = label;
@@ -406,19 +430,19 @@ function fillLegRow(tr, leg, digits) {
   ].filter(Boolean).join(" ") || "—";
 
   const cells = [
-    { text: "#" + leg.ticket, cls: "text-shade-300" },
+    { text: "#" + leg.ticket, cls: "text-secondary" },
     {
       text: leg.side,
       cls: leg.side === "BUY" ? "font-semibold text-live" : "font-semibold text-offline",
     },
-    { text: "T" + leg.tier, cls: "text-violet" },
+    { text: "T" + leg.tier, cls: "text-alt" },
     { text: price(leg.entry, digits), cls: "" },
     { text: leg.lot === null ? "—" : Number(leg.lot).toFixed(2), cls: "" },
     // --- a zero stop is not a tight stop, it is an unprotected leg
     { text: price(leg.sl, digits), cls: leg.sl > 0 ? "" : "text-offline" },
-    { text: price(leg.risk_price, digits), cls: "text-shade-400" },
-    { text: rr(leg.progress_rr), cls: leg.progress_rr > 0 ? "text-live" : "text-shade-300" },
-    { text: flags, cls: "text-[10px] uppercase tracking-wider text-shade-400" },
+    { text: price(leg.risk_price, digits), cls: "text-tertiary" },
+    { text: rr(leg.progress_rr), cls: leg.progress_rr > 0 ? "text-live" : "text-secondary" },
+    { text: flags, cls: "font-display text-caps uppercase text-tertiary" },
   ];
 
   const tdNodes = tr.querySelectorAll("td[data-cell]");
@@ -428,7 +452,7 @@ function fillLegRow(tr, leg, digits) {
     // --- the first cell keeps the table's left gutter; without it the
     // --- ticket number sits flush against the panel edge
     td.className =
-      (index === 0 ? "py-2 pl-4 pr-3 " : "py-2 pr-3 ") + cells[index].cls;
+      (index === 0 ? "pl-3 " : "") + cells[index].cls;
     td.textContent = cells[index].text;
   }
 
@@ -474,11 +498,11 @@ function renderLegs(legs, digits) {
 //+------------------------------------------------------------------+
 function pendingRow(order) {
   const tr = document.createElement("tr");
-  tr.className = "border-b border-ink-800 transition-colors hover:bg-ink-800/40";
+  tr.className = "transition-colors";
   tr.dataset.ticket = String(order.ticket);
   for (let index = 0; index < 7; index += 1) {
     const td = document.createElement("td");
-    td.className = index === 0 ? "py-2 pl-4 pr-3" : "py-2 pr-3";
+    td.className = index === 0 ? "pl-3" : "";
     td.dataset.cell = String(index);
     tr.append(td);
   }
@@ -487,12 +511,12 @@ function pendingRow(order) {
 
 function fillPendingRow(tr, order, digits) {
   const cells = [
-    { text: "#" + order.ticket, cls: "text-shade-300" },
+    { text: "#" + order.ticket, cls: "text-secondary" },
     {
       text: order.side || "\u2014",
       cls: order.side === "BUY" ? "font-semibold text-live" : "font-semibold text-offline",
     },
-    { text: order.order_type || "\u2014", cls: "text-shade-300" },
+    { text: order.order_type || "\u2014", cls: "text-secondary" },
     { text: price(order.price, digits), cls: "" },
     // --- a pending order without a stop is a broker-side hazard, so it says
     // --- so rather than showing a tidy 0.00000
@@ -505,13 +529,13 @@ function fillPendingRow(tr, order, digits) {
     const td = tdNodes[index];
     if (!td) continue;
     td.className =
-      (index === 0 ? "py-2 pl-4 pr-3 " : "py-2 pr-3 ") + cells[index].cls;
+      (index === 0 ? "pl-3 " : "") + cells[index].cls;
     td.textContent = cells[index].text;
   }
 
   const tdActions = tdNodes[6];
   if (tdActions) {
-    tdActions.className = "py-2 pr-4";
+    tdActions.className = "text-right";
     // --- rebuilt on every paint rather than diffed: the pending table is
     // --- tiny and a stale handler would keep acting on a dead ticket.
     while (tdActions.firstChild) tdActions.removeChild(tdActions.firstChild);
@@ -568,11 +592,11 @@ function renderPending(orders, digits, currency) {
 //+------------------------------------------------------------------+
 function watchRow(item) {
   const tr = document.createElement("tr");
-  tr.className = "border-b border-ink-800 transition-colors hover:bg-ink-800/40";
+  tr.className = "transition-colors";
   tr.dataset.watch = String(item.watch_id);
   for (let index = 0; index < 6; index += 1) {
     const td = document.createElement("td");
-    td.className = index === 0 ? "py-2 pl-4 pr-3" : "py-2 pr-3";
+    td.className = index === 0 ? "pl-3" : "";
     td.dataset.cell = String(index);
     tr.append(td);
   }
@@ -592,7 +616,7 @@ function watchDistance(item, bid, ask) {
 
 function fillWatchRow(tr, item, digits, bid, ask) {
   const cells = [
-    { text: "#" + item.watch_id, cls: "text-shade-300" },
+    { text: "#" + item.watch_id, cls: "text-secondary" },
     {
       text: item.side || "\u2014",
       cls: item.side === "BUY" ? "font-semibold text-live" : "font-semibold text-offline",
@@ -605,7 +629,7 @@ function fillWatchRow(tr, item, digits, bid, ask) {
     text: gap === null ? "\u2014" : price(gap, digits),
     // --- a target the market has already reached is about to fire; colouring
     // --- it warns the operator before the fill rather than after it
-    cls: gap === null ? "text-shade-400" : (gap === 0 ? "text-live" : ""),
+    cls: gap === null ? "text-tertiary" : (gap === 0 ? "text-live" : ""),
   });
   cells.push({ text: item.status || "armed", cls: "text-stale" });
 
@@ -614,13 +638,13 @@ function fillWatchRow(tr, item, digits, bid, ask) {
     const td = tdNodes[index];
     if (!td) continue;
     td.className =
-      (index === 0 ? "py-2 pl-4 pr-3 " : "py-2 pr-3 ") + cells[index].cls;
+      (index === 0 ? "pl-3 " : "") + cells[index].cls;
     td.textContent = cells[index].text;
   }
 
   const tdActions = tdNodes[5];
   if (tdActions) {
-    tdActions.className = "py-2 pr-4";
+    tdActions.className = "text-right";
     while (tdActions.firstChild) tdActions.removeChild(tdActions.firstChild);
     const actions = document.createElement("div");
     actions.className = "flex gap-1";
@@ -740,10 +764,10 @@ let lastPollError = null;
 //| otherwise derives a price. If a number is missing we print a dash.|
 //+------------------------------------------------------------------+
 const ORDER_TONE = {
-  idle: "pill bg-ink-700 text-shade-300",
+  idle: "pill bg-surface-high text-secondary",
   pending: "pill bg-stale/15 text-stale",
-  accepted: "pill bg-live/15 text-live shadow-glow-live",
-  rejected: "pill bg-offline/15 text-offline shadow-glow-offline",
+  accepted: "pill bg-live/15 text-live border-live/50",
+  rejected: "pill bg-offline/15 text-offline border-offline/50",
 };
 
 function renderOrder(order, digits, currency) {
@@ -776,13 +800,13 @@ function renderOrder(order, digits, currency) {
 
   const verdict = $("orderVerdict");
   if (!order || status === "idle") {
-    verdict.className = "mt-2 text-[11px] text-shade-400";
+    verdict.className = "mt-1.5 font-mono text-body-sm text-tertiary";
     verdict.textContent = "Nothing submitted yet.";
     return;
   }
 
   if (status === "rejected") {
-    verdict.className = "mt-2 text-[11px] text-offline";
+    verdict.className = "mt-1.5 font-mono text-body-sm text-offline";
     verdict.textContent = "EA refused: " + (order.reason || "no reason given");
     return;
   }
@@ -791,7 +815,7 @@ function renderOrder(order, digits, currency) {
   // --- and it may fire many minutes from now. Amber is the palette's "waiting,
   // --- but not broken" colour; green here would claim a position exists.
   if (status === "watching") {
-    verdict.className = "mt-2 text-[11px] text-stale";
+    verdict.className = "mt-1.5 font-mono text-body-sm text-stale";
     const watching = [];
     if (order.side) watching.push(order.side);
     if (typeof order.entry === "number" && order.entry > 0) {
@@ -803,7 +827,7 @@ function renderOrder(order, digits, currency) {
   }
 
   verdict.className =
-    status === "pending" ? "mt-2 text-[11px] text-stale" : "mt-2 text-[11px] text-live";
+    status === "pending" ? "mt-1.5 font-mono text-body-sm text-stale" : "mt-1.5 font-mono text-body-sm text-live";
   const parts = [];
   if (order.side) parts.push(order.side);
   if (order.rung) parts.push("rung " + order.rung);
@@ -904,7 +928,7 @@ function readStages() {
 
 async function postOrder(path, label) {
   const message = $("orderMsg");
-  message.className = "mt-2 text-[11px] text-shade-400";
+  message.className = "mt-1.5 font-mono text-body-sm text-tertiary";
   message.textContent = "sending\u2026";
 
   const ticket = readTicket();
@@ -913,7 +937,7 @@ async function postOrder(path, label) {
   // --- far less useful than this one.
   for (const key of ["block_top", "block_bottom"]) {
     if (!Number.isFinite(ticket[key]) || ticket[key] <= 0) {
-      message.className = "mt-2 text-[11px] text-offline";
+      message.className = "mt-1.5 font-mono text-body-sm text-offline";
       message.textContent = key.replace("_", " ") + " must be a positive number.";
       return;
     }
@@ -922,13 +946,13 @@ async function postOrder(path, label) {
   // --- has to be positive before it leaves the browser.
   const riskKey = ticket.risk_money !== undefined ? "risk_money" : "risk_pct";
   if (!Number.isFinite(ticket[riskKey]) || ticket[riskKey] <= 0) {
-    message.className = "mt-2 text-[11px] text-offline";
+    message.className = "mt-1.5 font-mono text-body-sm text-offline";
     message.textContent =
       riskKey.replace("_", " ") + " must be a positive number.";
     return;
   }
   if (ticket.order_type === "LIMIT" && !Number.isFinite(ticket.entry)) {
-    message.className = "mt-2 text-[11px] text-offline";
+    message.className = "mt-1.5 font-mono text-body-sm text-offline";
     message.textContent = "A LIMIT ticket needs an entry price.";
     return;
   }
@@ -941,7 +965,7 @@ async function postOrder(path, label) {
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      message.className = "mt-2 text-[11px] text-offline";
+      message.className = "mt-1.5 font-mono text-body-sm text-offline";
       const detail = body.detail;
       message.textContent =
         typeof detail === "string" ? detail : "HTTP " + response.status;
@@ -949,13 +973,13 @@ async function postOrder(path, label) {
     }
     // --- queued is not filled: the EA adjudicates on its next tick and the
     // --- verdict arrives in the snapshot, not in this response.
-    message.className = "mt-2 text-[11px] text-accent";
+    message.className = "mt-1.5 font-mono text-body-sm text-brand";
     message.textContent =
       label + " queued \u2014 the EA adjudicates it on its next tick.";
     appendLocalLog("command", "order: " + label + " queued from the dashboard");
     refresh();
   } catch (error) {
-    message.className = "mt-2 text-[11px] text-offline";
+    message.className = "mt-1.5 font-mono text-body-sm text-offline";
     message.textContent = "failed: " + error.message;
   }
 }
@@ -967,7 +991,7 @@ function buildStageRows() {
   const host = $("stageRows");
   for (let index = 1; index <= 3; index += 1) {
     const cell = document.createElement("div");
-    cell.className = "rounded border border-ink-700 bg-ink-800/40 p-2";
+    cell.className = "rounded-sm border border-borderline bg-surface-container p-2";
 
     const label = document.createElement("div");
     label.className = "label";
@@ -975,7 +999,7 @@ function buildStageRows() {
     cell.append(label);
 
     const kind = document.createElement("select");
-    kind.className = "ticket-field mt-1 text-[11px]";
+    kind.className = "ticket-field mt-1 font-mono text-body-sm";
     kind.dataset.stage = "kind";
     const rrOption = document.createElement("option");
     rrOption.value = "rr";
@@ -991,7 +1015,7 @@ function buildStageRows() {
     trigger.step = "0.00001";
     trigger.dataset.stage = "trigger";
     trigger.placeholder = "not used";
-    trigger.className = "ticket-field mt-1 text-[11px]";
+    trigger.className = "ticket-field mt-1 font-mono text-body-sm";
     cell.append(trigger);
 
     const mult = document.createElement("input");
@@ -1000,7 +1024,7 @@ function buildStageRows() {
     mult.min = "0";
     mult.dataset.stage = "mult";
     mult.placeholder = "size x1.0";
-    mult.className = "ticket-field mt-1 text-[11px]";
+    mult.className = "ticket-field mt-1 font-mono text-body-sm";
     cell.append(mult);
 
     host.append(cell);
@@ -1123,7 +1147,7 @@ function wireOrderPanel() {
   $("orderModifyBtn").addEventListener("click", () => {
     const ticket = $("orderTicket").textContent;
     if (!ticket.startsWith("#")) {
-      $("orderMsg").className = "mt-2 text-[11px] text-offline";
+      $("orderMsg").className = "mt-1.5 font-mono text-body-sm text-offline";
       $("orderMsg").textContent = "No ticket to modify yet.";
       return;
     }
@@ -1135,7 +1159,7 @@ function wireOrderPanel() {
     const message = $("orderMsg");
     const ticket = $("orderTicket").textContent;
     if (!ticket.startsWith("#")) {
-      message.className = "mt-2 text-[11px] text-offline";
+      message.className = "mt-1.5 font-mono text-body-sm text-offline";
       message.textContent = "No ticket to cancel yet.";
       return;
     }
@@ -1153,7 +1177,7 @@ async function cancelTicket(ticketNumber, message) {
     encodeURIComponent(ticketNumber) +
     (symbol ? "&symbol=" + encodeURIComponent(symbol) : "");
   if (message) {
-    message.className = "mt-2 text-[11px] text-shade-400";
+    message.className = "mt-1.5 font-mono text-body-sm text-tertiary";
     message.textContent = "sending\u2026";
   }
   try {
@@ -1161,14 +1185,14 @@ async function cancelTicket(ticketNumber, message) {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (message) {
-        message.className = "mt-2 text-[11px] text-offline";
+        message.className = "mt-1.5 font-mono text-body-sm text-offline";
         message.textContent =
           typeof body.detail === "string" ? body.detail : "HTTP " + response.status;
       }
       return false;
     }
     if (message) {
-      message.className = "mt-2 text-[11px] text-accent";
+      message.className = "mt-1.5 font-mono text-body-sm text-brand";
       message.textContent =
         "Cancel queued for #" + ticketNumber + " \u2014 the EA applies it on its next tick.";
     }
@@ -1177,7 +1201,7 @@ async function cancelTicket(ticketNumber, message) {
     return true;
   } catch (error) {
     if (message) {
-      message.className = "mt-2 text-[11px] text-offline";
+      message.className = "mt-1.5 font-mono text-body-sm text-offline";
       message.textContent = "failed: " + error.message;
     }
     return false;
@@ -1194,7 +1218,7 @@ async function cancelWatch(watchId, message) {
     encodeURIComponent(watchId) +
     (symbol ? "&symbol=" + encodeURIComponent(symbol) : "");
   if (message) {
-    message.className = "mt-2 text-[11px] text-shade-400";
+    message.className = "mt-1.5 font-mono text-body-sm text-tertiary";
     message.textContent = "sending\u2026";
   }
   try {
@@ -1202,14 +1226,14 @@ async function cancelWatch(watchId, message) {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       if (message) {
-        message.className = "mt-2 text-[11px] text-offline";
+        message.className = "mt-1.5 font-mono text-body-sm text-offline";
         message.textContent =
           typeof body.detail === "string" ? body.detail : "HTTP " + response.status;
       }
       return false;
     }
     if (message) {
-      message.className = "mt-2 text-[11px] text-accent";
+      message.className = "mt-1.5 font-mono text-body-sm text-brand";
       message.textContent =
         "Watch #" + watchId + " cancel queued \u2014 the EA drops it on its next tick.";
     }
@@ -1218,7 +1242,7 @@ async function cancelWatch(watchId, message) {
     return true;
   } catch (error) {
     if (message) {
-      message.className = "mt-2 text-[11px] text-offline";
+      message.className = "mt-1.5 font-mono text-body-sm text-offline";
       message.textContent = "failed: " + error.message;
     }
     return false;
@@ -1239,21 +1263,21 @@ async function cancelWatch(watchId, message) {
 //| never "done", and the verdict shows up later in the log tail.     |
 //+------------------------------------------------------------------+
 async function postCommand(path, messageEl, label) {
-  messageEl.className = "mt-2 text-[11px] text-shade-400";
+  messageEl.className = "mt-1.5 font-mono text-body-sm text-tertiary";
   messageEl.textContent = "sending…";
   try {
     const response = await fetch(path, { method: "POST" });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      messageEl.className = "mt-2 text-[11px] text-offline";
+      messageEl.className = "mt-1.5 font-mono text-body-sm text-offline";
       messageEl.textContent = body.detail || "HTTP " + response.status;
       return;
     }
     // --- queued is not applied: the EA drains its inbox on its own timer
-    messageEl.className = "mt-2 text-[11px] text-accent";
+    messageEl.className = "mt-1.5 font-mono text-body-sm text-brand";
     messageEl.textContent = label + " queued — the EA applies it on its next tick.";
   } catch (error) {
-    messageEl.className = "mt-2 text-[11px] text-offline";
+    messageEl.className = "mt-1.5 font-mono text-body-sm text-offline";
     messageEl.textContent = "failed: " + error.message;
   }
 }
@@ -1390,7 +1414,7 @@ function paintSymbolPicker(catalogue) {
     picker.className = "hidden";        // one chart needs no chooser
     return;
   }
-  picker.className = "ml-1 flex flex-col gap-1 border-l border-ink-700 pl-3";
+  picker.className = "ml-1 flex flex-col gap-1 border-l border-borderline pl-3";
 
   const select = $("symbolSelect");
   const options = charts.map((entry) => {
@@ -1429,7 +1453,7 @@ async function loadSymbols() {
 const UNMANAGED_TONE = {
   ok: "pill bg-live/15 text-live",
   unknown: "pill bg-stale/15 text-stale",
-  unavailable: "pill bg-ink-700 text-shade-300",
+  unavailable: "pill bg-surface-high text-secondary",
 };
 
 function unmanagedRowNodes(rows) {
@@ -1482,21 +1506,21 @@ function renderUnmanaged(body) {
 
   const detail = $("unmanagedBody");
   if (rows.length) {
-    detail.className = "px-4 py-2 text-[11px] text-shade-400";
+    detail.className = "px-3 py-2 font-mono text-body-md text-tertiary";
     detail.textContent = pending.length
       ? pending.length + " further position(s) not yet confirmed."
       : "Open, but no live Charon chart accounts for them.";
   } else if (state === "ok") {
-    detail.className = "px-4 py-3 text-[11px] text-shade-400";
+    detail.className = "px-3 py-2 font-mono text-body-md text-tertiary";
     detail.textContent = "Checked every live chart: nothing unmanaged.";
   } else if (state === "unknown") {
     // --- the sentence that must never become "all clear"
-    detail.className = "px-4 py-3 text-[11px] text-stale";
+    detail.className = "px-3 py-2 font-mono text-body-md text-stale";
     detail.textContent =
       "A chart is stale or still starting, so its positions cannot be " +
       "checked. This is not an all-clear.";
   } else {
-    detail.className = "px-4 py-3 text-[11px] text-shade-400";
+    detail.className = "px-3 py-2 font-mono text-body-md text-tertiary";
     detail.textContent =
       body.reason || "No Charon chart is publishing, so nothing can be reconciled.";
   }
@@ -1528,6 +1552,399 @@ async function loadUnmanaged() {
 }
 
 //+------------------------------------------------------------------+
+//| Closed trades (history)                                          |
+//|                                                                  |
+//| Everything here is derived server-side. The client formats and    |
+//| never recomputes: a win rate calculated twice would eventually be |
+//| calculated two different ways.                                    |
+//|                                                                  |
+//| A null ratio renders as "--" with the reason in the footnote.     |
+//| Printing 0.00% would claim every trade lost, which is a different |
+//| statement from "no losing trade has closed yet".                  |
+//+------------------------------------------------------------------+
+const NS_SVG = "http://www.w3.org/2000/svg";
+
+function ratio(value, suffix, digits) {
+  if (value === null || value === undefined) return "—";
+  return Number(value).toFixed(digits ?? 2) + (suffix || "");
+}
+
+function durationText(seconds) {
+  if (seconds === null || seconds === undefined || seconds <= 0) return "—";
+  if (seconds < 3600) return Math.round(seconds / 60) + "m";
+  if (seconds < 86400) return (seconds / 3600).toFixed(1) + "h";
+  return (seconds / 86400).toFixed(1) + "d";
+}
+
+function signedMoney(value, currency) {
+  if (value === null || value === undefined) return "—";
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return sign + money(Math.abs(value), currency);
+}
+
+// --- the tone a realized figure earns. Colour is a claim: green means this
+// --- trade made money, red means it lost, neutral means it was flat.
+function outcomeTone(value) {
+  if (value > 0) return "text-live";
+  if (value < 0) return "text-offline";
+  return "text-tertiary";
+}
+
+function drawEquityCurve(points) {
+  const svg = $("equityCurve");
+  svg.replaceChildren();
+  if (!points || points.length < 2) return;
+
+  const values = points.map((p) => p.cumulative);
+  const low = Math.min(0, ...values);
+  const high = Math.max(0, ...values);
+  const span = high - low || 1;
+  const width = 600;
+  const height = 120;
+  const y = (value) => height - ((value - low) / span) * height;
+  const step = width / (points.length - 1);
+
+  // --- the zero line: without it a curve that never went negative looks
+  // --- identical to one that never went positive
+  const zero = document.createElementNS(NS_SVG, "line");
+  zero.setAttribute("x1", "0");
+  zero.setAttribute("x2", String(width));
+  zero.setAttribute("y1", String(y(0)));
+  zero.setAttribute("y2", String(y(0)));
+  zero.setAttribute("stroke", "#424754");
+  zero.setAttribute("stroke-width", "1");
+  zero.setAttribute("stroke-dasharray", "3 3");
+  svg.append(zero);
+
+  const path = document.createElementNS(NS_SVG, "polyline");
+  path.setAttribute(
+    "points",
+    points
+      .map((p, i) => (i * step).toFixed(1) + "," + y(p.cumulative).toFixed(1))
+      .join(" ")
+  );
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", values[values.length - 1] >= 0 ? "#4edea3" : "#ffb4ab");
+  path.setAttribute("stroke-width", "1.5");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.append(path);
+}
+
+function sessionRowNode(row) {
+  const tr = document.createElement("tr");
+  const cells = [
+    { text: row.session, cls: "font-display text-caps uppercase text-secondary" },
+    { text: String(row.total), cls: "" },
+    { text: ratio(row.win_rate === null ? null : row.win_rate * 100, "%", 0), cls: "" },
+    { text: signedMoney(row.net_realized, ""), cls: outcomeTone(row.net_realized) },
+  ];
+  for (const cell of cells) {
+    const td = document.createElement("td");
+    td.className = cell.cls;
+    td.textContent = cell.text;
+    tr.append(td);
+  }
+  return tr;
+}
+
+function historyRowNode(trade, currency, digits) {
+  const tr = document.createElement("tr");
+  const cells = [
+    { text: clockText(trade.closed_at), cls: "text-tertiary" },
+    { text: trade.symbol, cls: "text-secondary" },
+    { text: trade.side, cls: trade.side === "BUY" ? "text-live" : "text-offline" },
+    { text: Number(trade.volume).toFixed(2), cls: "" },
+    { text: price(trade.entry_price, digits), cls: "" },
+    { text: price(trade.exit_price, digits), cls: "" },
+    { text: trade.session, cls: "text-alt" },
+    { text: durationText(trade.duration_seconds), cls: "text-tertiary" },
+    { text: signedMoney(trade.realized, currency), cls: outcomeTone(trade.realized) },
+    { text: trade.comment || "—", cls: "text-tertiary" },
+  ];
+  for (const cell of cells) {
+    const td = document.createElement("td");
+    td.className = cell.cls;
+    td.textContent = cell.text;
+    tr.append(td);
+  }
+  return tr;
+}
+
+function renderHistory(body) {
+  const badge = $("historyBadge");
+  const metrics = body.metrics || {};
+
+  if (body.available !== true) {
+    // --- "cannot read the account" is not "no losses". The badge says so and
+    // --- the reason is printed, because a silently empty table would be read
+    // --- as a clean record.
+    badge.textContent = "n/a";
+    badge.className = "pill bg-stale/15 text-stale border-stale/50";
+    $("historyEmpty").className = "px-3 py-2 font-mono text-body-md text-stale";
+    $("historyEmpty").textContent =
+      body.reason || "Deal history could not be read from the terminal.";
+    $("historyTableWrap").className = "hidden overflow-x-auto";
+    $("closedPl").textContent = "—";
+    $("closedPl").className = "kpi-value text-tertiary";
+    $("closedFoot").textContent = "history unavailable";
+    return;
+  }
+
+  badge.textContent = metrics.total ? metrics.total + " closed" : "empty";
+  badge.className = metrics.total
+    ? "pill bg-live/15 text-live border-live/50"
+    : "pill bg-surface-high text-secondary";
+
+  // --- the account strip's realized counterpart to the floating P/L above
+  // --- it. Two numbers, two different questions.
+  $("closedPl").textContent = signedMoney(metrics.net_realized, "");
+  $("closedPl").className = "kpi-value " + outcomeTone(metrics.net_realized);
+  $("closedFoot").textContent = metrics.total + " closed in " + body.days + "d";
+
+  $("histTrades").textContent = metrics.total ?? "—";
+  $("histTradesFoot").textContent =
+    (metrics.wins ?? 0) + "W / " + (metrics.losses ?? 0) + "L / " +
+    (metrics.flat ?? 0) + "F";
+
+  const rate = metrics.win_rate === null || metrics.win_rate === undefined
+    ? null
+    : metrics.win_rate * 100;
+  $("histWinRate").textContent = ratio(rate, "%", 1);
+  $("histWinRateFoot").textContent = rate === null
+    ? "no closed trades"
+    : "of " + metrics.total;
+
+  $("histProfitFactor").textContent = ratio(metrics.profit_factor, "", 2);
+  $("histProfitFactorFoot").textContent =
+    metrics.profit_factor === null ? "no losing trade yet" : "gross win / loss";
+
+  $("histExpectancy").textContent = signedMoney(metrics.expectancy, "");
+  $("histExpectancy").className = "kpi-value " + outcomeTone(metrics.expectancy);
+  $("histExpectancyFoot").textContent = metrics.avg_hold_seconds
+    ? "avg hold " + durationText(metrics.avg_hold_seconds)
+    : "per trade";
+
+  $("histAvgRr").textContent = ratio(metrics.avg_rr, "R", 2);
+  $("histAvgRrFoot").textContent =
+    metrics.avg_rr === null ? "needs a loss to compare" : "realized win / loss";
+
+  // --- the clock the session buckets were cut on, stated not implied
+  const offset = body.tz_offset_minutes || 0;
+  const sign = offset >= 0 ? "+" : "-";
+  const abs = Math.abs(offset);
+  $("histClock").textContent =
+    "server UTC" + sign + Math.floor(abs / 60) + ":" +
+    String(abs % 60).padStart(2, "0") +
+    (body.tz_source === "snapshot" ? "" : " (assumed)");
+  $("histClock").title = body.tz_source === "snapshot"
+    ? "Inferred from the EA's server_time against the bridge clock."
+    : "No live snapshot, so UTC was assumed. Session buckets may be shifted.";
+
+  $("histEquityFoot").textContent = metrics.total
+    ? signedMoney(metrics.net_realized, "") + " cumulative"
+    : "no closed trades";
+
+  $("sessionRows").replaceChildren(...(body.sessions || []).map(sessionRowNode));
+
+  const digits = body.digits ?? 5;
+  const trades = body.trades || [];
+  $("historyRows").replaceChildren(
+    ...trades.map((trade) => historyRowNode(trade, body.currency || "", digits))
+  );
+  $("historyTableWrap").className = trades.length
+    ? "overflow-x-auto"
+    : "hidden overflow-x-auto";
+  $("historyEmpty").className = "px-3 py-2 font-mono text-body-md text-tertiary";
+  $("historyEmpty").textContent = trades.length
+    ? ""
+    : metrics.total
+      ? "Showing the newest " + trades.length + " of " + metrics.total + "."
+      : "No closed trades in this window.";
+
+  drawEquityCurve(body.equity);
+}
+
+async function loadHistory() {
+  const days = $("historyDays").value || "30";
+  try {
+    const response = await fetch(
+      "/api/history?days=" + encodeURIComponent(days) +
+        (activeSymbol ? "&symbol=" + encodeURIComponent(activeSymbol) : ""),
+      { cache: "no-store" }
+    );
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      renderHistory({
+        available: false,
+        reason: typeof body.detail === "string" ? body.detail : "HTTP " + response.status,
+      });
+      return;
+    }
+    renderHistory(body);
+  } catch (error) {
+    renderHistory({ available: false, reason: "cannot reach the bridge: " + error.message });
+  }
+}
+
+//+------------------------------------------------------------------+
+//| Journal                                                          |
+//|                                                                  |
+//| A write here creates a local sidecar entry. It is not an order and |
+//| cannot become one: /api/journal only touches the journal file.     |
+//+------------------------------------------------------------------+
+function journalRowNode(row) {
+  const tr = document.createElement("tr");
+
+  const ticket = document.createElement("td");
+  ticket.textContent = "#" + row.ticket;
+
+  const note = document.createElement("td");
+  note.className = "max-w-[28ch] truncate text-secondary";
+  note.textContent = row.note || "—";
+  note.title = row.note || "";
+
+  const psych = document.createElement("td");
+  psych.textContent = row.psych || "—";
+
+  const tags = document.createElement("td");
+  if (Array.isArray(row.tags) && row.tags.length) {
+    tags.replaceChildren(
+      ...row.tags.map((label) => {
+        const chip = document.createElement("span");
+        chip.className = "tag mr-1";
+        chip.textContent = label;
+        return chip;
+      })
+    );
+  } else {
+    tags.textContent = "—";
+  }
+
+  const tag = document.createElement("td");
+  tag.className = "text-alt";
+  tag.textContent = row.tag || "—";
+
+  const actions = document.createElement("td");
+  const remove = document.createElement("button");
+  remove.className = "btn-danger h-6 px-2";
+  remove.textContent = "Delete";
+  remove.dataset.journalTicket = String(row.ticket);
+  actions.append(remove);
+
+  tr.append(ticket, note, psych, tags, tag, actions);
+  return tr;
+}
+
+function renderJournal(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  $("journalBadge").textContent = String(list.length);
+  $("journalRows").replaceChildren(...list.map(journalRowNode));
+  $("journalTableWrap").className = list.length
+    ? "overflow-x-auto"
+    : "hidden overflow-x-auto";
+  $("journalEmpty").classList.toggle("hidden", list.length > 0);
+}
+
+async function loadJournal() {
+  try {
+    const response = await fetch(
+      "/api/status" + (activeSymbol ? "?symbol=" + encodeURIComponent(activeSymbol) : ""),
+      { cache: "no-store" }
+    );
+    if (!response.ok) return;
+    const body = await response.json();
+    renderJournal(body.journal);
+  } catch {
+    /* the status poll already reports a dead bridge; do not double-report */
+  }
+}
+
+async function saveJournal() {
+  const message = $("journalMsg");
+  const ticket = Number($("journalTicket").value);
+  if (!Number.isFinite(ticket) || ticket <= 0) {
+    // --- ticket 0 queues an order; it is not a place to file a reflection
+    message.className = "font-mono text-body-sm text-offline";
+    message.textContent = "A note needs a real ticket number.";
+    return;
+  }
+
+  const tags = $("journalTags").value
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+
+  message.className = "font-mono text-body-sm text-tertiary";
+  message.textContent = "saving…";
+  try {
+    const response = await fetch(
+      "/api/journal" + (activeSymbol ? "?symbol=" + encodeURIComponent(activeSymbol) : ""),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticket: ticket,
+          note: $("journalNote").value,
+          psych: $("journalPsych").value,
+          tags: tags,
+        }),
+      }
+    );
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.detail || "HTTP " + response.status);
+
+    message.className = "font-mono text-body-sm text-live";
+    message.textContent = "saved #" + ticket;
+    await loadJournal();
+  } catch (error) {
+    message.className = "font-mono text-body-sm text-offline";
+    message.textContent = "not saved: " + error.message;
+  }
+}
+
+async function deleteJournal(ticket) {
+  const message = $("journalMsg");
+  try {
+    const response = await fetch(
+      "/api/journal?ticket=" + encodeURIComponent(ticket) +
+        (activeSymbol ? "&symbol=" + encodeURIComponent(activeSymbol) : ""),
+      { method: "DELETE" }
+    );
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.detail || "HTTP " + response.status);
+
+    message.className = "font-mono text-body-sm text-live";
+    message.textContent = "deleted #" + ticket;
+    await loadJournal();
+  } catch (error) {
+    message.className = "font-mono text-body-sm text-offline";
+    message.textContent = "not deleted: " + error.message;
+  }
+}
+
+function clearJournalFields() {
+  $("journalTicket").value = "";
+  $("journalNote").value = "";
+  $("journalPsych").value = "";
+  $("journalTags").value = "";
+  $("journalMsg").textContent = "";
+}
+
+// --- delegated, because the rows are rebuilt on every poll: a per-row
+// --- listener would be re-attached a few hundred times a session
+function wireJournal() {
+  $("journalSaveBtn").addEventListener("click", saveJournal);
+  $("journalClearBtn").addEventListener("click", clearJournalFields);
+  $("historyDays").addEventListener("change", loadHistory);
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!target || !target.dataset) return;
+    const ticket = target.dataset.journalTicket;
+    if (ticket) deleteJournal(ticket);
+  });
+}
+
+//+------------------------------------------------------------------+
 //| Log stream                                                       |
 //|                                                                  |
 //| The server assigns each entry a monotonic seq and honours        |
@@ -1536,19 +1953,19 @@ async function loadUnmanaged() {
 //| a log that repeats itself on every hiccup is worse than no log.   |
 //+------------------------------------------------------------------+
 const LOG_COLOUR = {
-  info: "text-shade-300",
+  info: "text-secondary",
   warn: "text-stale",
   error: "text-offline",
-  command: "text-accent",
+  command: "text-brand",
 };
 
 function appendLogLine(at, level, message) {
   const box = $("logBox");
   const line = document.createElement("div");
-  line.className = "log-line " + (LOG_COLOUR[level] || "text-shade-300");
+  line.className = "log-line " + (LOG_COLOUR[level] || "text-secondary");
 
   const stamp = document.createElement("span");
-  stamp.className = "text-shade-400/80";
+  stamp.className = "text-tertiary";
   stamp.textContent = clockText(at) + "  ";
 
   line.append(stamp, document.createTextNode(message));
@@ -1615,8 +2032,8 @@ async function loadHealth() {
       " [" + (locations.common_exists || "?") + "]" +
       " / bridge root [" + (locations.root_exists || "?") + "]";
     rootEl.className = locations.root_exists === "yes"
-      ? "text-shade-300"
-      : "text-shade-300 underline decoration-dotted";
+      ? "text-secondary"
+      : "text-secondary underline decoration-dotted";
   } catch {
     /* health is decorative; the status poll is what matters */
     $("bridgeVersion").textContent = "—";
@@ -1637,6 +2054,7 @@ function defaultOrderSymbol() {
 
 async function boot() {
   wireCommands();
+  wireJournal();
   setLastGood(0);
   await loadHealth();
   await loadSymbols();
@@ -1644,10 +2062,18 @@ async function boot() {
   await refresh();
   defaultOrderSymbol();
   await loadUnmanaged();
+  await loadHistory();
+  await loadJournal();
   setInterval(refresh, REFRESH_MS);
   // --- reconciliation costs a terminal round trip, so it polls on its own
   // --- slower cadence rather than riding the 1 s status loop
   setInterval(loadUnmanaged, REFRESH_MS * 3);
+
+  // --- deal history only changes when a position closes, and each read is a
+  // --- terminal round trip. A minute is plenty; the status poll carries the
+  // --- live numbers.
+  setInterval(loadHistory, REFRESH_MS * 60);
+  setInterval(loadJournal, REFRESH_MS * 5);
 
   // --- the health block is static for a process, but a bridge restart
   // --- during a long session should be visible without a page reload

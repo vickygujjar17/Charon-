@@ -6,17 +6,19 @@ running on this machine, and which build?". That helps a confused user
 far more than a generic "no snapshot" error.
 
 **Read-only by construction.** Only ``initialize``, ``terminal_info``,
-``account_info``, ``symbol_info``, ``symbols_get`` and ``positions_get`` are
-ever called. There is no call to ``order_send``, ``order_check`` or any
-position-modifying function, and the test-suite asserts that this module's
-source contains no such name. Charon's single ``OrderSend`` site stays
-``CharonTrade.mqh``.
+``account_info``, ``symbol_info``, ``symbols_get``, ``positions_get``,
+``history_deals_get`` and ``copy_rates_from_pos`` are ever called. There is no
+call to ``order_send``, ``order_check`` or any position-modifying function, and
+the test-suite asserts that this module's source contains no such name.
+Charon's single ``OrderSend`` site stays ``CharonTrade.mqh``.
 
 ``symbols_get`` and ``positions_get`` are here for a read-only question the
 snapshot cannot answer: *which instruments exist, and which positions are
-open that no Charon chart is managing?* They are list calls, not actions --
-neither can change an account, and the forbidden-name list below is what
-keeps a reviewer from mistaking their purpose.
+open that no Charon chart is managing?* ``history_deals_get`` and
+``copy_rates_from_pos`` answer the other two the snapshot cannot: *what has
+actually been closed, and what did price do around it?* All four are list
+calls, not actions -- none can change an account, and the forbidden-name
+list below is what keeps a reviewer from mistaking their purpose.
 
 If the package is not installed -- or not on a platform that has it --
 everything degrades to ``available = False`` and the dashboard simply
@@ -247,13 +249,199 @@ def positions() -> list[Position]:
         return []
 
 
+@dataclass(frozen=True)
+class Deal:
+    """One historical deal, flattened to the fields analytics needs.
+
+    MT5 reports a closed position as two deals -- an ``IN`` leg and an ``OUT``
+    leg -- so this is deliberately a *deal*, not a trade. Folding pairs
+    together is arithmetic, and it lives in :mod:`charon_bridge.history`
+    where it can be tested without a terminal.
+    """
+
+    ticket: int
+    position_id: int
+    symbol: str
+    side: str
+    entry: int
+    volume: float
+    price: float
+    profit: float
+    swap: float
+    commission: float
+    time: int
+    magic: int = 0
+    comment: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "ticket": self.ticket,
+            "position_id": self.position_id,
+            "symbol": self.symbol,
+            "side": self.side,
+            "entry": self.entry,
+            "volume": self.volume,
+            "price": self.price,
+            "profit": self.profit,
+            "swap": self.swap,
+            "commission": self.commission,
+            "time": self.time,
+            "magic": self.magic,
+            "comment": self.comment,
+        }
+
+
+@dataclass(frozen=True)
+class Rate:
+    """One OHLC bar, flattened for JSON."""
+
+    time: int
+    open: float
+    high: float
+    low: float
+    close: float
+    tick_volume: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "time": self.time,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "tick_volume": self.tick_volume,
+        }
+
+
+# --- MT5 reports deal direction as an integer, same as positions.
+_DEAL_TYPES = {0: "BUY", 1: "SELL"}
+
+
+def deals(days: int = 30, symbol: str = "") -> list[Deal]:
+    """Closed deals from the last ``days`` of account history, best effort.
+
+    ``history_deals_get`` is a **read**: it cannot open, close or modify
+    anything, which is why it belongs in this module's allow-list. An empty
+    list means "no history, or the terminal could not be read" and is never
+    presented as "you have made no trades" -- :func:`available` is the
+    companion check, exactly as for :func:`positions`.
+
+    ``date_from``/``date_to`` bound the query so a long-running account does
+    not make every dashboard poll walk years of deals.
+    """
+    if _mt5 is None:
+        return []
+
+    try:  # pragma: no cover - requires a live terminal
+        import datetime as _dt
+
+        until = _dt.datetime.now() + _dt.timedelta(minutes=1)
+        since = until - _dt.timedelta(days=max(1, int(days)))
+        with _TERMINAL_LOCK:
+            if not _mt5.initialize():
+                return []
+            try:
+                found: list[Deal] = []
+                for entry in _rows(_mt5.history_deals_get(since, until)):
+                    row_symbol = str(getattr(entry, "symbol", "") or "")
+                    # --- balance operations (deposits, credit, bonuses)
+                    # --- carry no symbol and are not trades; including them
+                    # --- would make a deposit look like trading profit
+                    if not row_symbol:
+                        continue
+                    if symbol and row_symbol != symbol:
+                        continue
+                    found.append(
+                        Deal(
+                            ticket=int(getattr(entry, "ticket", 0) or 0),
+                            position_id=int(getattr(entry, "position_id", 0) or 0),
+                            symbol=row_symbol,
+                            side=_DEAL_TYPES.get(
+                                int(getattr(entry, "type", -1) or -1), "?"
+                            ),
+                            entry=int(getattr(entry, "entry", -1) or -1),
+                            volume=float(getattr(entry, "volume", 0.0) or 0.0),
+                            price=float(getattr(entry, "price", 0.0) or 0.0),
+                            profit=float(getattr(entry, "profit", 0.0) or 0.0),
+                            swap=float(getattr(entry, "swap", 0.0) or 0.0),
+                            commission=float(
+                                getattr(entry, "commission", 0.0) or 0.0
+                            ),
+                            time=int(getattr(entry, "time", 0) or 0),
+                            magic=int(getattr(entry, "magic", 0) or 0),
+                            comment=str(getattr(entry, "comment", "") or ""),
+                        )
+                    )
+                return found
+            finally:
+                _mt5.shutdown()
+    except Exception:  # noqa: BLE001 - optional panel; never break the page
+        return []
+
+
+# --- Timeframe names the API accepts, mapped to MT5's integer constants.
+# --- Kept as literal values so this module needs no import-time lookup.
+TIMEFRAMES: dict[str, int] = {
+    "M1": 1,
+    "M5": 5,
+    "M15": 15,
+    "M30": 30,
+    "H1": 16385,
+    "H4": 16388,
+    "D1": 16408,
+}
+
+
+def rates(symbol: str, timeframe: str = "M15", count: int = 120) -> list[Rate]:
+    """The most recent ``count`` bars for ``symbol``, oldest first.
+
+    ``copy_rates_from_pos`` is a read. Returns ``[]`` on any failure, so a
+    sparkline that cannot be drawn renders as "no bars available" rather
+    than as a flat line pretending the price did not move.
+    """
+    if _mt5 is None or not symbol:
+        return []
+
+    constant = TIMEFRAMES.get((timeframe or "").upper())
+    if constant is None:
+        return []
+
+    try:  # pragma: no cover - requires a live terminal
+        with _TERMINAL_LOCK:
+            if not _mt5.initialize():
+                return []
+            try:
+                bars = _mt5.copy_rates_from_pos(
+                    symbol, constant, 0, max(1, int(count))
+                )
+                return [
+                    Rate(
+                        time=int(getattr(bar, "time", 0) or 0),
+                        open=float(getattr(bar, "open", 0.0) or 0.0),
+                        high=float(getattr(bar, "high", 0.0) or 0.0),
+                        low=float(getattr(bar, "low", 0.0) or 0.0),
+                        close=float(getattr(bar, "close", 0.0) or 0.0),
+                        tick_volume=int(getattr(bar, "tick_volume", 0) or 0),
+                    )
+                    for bar in _rows(bars)
+                ]
+            finally:
+                _mt5.shutdown()
+    except Exception:  # noqa: BLE001 - optional panel; never break the page
+        return []
+
+
 __all__ = [
     "FORBIDDEN_CALLS",
+    "Deal",
     "Position",
+    "Rate",
     "TerminalView",
     "available",
+    "deals",
     "describe",
     "positions",
+    "rates",
     "symbols",
 ]
 

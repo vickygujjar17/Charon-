@@ -118,8 +118,37 @@ def test_live_server_serves_the_vendored_stylesheet(live_server: str) -> None:
         css = response.read().decode()
     assert response.status == 200
     assert len(css) > 2000
-    # --- proof it is our build, not a framework default
-    assert "bg-ink-950" in css
+    # --- proof it is our build, not a framework default. v1.6.0 moved the
+    # --- palette to the Apex token names, so the marker has to be a token our
+    # --- own config defines. `--tw-` prefixed variables are framework output
+    # --- and would pass on a default build; `bg-surface` cannot.
+    assert "bg-surface" in css
+    # --- and the vendored faces must be reachable offline, since the whole
+    # --- point of shipping woff2 into static/fonts is that no request leaves
+    # --- the machine
+    assert "@font-face" in css
+    assert "/static/fonts/" in css
+
+
+def test_live_server_serves_the_vendored_fonts(live_server: str) -> None:
+    """A woff2 in the repo is not a font the browser can use.
+
+    The stylesheet points at /static/fonts/*.woff2, so those files must be
+    reachable through the same static mount. A 404 here renders the panel in
+    a fallback face with no error anywhere -- the typography simply looks
+    wrong, which is the hardest kind of defect to notice.
+    """
+    import urllib.request
+
+    for name in ("inter-400.woff2", "inter-600.woff2", "jetbrains-mono-400.woff2"):
+        with urllib.request.urlopen(
+            f"{live_server}/static/fonts/{name}", timeout=10
+        ) as response:
+            payload = response.read()
+        assert response.status == 200
+        # --- wOF2 is the woff2 magic number; a text/html error page would not
+        # --- start with it
+        assert payload[:4] == b"wOF2", f"{name} is not a woff2 payload"
 
 
 def test_live_server_serves_the_client_script(live_server: str) -> None:

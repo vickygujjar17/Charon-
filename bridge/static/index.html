@@ -11,50 +11,68 @@
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
 <link rel="stylesheet" href="/static/tailwind.css" />
 </head>
-<body class="min-h-screen bg-ink-950 font-mono text-shade-200 antialiased">
+<body class="min-h-screen bg-surface font-mono text-body-md text-secondary antialiased">
 
 <!-- ================= STALE / OFFLINE BANNER ================= -->
 <!-- Deliberately the first thing in the body: a banner you have to scroll
      to find is a banner that will not stop anyone. -->
 <div id="banner" class="hidden sticky top-0 z-50 border-b px-4 py-2 text-center text-sm font-semibold"></div>
 
-<main class="mx-auto max-w-7xl px-4 py-4">
-
-  <!-- ================= COMMAND BAR ================= -->
-  <header class="mb-4 flex flex-wrap items-center justify-between gap-x-6 gap-y-3
-                 border-b border-ink-700 pb-3">
+<!-- ================= HEADER (56px) ================= -->
+<!-- Apex chrome: one fixed-height strip carrying identity, navigation and
+     transport telemetry. The telemetry is *about the link*, not about the
+     market -- if it is green, the numbers below can be trusted. -->
+<header class="sticky top-0 z-40 h-header border-b border-borderline bg-surface-low">
+  <div class="flex h-full items-center gap-4 px-4">
 
     <!-- The mark is inline and context-free: every stroke uses currentColor,
-         so the logo takes the accent colour from the <a> and needs no second
+         so the logo takes the brand colour from the <a> and needs no second
          asset to draw. -->
-    <div class="flex items-center gap-3">
-      <a href="/" class="flex items-center gap-3 text-accent" aria-label="Charon dashboard">
-        <svg viewBox="0 0 40 40" width="34" height="34" aria-hidden="true"
-             class="shrink-0 drop-shadow-[0_0_10px_rgba(56,189,248,0.35)]">
-          <!-- the obol -->
-          <circle cx="20" cy="20" r="12.5" fill="none" stroke="currentColor"
-                  stroke-width="1.75" stroke-opacity="0.9" />
-          <circle cx="20" cy="20" r="16" fill="none" stroke="currentColor"
-                  stroke-width="0.75" stroke-opacity="0.25" />
-          <!-- the ferryman's pole, crossing at full diagonal -->
-          <path d="M6 34 L34 6" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" />
-          <!-- the fare struck in the middle -->
-          <circle cx="20" cy="20" r="2.75" fill="currentColor" />
-        </svg>
-        <span class="leading-none">
-          <span class="block font-display text-[22px] font-semibold uppercase
-                       tracking-[0.26em] text-shade-100">Charon</span>
-          <span class="mt-1 block text-[9px] font-semibold uppercase
-                       tracking-[0.3em] text-shade-400">execution console</span>
-        </span>
-      </a>
+    <a href="/" class="flex shrink-0 items-center gap-2.5 text-brand" aria-label="Charon dashboard">
+      <svg viewBox="0 0 40 40" width="26" height="26" aria-hidden="true"
+           class="shrink-0">
+        <!-- the obol -->
+        <circle cx="20" cy="20" r="12.5" fill="none" stroke="currentColor"
+                stroke-width="1.75" stroke-opacity="0.9" />
+        <circle cx="20" cy="20" r="16" fill="none" stroke="currentColor"
+                stroke-width="0.75" stroke-opacity="0.25" />
+        <!-- the ferryman's pole, crossing at full diagonal -->
+        <path d="M6 34 L34 6" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" />
+        <!-- the fare struck in the middle -->
+        <circle cx="20" cy="20" r="2.75" fill="currentColor" />
+      </svg>
+      <span class="leading-none">
+        <span class="block font-display text-[15px] font-semibold uppercase
+                     tracking-[0.22em] text-primary">Charon</span>
+        <span class="mt-0.5 block font-display text-[8px] font-semibold uppercase
+                     tracking-[0.24em] text-tertiary">execution console</span>
+      </span>
+    </a>
 
-      <div class="ml-1 flex flex-col gap-1 border-l border-ink-700 pl-3">
+    <!-- Hard boundary: this is an attended, EA-derived console, not an
+         autonomous bot. The badge states that in the chrome so it cannot be
+         forgotten while reading a profit figure. -->
+    <span class="hidden shrink-0 rounded-sm border border-alt/40 bg-alt/10
+                 px-1.5 py-0.5 font-mono text-num-sm font-semibold uppercase
+                 tracking-[0.08em] text-alt sm:inline-block">quant</span>
+
+    <!-- Navigation is presentational: the page is one scroll, and the tabs
+         are anchors to its panels. Nothing here issues a request. -->
+    <nav class="ml-2 hidden h-full items-center md:flex" aria-label="Sections">
+      <a class="tab is-active" href="#overview">Overview</a>
+      <a class="tab" href="#positions">Positions</a>
+      <a class="tab" href="#ticket">Ticket</a>
+      <a class="tab" href="#history">History</a>
+      <a class="tab" href="#journal">Journal</a>
+    </nav>
+
+    <div class="ml-auto flex min-w-0 items-center gap-3">
+      <div class="hidden flex-col items-end gap-0.5 xl:flex">
         <div class="flex items-baseline gap-2">
-          <span id="symbolLabel" class="readout text-sm font-semibold tracking-wider text-shade-100">—</span>
-          <span id="eaVersion" class="text-[10px] text-shade-400"></span>
+          <span id="symbolLabel" class="readout text-body-lg font-semibold tracking-wider">—</span>
+          <span id="eaVersion" class="font-mono text-num-sm text-tertiary"></span>
         </div>
-        <p id="tagline" class="text-[10px] text-shade-400">
+        <p id="tagline" class="font-mono text-num-sm text-tertiary">
           Attended execution. The EA derives every stop, size and R multiple.
         </p>
       </div>
@@ -62,81 +80,169 @@
       <!-- Symbol chooser. Shown only once there is more than one symbol to
            choose between: a one-option dropdown is pure noise. The value is
            always the exact broker name, never the display label. -->
-      <div id="symbolPicker" class="hidden items-baseline gap-2">
+      <div id="symbolPicker" class="hidden items-center gap-1.5">
         <label for="symbolSelect" class="label">Chart</label>
-        <select id="symbolSelect" class="ticket-field"></select>
+        <select id="symbolSelect" class="ticket-field w-32"></select>
+      </div>
+
+      <!-- Transport receipts in one row, so they read as a single gauge. -->
+      <div class="flex items-center gap-2.5 border-l border-borderline pl-3">
+        <span id="statusPill" class="pill bg-surface-high text-secondary">connecting</span>
+        <span id="ageLabel" class="font-mono text-num-sm text-tertiary"></span>
+        <!-- Round trip for the poll. Hidden until the first answer arrives. -->
+        <span id="latencyLabel" class="font-mono text-num-sm text-tertiary"></span>
+        <!-- When the bridge last delivered a valid snapshot. -->
+        <span id="lastGoodLabel" class="hidden font-mono text-num-sm text-tertiary 2xl:inline"></span>
       </div>
     </div>
+  </div>
+</header>
 
-    <!-- Status cluster: receipts about the transport, not about the market. -->
-    <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-      <span id="statusPill" class="pill bg-ink-700 text-shade-300">connecting</span>
-      <span id="ageLabel" class="text-[11px] text-shade-400"></span>
-      <!-- Round trip for the poll. Hidden until the first answer arrives. -->
-      <span id="latencyLabel" class="text-[11px] text-shade-400"></span>
-      <!-- When the bridge last delivered a valid snapshot. -->
-      <span id="lastGoodLabel" class="text-[11px] text-shade-400"></span>
-    </div>
-  </header>
+<!-- ================= TICKER STRIP (32px) ================= -->
+<!-- Six hairline-divided cells: the density a desk expects from a quote bar.
+     It deliberately repeats a few KPI values, because the strip stays
+     visible while the page scrolls and the KPI grid does not. -->
+<div class="flex h-ticker items-stretch overflow-hidden border-b border-borderline
+            bg-surface-lowest" aria-label="Market summary">
+  <div class="flex min-w-0 flex-1 items-center gap-2 px-3">
+    <span class="label shrink-0">Instrument</span>
+    <span id="tickSymbol" class="readout truncate text-num-md font-semibold">—</span>
+  </div>
+  <div class="flex min-w-0 flex-1 items-center gap-2 border-l border-borderline px-3">
+    <span class="label shrink-0">Basket</span>
+    <span id="tickBasket" class="readout truncate text-num-md">—</span>
+  </div>
+  <div class="flex min-w-0 flex-1 items-center gap-2 border-l border-borderline px-3">
+    <span class="label shrink-0">Open P/L</span>
+    <span id="tickPl" class="readout truncate text-num-md font-semibold">—</span>
+  </div>
+  <div class="flex min-w-0 flex-1 items-center gap-2 border-l border-borderline px-3">
+    <span class="label shrink-0">Equity</span>
+    <span id="tickEquity" class="readout truncate text-num-md">—</span>
+  </div>
+  <div class="flex min-w-0 flex-1 items-center gap-2 border-l border-borderline px-3">
+    <span class="label shrink-0">Risk</span>
+    <span id="tickRisk" class="readout truncate text-num-md">—</span>
+  </div>
+  <div class="hidden min-w-0 flex-1 items-center gap-2 border-l border-borderline px-3 sm:flex">
+    <span class="label shrink-0">Session</span>
+    <span id="tickSession" class="readout truncate text-num-md">—</span>
+  </div>
+</div>
 
-  <!-- ================= ACCOUNT READOUT STRIP ================= -->
-  <!-- Four figures in one hairline-divided row: a strip reads as a single
-       instrument panel, four separate cards read as four web widgets. -->
-  <section class="panel mb-4 grid grid-cols-2 divide-ink-700 sm:grid-cols-4
-                  sm:divide-x" aria-label="Account">
-    <div class="px-4 py-3">
-      <div class="label">Equity</div>
-      <div id="equity" class="readout mt-1 text-lg font-semibold">—</div>
+<div class="flex items-stretch">
+
+  <!-- ================= ICON RAIL (64px) ================= -->
+  <!-- Navigational anchors only: each scrolls to a panel already on the page
+       and no request originates here. -->
+  <aside class="rail sticky top-[88px] hidden h-[calc(100vh-88px)] w-rail shrink-0 lg:flex"
+         aria-label="Quick navigation">
+    <a class="rail-item is-active" href="#overview" title="Overview" aria-label="Overview">
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor"
+           stroke-width="1.5" aria-hidden="true">
+        <rect x="2.75" y="2.75" width="6" height="6" rx="1" />
+        <rect x="11.25" y="2.75" width="6" height="6" rx="1" />
+        <rect x="2.75" y="11.25" width="6" height="6" rx="1" />
+        <rect x="11.25" y="11.25" width="6" height="6" rx="1" />
+      </svg>
+    </a>
+    <a class="rail-item" href="#positions" title="Positions" aria-label="Positions">
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor"
+           stroke-width="1.5" aria-hidden="true">
+        <path d="M3 13.5 7 8l3.5 3.5L17 4" stroke-linecap="round" stroke-linejoin="round" />
+        <path d="M3 17h14" stroke-linecap="round" />
+      </svg>
+    </a>
+    <a class="rail-item" href="#ticket" title="Order ticket" aria-label="Order ticket">
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor"
+           stroke-width="1.5" aria-hidden="true">
+        <rect x="3" y="3" width="14" height="14" rx="1.5" />
+        <path d="M6.5 7.5h7M6.5 10h7M6.5 12.5h4" stroke-linecap="round" />
+      </svg>
+    </a>
+    <a class="rail-item" href="#history" title="Closed trades" aria-label="Closed trades">
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor"
+           stroke-width="1.5" aria-hidden="true">
+        <circle cx="10" cy="10" r="6.5" />
+        <path d="M10 6.5V10l2.5 1.5" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    </a>
+    <a class="rail-item" href="#journal" title="Journal" aria-label="Journal">
+      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor"
+           stroke-width="1.5" aria-hidden="true">
+        <path d="M4.5 3h9l3 3v11h-12z" stroke-linejoin="round" />
+        <path d="M7 8h6M7 11h6M7 14h3.5" stroke-linecap="round" />
+      </svg>
+    </a>
+  </aside>
+
+  <!-- ================= MAIN COLUMN ================= -->
+  <main class="mx-auto min-w-0 max-w-[1600px] flex-1 px-3 py-3">
+
+  <!-- ================= KPI GRID (5 cells) ================= -->
+  <!-- Hairline-divided cells in one panel: a strip reads as a single
+       instrument panel, five separate cards read as five web widgets. -->
+  <section id="overview" class="panel grid grid-cols-2 divide-borderline sm:grid-cols-3
+                  lg:grid-cols-5 lg:divide-x" aria-label="Account">
+    <div class="kpi">
+      <div class="kpi-label">Equity</div>
+      <div id="equity" class="kpi-value">—</div>
+      <div id="equityFoot" class="kpi-foot">—</div>
     </div>
-    <div class="border-t border-ink-700 px-4 py-3 sm:border-t-0">
-      <div class="label">Balance</div>
-      <div id="balance" class="readout mt-1 text-lg font-semibold">—</div>
+    <div class="kpi border-t border-borderline sm:border-t-0 sm:border-l">
+      <div class="kpi-label">Balance</div>
+      <div id="balance" class="kpi-value">—</div>
+      <div id="balanceFoot" class="kpi-foot">account</div>
     </div>
-    <div class="border-t border-ink-700 px-4 py-3 sm:border-t-0">
-      <div class="label">Open P/L</div>
-      <div id="openPl" class="readout mt-1 text-lg font-semibold">—</div>
+    <div class="kpi border-t border-borderline lg:border-t-0 lg:border-l">
+      <div class="kpi-label">Open P/L</div>
+      <div id="openPl" class="kpi-value">—</div>
+      <div id="openPlFoot" class="kpi-foot">floating</div>
     </div>
-    <div class="border-t border-ink-700 px-4 py-3 sm:border-t-0">
-      <div class="flex items-baseline justify-between gap-2">
-        <div class="label">Basket risk</div>
-        <div id="riskMoney" class="readout text-[10px] text-shade-400"></div>
-      </div>
-      <div id="riskPct" class="readout mt-1 text-lg font-semibold">—</div>
+    <div class="kpi border-t border-borderline sm:border-l">
+      <div class="kpi-label">Basket risk</div>
+      <div id="riskPct" class="kpi-value">—</div>
+      <div id="riskMoney" class="kpi-foot"></div>
+    </div>
+    <div class="kpi border-t border-borderline sm:border-l lg:border-t-0">
+      <div class="kpi-label">Closed P/L</div>
+      <div id="closedPl" class="kpi-value">—</div>
+      <div id="closedFoot" class="kpi-foot">no history</div>
     </div>
   </section>
 
-  <div class="grid gap-4 lg:grid-cols-3">
+  <div class="mt-3 grid gap-3 xl:grid-cols-3">
 
     <!-- ================= BASKET + LADDER ================= -->
-    <section class="panel lg:col-span-2">
-      <div class="flex items-center justify-between border-b border-ink-700 px-4 py-2.5">
+    <section class="panel xl:col-span-2" id="positions">
+      <div class="panel-head">
         <h2 class="mark">Basket</h2>
-        <span id="basketDir" class="pill bg-ink-700 text-shade-300">—</span>
+        <span id="basketDir" class="pill bg-surface-high text-secondary">—</span>
       </div>
 
-      <div class="grid grid-cols-3 divide-x divide-ink-700 border-b border-ink-700">
-        <div class="px-4 py-3">
+      <div class="grid grid-cols-3 divide-x divide-borderline border-b border-borderline">
+        <div class="px-3 py-2">
           <div class="label">Legs</div>
-          <div id="basketLegs" class="value mt-1">—</div>
+          <div id="basketLegs" class="value mt-0.5">—</div>
         </div>
-        <div class="px-4 py-3">
+        <div class="px-3 py-2">
           <div class="label">Avg entry</div>
-          <div id="basketAvg" class="value mt-1">—</div>
+          <div id="basketAvg" class="value mt-0.5">—</div>
         </div>
-        <div class="px-4 py-3">
+        <div class="px-3 py-2">
           <div class="label">Volume</div>
-          <div id="basketLot" class="value mt-1">—</div>
+          <div id="basketLot" class="value mt-0.5">—</div>
         </div>
       </div>
 
-      <div class="px-4 py-3">
-        <div class="mb-2 flex items-center justify-between">
+      <div class="px-3 py-2">
+        <div class="mb-1.5 flex items-center justify-between">
           <h3 class="mark">RR ladder</h3>
           <!-- Provenance matters: these rungs are the EA's own numbers. -->
-          <span class="text-[10px] text-shade-400">from the EA, unmodified</span>
+          <span class="font-mono text-num-sm text-tertiary">from the EA, unmodified</span>
         </div>
-        <div id="ladder" class="space-y-1.5">
-          <div class="text-xs text-shade-400">No basket yet.</div>
+        <div id="ladder" class="space-y-1">
+          <div class="font-mono text-body-md text-tertiary">No basket yet.</div>
         </div>
       </div>
     </section>
@@ -147,19 +253,20 @@
          field below is an INPUT to the EA's risk model: the EA derives the
          stop from the block, solves the volume and renders the rungs. The
          panel shows the EA's answer and never computes one of its own. -->
-    <section class="panel mt-4">
-      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2.5">
+    <section class="panel mt-3" id="ticket">
+      <div class="panel-head">
         <div class="flex items-center gap-2">
           <h2 class="mark">New order</h2>
-          <span class="rounded border border-violet/40 bg-violet/10 px-1.5 py-0.5
-                       text-[9px] font-semibold uppercase tracking-[0.14em] text-violet">
+          <span class="rounded-sm border border-alt/40 bg-alt/10 px-1.5 py-0.5
+                       font-mono text-num-sm font-semibold uppercase
+                       tracking-[0.06em] text-alt">
             intent only
           </span>
         </div>
-        <span id="orderStatus" class="pill bg-ink-700 text-shade-300">idle</span>
+        <span id="orderStatus" class="pill bg-surface-high text-secondary">idle</span>
       </div>
 
-      <div class="grid gap-3 px-4 py-3 md:grid-cols-4">
+      <div class="grid gap-2.5 px-3 py-2.5 md:grid-cols-4">
         <label class="block md:col-span-2">
           <span class="label">Symbol</span>
           <!-- The picker offers the known names, grouped by asset class, but
@@ -173,7 +280,7 @@
           <input id="orderSymbolFilter" placeholder="filter by name or class"
                  class="ticket-field mt-1 text-[11px]" autocomplete="off"
                  spellcheck="false" />
-          <span id="orderSymbolHint" class="mt-1 block text-[10px] text-shade-400"></span>
+          <span id="orderSymbolHint" class="mt-1 block font-mono text-num-sm text-tertiary"></span>
         </label>
 
         <label class="block">
@@ -182,7 +289,7 @@
             <option value="BUY">BUY</option>
             <option value="SELL">SELL</option>
           </select>
-          <span id="orderSideHint" class="mt-1 block text-[10px] text-shade-400">long</span>
+          <span id="orderSideHint" class="mt-1 block font-mono text-num-sm text-tertiary">long</span>
         </label>
 
         <label class="block">
@@ -198,7 +305,7 @@
           <input id="orderEntry" type="number" step="0.00001"
                  placeholder="optional: wait for this price"
                  class="ticket-field mt-1" />
-          <span class="mt-1 block text-[10px] text-shade-400">
+          <span class="mt-1 block font-mono text-num-sm text-tertiary">
             MARKET + a price arms a watch; blank fills now.
           </span>
         </label>
@@ -256,7 +363,7 @@
           <span class="label">Basket risk ceiling %</span>
           <input id="orderBasketCeiling" type="number" step="0.01" min="0"
                  placeholder="chart input" class="ticket-field mt-1" />
-          <span id="orderBasketCeilingHint" class="mt-1 block text-[10px] text-shade-400"></span>
+          <span id="orderBasketCeilingHint" class="mt-1 block font-mono text-num-sm text-tertiary"></span>
         </label>
 
         <label class="block">
@@ -273,98 +380,98 @@
       <!-- Pyramid stages. Each row is a plan, not an order: the EA fires a
            stage only when its own gates allow, and the basket-risk ceiling
            above is applied before any of them. -->
-      <div class="mx-4 mb-3 rounded-md border border-ink-700 bg-ink-900">
-        <div class="flex items-center justify-between border-b border-ink-700 px-3 py-1.5">
-          <span class="mark text-violet">Pyramid stages</span>
-          <span id="stageHint" class="text-[10px] text-shade-400">
+      <div class="mx-3 mb-2.5 rounded-sm border border-borderline bg-surface-lowest">
+        <div class="flex items-center justify-between border-b border-borderline px-2 py-1.5">
+          <span class="mark text-alt">Pyramid stages</span>
+          <span id="stageHint" class="font-mono text-num-sm text-tertiary">
             optional &mdash; each stage multiplies the primary leg's solved size
           </span>
         </div>
-        <div id="stageRows" class="grid gap-2 px-3 py-2.5 md:grid-cols-3"></div>
+        <div id="stageRows" class="grid gap-2 px-2 py-2 md:grid-cols-3"></div>
       </div>
 
-      <label class="mx-4 mb-3 block">
+      <label class="mx-3 mb-2.5 block">
         <span class="label">Journal note</span>
         <textarea id="orderJournal" rows="2" class="ticket-field mt-1"
                   placeholder="why this trade? the bridge keeps this; the chart only gets a short tag"></textarea>
-        <span id="journalHint" class="mt-1 block text-[10px] text-shade-400"></span>
+        <span id="journalHint" class="mt-1 block font-mono text-num-sm text-tertiary"></span>
       </label>
 
       <!-- The EA's answer, in the EA's own numbers. Labelled as such so
            nobody mistakes this block for editable inputs. -->
-      <div class="mx-4 mb-3 rounded-md border border-ink-700 bg-ink-900">
-        <div class="border-b border-ink-700 px-3 py-1.5">
-          <span class="mark text-violet">EA verdict</span>
+      <div class="mx-3 mb-2.5 rounded-sm border border-borderline bg-surface-lowest">
+        <div class="border-b border-borderline px-2 py-1.5">
+          <span class="mark text-alt">EA verdict</span>
         </div>
-        <div class="grid grid-cols-2 gap-2 px-3 py-2.5 md:grid-cols-5">
+        <div class="grid grid-cols-2 gap-2 px-2 py-2 md:grid-cols-6">
           <div>
             <div class="label">Size</div>
-            <div id="orderLots" class="readout mt-0.5 text-sm font-semibold">—</div>
+            <div id="orderLots" class="readout mt-0.5 text-body-md font-semibold">—</div>
           </div>
           <div>
             <div class="label">Entry</div>
-            <div id="orderEntryPx" class="readout mt-0.5 text-sm font-semibold">—</div>
+            <div id="orderEntryPx" class="readout mt-0.5 text-body-md font-semibold">—</div>
           </div>
           <div>
             <div class="label">Stop</div>
-            <div id="orderStop" class="readout mt-0.5 text-sm font-semibold">—</div>
+            <div id="orderStop" class="readout mt-0.5 text-body-md font-semibold">—</div>
           </div>
           <div>
             <div class="label">Risk</div>
-            <div id="orderRiskMoney" class="readout mt-0.5 text-sm font-semibold">—</div>
+            <div id="orderRiskMoney" class="readout mt-0.5 text-body-md font-semibold">—</div>
           </div>
           <div>
             <div class="label">Ticket</div>
-            <div id="orderTicket" class="readout mt-0.5 text-sm font-semibold">—</div>
+            <div id="orderTicket" class="readout mt-0.5 text-body-md font-semibold">—</div>
           </div>
           <div>
             <div class="label">Journal tag</div>
-            <div id="orderJournalTag" class="readout mt-0.5 text-sm font-semibold">—</div>
+            <div id="orderJournalTag" class="readout mt-0.5 text-body-md font-semibold">—</div>
           </div>
         </div>
       </div>
 
-      <div class="mx-4 text-[11px] text-shade-400" id="orderVerdict">
+      <div class="mx-3 font-mono text-body-sm text-tertiary" id="orderVerdict">
         Nothing submitted yet.
       </div>
 
-      <div class="flex flex-wrap gap-2 px-4 py-3">
+      <div class="flex flex-wrap gap-2 px-3 py-2.5">
         <button id="orderPlaceBtn" class="btn-primary">Place order</button>
         <button id="orderModifyBtn" class="btn-ghost">Re-derive stop</button>
         <button id="orderCancelBtn" class="btn-danger">Cancel ticket</button>
       </div>
-      <div class="px-4 pb-3 text-[11px] text-shade-400" id="orderMsg"></div>
+      <div class="px-3 pb-2.5 font-mono text-body-sm text-tertiary" id="orderMsg"></div>
     </section>
 
     <!-- ================= PENDING ORDERS =================
          A pending order is not a position: it has no row in the legs table
          until it fills, so without this panel a LIMIT ticket could only be
          cancelled by remembering its number. -->
-    <section class="panel mt-4" id="pendingPanel">
-      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2.5">
+    <section class="panel mt-3" id="pendingPanel">
+      <div class="panel-head">
         <div class="flex items-center gap-2">
           <h2 class="mark">Pending orders</h2>
-          <span id="pendingBadge" class="pill bg-ink-700 text-shade-300">0</span>
+          <span id="pendingBadge" class="pill bg-surface-high text-secondary">0</span>
         </div>
-        <span id="pendingSummary" class="text-[11px] text-shade-400"></span>
+        <span id="pendingSummary" class="font-mono text-num-sm text-tertiary"></span>
       </div>
       <div class="hidden overflow-x-auto" id="pendingTableWrap">
-        <table class="w-full text-left text-xs">
-          <thead class="text-[10px] uppercase tracking-[0.12em] text-shade-400">
-            <tr class="border-b border-ink-700">
-              <th class="py-2 pl-4 pr-3 font-medium">Ticket</th>
-              <th class="py-2 pr-3 font-medium">Side</th>
-              <th class="py-2 pr-3 font-medium">Type</th>
-              <th class="py-2 pr-3 font-medium">Price</th>
-              <th class="py-2 pr-3 font-medium">Stop</th>
-              <th class="py-2 pr-3 font-medium">Volume</th>
-              <th class="py-2 pr-4 font-medium">Actions</th>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>Side</th>
+              <th>Type</th>
+              <th>Price</th>
+              <th>Stop</th>
+              <th>Volume</th>
+              <th>Actions</th>
             </tr>
           </thead>
-          <tbody id="pendingRows" class="font-mono tabular-nums text-shade-200"></tbody>
+          <tbody id="pendingRows"></tbody>
         </table>
       </div>
-      <div id="noPending" class="border-t border-ink-700 px-4 py-3 text-xs text-shade-400">
+      <div id="noPending" class="px-3 py-2 font-mono text-body-md text-tertiary">
         No working orders. A LIMIT ticket appears here until it fills or is cancelled.
       </div>
     </section>
@@ -374,30 +481,30 @@
          EA decides the price was touched, so it has no ticket and cannot be
          cancelled through the order path. Its own panel keeps that distinction
          visible instead of blending two queues with different cancel paths. -->
-    <section class="panel mt-4" id="watchPanel">
-      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2.5">
+    <section class="panel mt-3" id="watchPanel">
+      <div class="panel-head">
         <div class="flex items-center gap-2">
           <h2 class="mark">Armed watches</h2>
-          <span id="watchBadge" class="pill bg-ink-700 text-shade-300">0</span>
+          <span id="watchBadge" class="pill bg-surface-high text-secondary">0</span>
         </div>
-        <span id="watchSummary" class="text-[11px] text-shade-400"></span>
+        <span id="watchSummary" class="font-mono text-num-sm text-tertiary"></span>
       </div>
       <div class="hidden overflow-x-auto" id="watchTableWrap">
-        <table class="w-full text-left text-xs">
-          <thead class="text-[10px] uppercase tracking-[0.14em] text-shade-400">
-            <tr class="border-b border-ink-700">
-              <th class="py-2 pl-4 pr-3">Watch</th>
-              <th class="py-2 pr-3">Side</th>
-              <th class="py-2 pr-3">Target</th>
-              <th class="py-2 pr-3">Distance</th>
-              <th class="py-2 pr-3">State</th>
-              <th class="py-2 pr-4">Actions</th>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Watch</th>
+              <th>Side</th>
+              <th>Target</th>
+              <th>Distance</th>
+              <th>State</th>
+              <th>Actions</th>
             </tr>
           </thead>
-          <tbody id="watchRows" class="font-mono tabular-nums text-shade-200"></tbody>
+          <tbody id="watchRows"></tbody>
         </table>
       </div>
-      <div id="noWatch" class="border-t border-ink-700 px-4 py-3 text-xs text-shade-400">
+      <div id="noWatch" class="px-3 py-2 font-mono text-body-md text-tertiary">
         No armed watches. A MARKET ticket that names an entry price waits here
         instead of filling immediately.
       </div>
@@ -415,27 +522,27 @@
            unknown     - some chart is stale/starting, so absence proves nothing
            unavailable - no charts, or the MT5 package is not installed
          Only "ok" with no rows may ever read as all clear. -->
-    <section id="unmanagedPanel" class="panel mt-4 hidden">
-      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2.5">
+    <section id="unmanagedPanel" class="panel mt-3 hidden">
+      <div class="panel-head">
         <div class="flex items-center gap-2">
           <h2 class="mark">Unmanaged positions</h2>
-          <span id="unmanagedBadge" class="pill bg-ink-700 text-shade-300">checking</span>
+          <span id="unmanagedBadge" class="pill bg-surface-high text-secondary">checking</span>
         </div>
-        <span id="unmanagedSummary" class="text-[11px] text-shade-400"></span>
+        <span id="unmanagedSummary" class="font-mono text-num-sm text-tertiary"></span>
       </div>
-      <div id="unmanagedBody" class="px-4 py-3 text-[11px] text-shade-400">
+      <div id="unmanagedBody" class="px-3 py-2 font-mono text-body-md text-tertiary">
         Nothing reported yet.
       </div>
-      <div class="hidden overflow-x-auto px-4 pb-3" id="unmanagedTableWrap">
-        <table class="w-full text-left text-[11px]">
-          <thead class="text-shade-400">
+      <div class="hidden overflow-x-auto px-3 pb-2" id="unmanagedTableWrap">
+        <table class="data-table">
+          <thead>
             <tr>
-              <th class="py-1 pr-3 font-semibold">Ticket</th>
-              <th class="py-1 pr-3 font-semibold">Symbol</th>
-              <th class="py-1 pr-3 font-semibold">Side</th>
-              <th class="py-1 pr-3 font-semibold">Lots</th>
-              <th class="py-1 pr-3 font-semibold">P/L</th>
-              <th class="py-1 pr-3 font-semibold">Why</th>
+              <th>Ticket</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Lots</th>
+              <th>P/L</th>
+              <th>Why</th>
             </tr>
           </thead>
           <tbody id="unmanagedRows"></tbody>
@@ -444,20 +551,20 @@
     </section>
 
     <!-- ================= ARM + TRAIL ================= -->
-    <section class="space-y-4">
+    <section class="space-y-3">
       <div class="panel">
-        <div class="flex items-center justify-between border-b border-ink-700 px-4 py-2.5">
+        <div class="panel-head">
           <h2 class="mark">Pyramid trigger</h2>
-          <span id="pyramidTrigger" class="text-[11px] font-semibold text-shade-400">—</span>
+          <span id="pyramidTrigger" class="font-mono text-num-sm font-semibold text-tertiary">—</span>
         </div>
 
-        <div class="px-4 py-3">
-          <div id="armPanel" class="mb-3 rounded-md border border-ink-700 bg-ink-900 p-3">
+        <div class="px-3 py-2">
+          <div id="armPanel" class="mb-2 rounded-sm border border-borderline bg-surface-lowest p-2">
             <div class="flex items-center justify-between">
-              <span id="armState" class="text-sm font-semibold text-shade-300">disarmed</span>
-              <span id="armCountdown" class="readout text-lg font-bold text-shade-300"></span>
+              <span id="armState" class="font-display text-headline-sm text-secondary">disarmed</span>
+              <span id="armCountdown" class="readout text-num-lg font-semibold text-secondary"></span>
             </div>
-            <div class="mt-1 text-[11px] text-shade-400" id="armHint">
+            <div class="mt-1 font-mono text-body-sm text-tertiary" id="armHint">
               Arming authorises one scale-in. Risk gates still apply.
             </div>
           </div>
@@ -466,15 +573,15 @@
             <button id="armBtn" class="btn-primary flex-1">Arm next tier</button>
             <button id="disarmBtn" class="btn-ghost">Disarm</button>
           </div>
-          <div class="mt-2 text-[11px] text-shade-400" id="armMsg"></div>
+          <div class="mt-1.5 font-mono text-body-sm text-tertiary" id="armMsg"></div>
         </div>
       </div>
 
       <div class="panel">
-        <div class="border-b border-ink-700 px-4 py-2.5">
+        <div class="panel-head">
           <h2 class="mark">Trailing mode</h2>
         </div>
-        <div class="px-4 py-3">
+        <div class="px-3 py-2">
           <select id="trailSelect" class="ticket-field">
             <option value="0">OFF</option>
             <option value="1">POINTS</option>
@@ -482,10 +589,10 @@
             <option value="3">HWM_PERCENT</option>
             <option value="4">RR_LOCK</option>
           </select>
-          <div class="mt-2 text-[11px] text-shade-400">
+          <div class="mt-1.5 font-mono text-body-sm text-tertiary">
             Changes how stops trail. Cannot open or size a position.
           </div>
-          <div class="mt-2 text-[11px] text-shade-400" id="trailMsg"></div>
+          <div class="mt-1.5 font-mono text-body-sm text-tertiary" id="trailMsg"></div>
         </div>
       </div>
     </section>
@@ -494,63 +601,245 @@
 
 
   <!-- ================= LEGS ================= -->
-  <section class="panel mt-4">
-    <div class="flex items-center justify-between border-b border-ink-700 px-4 py-2.5">
+  <section class="panel mt-3" id="legsPanel">
+    <div class="panel-head">
       <h2 class="mark">Legs</h2>
-      <span class="text-[10px] text-shade-400">stops and 1R are the EA's</span>
+      <span class="font-mono text-num-sm text-tertiary">stops and 1R are the EA's</span>
     </div>
     <div class="overflow-x-auto">
-      <table class="w-full text-left text-xs">
-        <thead class="text-[10px] uppercase tracking-[0.14em] text-shade-400">
-          <tr class="border-b border-ink-700">
-            <th class="py-2 pl-4 pr-3 font-semibold">Ticket</th>
-            <th class="py-2 pr-3 font-semibold">Side</th>
-            <th class="py-2 pr-3 font-semibold">Tier</th>
-            <th class="py-2 pr-3 font-semibold">Entry</th>
-            <th class="py-2 pr-3 font-semibold">Vol</th>
-            <th class="py-2 pr-3 font-semibold">Stop</th>
-            <th class="py-2 pr-3 font-semibold">1R</th>
-            <th class="py-2 pr-3 font-semibold">Progress</th>
-            <th class="py-2 pr-3 font-semibold">Flags</th>
-            <th class="py-2 pr-3 font-semibold">Ladder</th>
-            <th class="py-2 pr-4 font-semibold">Actions</th>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Ticket</th>
+            <th>Side</th>
+            <th>Tier</th>
+            <th>Entry</th>
+            <th>Vol</th>
+            <th>Stop</th>
+            <th>1R</th>
+            <th>Progress</th>
+            <th>Flags</th>
+            <th>Ladder</th>
+            <th>Actions</th>
           </tr>
         </thead>
-        <tbody id="legRows" class="font-mono tabular-nums text-shade-200"></tbody>
+        <tbody id="legRows"></tbody>
       </table>
     </div>
-    <div id="noLegs" class="border-t border-ink-700 px-4 py-3 text-xs text-shade-400">
+    <div id="noLegs" class="px-3 py-2 font-mono text-body-md text-tertiary">
       No managed positions. Open a trade in the terminal — Charon adopts it and arms the stop.
     </div>
   </section>
 
-  <!-- ================= LOG ================= -->
+  <!-- ================= CLOSED TRADES (history) =================
+       The snapshot describes OPEN risk only: nothing in it survives a
+       position closing. Win rate, profit factor and the equity curve are
+       facts about closed deals, so they come from GET /api/history and
+       nowhere else. A "not available" note here means the account could not
+       be read -- never that there were no losses. -->
+  <section class="panel mt-3" id="history">
+    <div class="panel-head">
+      <div class="flex items-center gap-2">
+        <h2 class="mark">Closed trades</h2>
+        <span id="historyBadge" class="pill bg-surface-high text-secondary">—</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <label for="historyDays" class="label">Window</label>
+        <select id="historyDays" class="ticket-field w-24">
+          <option value="7">7 days</option>
+          <option value="30" selected>30 days</option>
+          <option value="90">90 days</option>
+          <option value="365">1 year</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Five derived ratios. Each reads `—` when its denominator is zero,
+         which is a true statement ("cannot be computed") and not a claim
+         that the value is zero. -->
+    <div class="grid grid-cols-2 divide-borderline border-b border-borderline
+                sm:grid-cols-3 lg:grid-cols-5 lg:divide-x">
+      <div class="kpi">
+        <div class="kpi-label">Trades</div>
+        <div id="histTrades" class="kpi-value">—</div>
+        <div id="histTradesFoot" class="kpi-foot">closed</div>
+      </div>
+      <div class="kpi border-t border-borderline sm:border-t-0 sm:border-l">
+        <div class="kpi-label">Win rate</div>
+        <div id="histWinRate" class="kpi-value">—</div>
+        <div id="histWinRateFoot" class="kpi-foot">wins / trades</div>
+      </div>
+      <div class="kpi border-t border-borderline lg:border-t-0 lg:border-l">
+        <div class="kpi-label">Profit factor</div>
+        <div id="histProfitFactor" class="kpi-value">—</div>
+        <div id="histProfitFactorFoot" class="kpi-foot">gross win / loss</div>
+      </div>
+      <div class="kpi border-t border-borderline sm:border-l">
+        <div class="kpi-label">Expectancy</div>
+        <div id="histExpectancy" class="kpi-value">—</div>
+        <div id="histExpectancyFoot" class="kpi-foot">per trade</div>
+      </div>
+      <div class="kpi border-t border-borderline sm:border-l lg:border-t-0">
+        <div class="kpi-label">Avg R:R</div>
+        <div id="histAvgRr" class="kpi-value">—</div>
+        <div id="histAvgRrFoot" class="kpi-foot">realized</div>
+      </div>
+    </div>
+
+    <!-- Session breakdown. Sessions are cut on BROKER-SERVER time, so the
+         clock actually used is printed rather than implied. -->
+    <div class="grid border-b border-borderline lg:grid-cols-3 lg:divide-x lg:divide-borderline">
+      <div class="px-3 py-2">
+        <div class="mb-1 flex items-center justify-between">
+          <span class="label">By session</span>
+          <span id="histClock" class="font-mono text-num-sm text-tertiary">—</span>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Session</th>
+              <th>N</th>
+              <th>Win%</th>
+              <th class="text-right">Net</th>
+            </tr>
+          </thead>
+          <tbody id="sessionRows"></tbody>
+        </table>
+      </div>
+      <div class="border-t border-borderline px-3 py-2 lg:col-span-2 lg:border-t-0">
+        <div class="mb-1 flex items-center justify-between">
+          <span class="label">Equity curve</span>
+          <span id="histEquityFoot" class="font-mono text-num-sm text-tertiary">—</span>
+        </div>
+        <!-- Drawn from the server's cumulative series. It starts at zero
+             because it tracks the strategy's result, not the account
+             balance (which would drag in deposits and other EAs). -->
+        <svg id="equityCurve" viewBox="0 0 600 120" preserveAspectRatio="none"
+             class="h-28 w-full" role="img" aria-label="Cumulative realized P/L"></svg>
+      </div>
+    </div>
+
+    <div class="hidden overflow-x-auto" id="historyTableWrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Closed</th>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Lots</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>Session</th>
+            <th>Held</th>
+            <th class="text-right">Net</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody id="historyRows"></tbody>
+      </table>
+    </div>
+    <div id="historyEmpty" class="px-3 py-2 font-mono text-body-md text-tertiary">
+      No closed trades in this window.
+    </div>
+  </section>
+
+  <!-- ================= JOURNAL =================
+       Notes attached to tickets. A write here is a local sidecar file: it
+       never reaches the EA and cannot move money. The panel exists because a
+       number without the reason it was taken is not a trade record. -->
+  <section class="panel mt-3" id="journal">
+    <div class="panel-head">
+      <div class="flex items-center gap-2">
+        <h2 class="mark">Journal</h2>
+        <span id="journalBadge" class="pill bg-surface-high text-secondary">0</span>
+      </div>
+      <span id="journalFoot" class="font-mono text-num-sm text-tertiary">
+        kept beside the ticket; never sent to the chart
+      </span>
+    </div>
+
+    <div class="grid gap-2 border-b border-borderline px-3 py-2 md:grid-cols-6">
+      <label class="block md:col-span-1">
+        <span class="label">Ticket</span>
+        <input id="journalTicket" type="number" min="1" step="1"
+               placeholder="ticket" class="ticket-field mt-1" />
+      </label>
+      <label class="block md:col-span-3">
+        <span class="label">Note</span>
+        <input id="journalNote" placeholder="what did you see, and what did you do?"
+               class="ticket-field mt-1" maxlength="500" />
+      </label>
+      <label class="block md:col-span-1">
+        <span class="label">State</span>
+        <input id="journalPsych" placeholder="patient / fomo" list="psychOptions"
+               class="ticket-field mt-1" maxlength="32" />
+        <datalist id="psychOptions">
+          <option value="patient"></option>
+          <option value="fomo"></option>
+          <option value="hesitant"></option>
+          <option value="forced"></option>
+          <option value="mechanical"></option>
+        </datalist>
+      </label>
+      <label class="block md:col-span-1">
+        <span class="label">Tags</span>
+        <input id="journalTags" placeholder="a, b" class="ticket-field mt-1" />
+      </label>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-2 px-3 py-2">
+      <button id="journalSaveBtn" class="btn-primary">Save note</button>
+      <button id="journalClearBtn" class="btn-ghost">Clear fields</button>
+      <span id="journalMsg" class="font-mono text-body-sm text-tertiary"></span>
+    </div>
+
+    <div class="hidden overflow-x-auto" id="journalTableWrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Ticket</th>
+            <th>Note</th>
+            <th>State</th>
+            <th>Tags</th>
+            <th>Tag in comment</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="journalRows"></tbody>
+      </table>
+    </div>
+    <div id="journalEmpty" class="px-3 py-2 font-mono text-body-md text-tertiary">
+      No notes yet. A note is filed against a ticket; it never becomes an order.
+    </div>
+  </section>
+
   <!-- A <details> element, not a scripted disclosure: the harness forbids
        the DOM APIs a custom toggle would need, and native <details> keeps
        the feed open across polls without touching app.js. -->
-  <details class="panel mt-4" open>
-    <summary class="flex cursor-pointer list-none items-center justify-between
-                    border-b border-ink-700 px-4 py-2.5 focus:outline-none">
+  <details class="panel mt-3" open>
+    <summary class="panel-head cursor-pointer list-none focus:outline-none">
       <h2 class="mark">Execution log</h2>
-      <span class="text-[10px] text-shade-400">
+      <span class="font-mono text-num-sm text-tertiary">
         bridge-side transcript — the EA's Experts log remains the trading record
       </span>
     </summary>
     <div id="logBox"
-         class="h-48 overflow-y-auto px-3 py-2 text-[11px] leading-relaxed"></div>
+         class="h-48 overflow-y-auto px-2 py-1.5 font-mono text-body-sm leading-relaxed"></div>
   </details>
 
-  <footer class="mt-5 flex flex-wrap items-center justify-between gap-2 pb-6 text-[10px] text-shade-400">
+  <footer class="mt-3 flex flex-wrap items-center justify-between gap-2 pb-4
+                 font-mono text-num-sm text-tertiary">
     <span>
-      Charon bridge <span id="bridgeVersion" class="text-shade-300">—</span>
-      · schema <span id="schemaVersion" class="text-shade-300">—</span>
-      · reading <span id="bridgeRoot" class="text-shade-300">—</span>
+      Charon bridge <span id="bridgeVersion" class="text-secondary">—</span>
+      · schema <span id="schemaVersion" class="text-secondary">—</span>
+      · reading <span id="bridgeRoot" class="text-secondary">—</span>
     </span>
-    <span class="tracking-[0.14em] uppercase">
+    <span class="uppercase tracking-[0.12em]">
       orders are originated only by CharonTrade.mqh
     </span>
   </footer>
-</main>
+  </main>
+</div>
 <script src="/static/app.js"></script>
 </body>
 </html>

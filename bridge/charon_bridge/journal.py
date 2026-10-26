@@ -32,6 +32,7 @@ import os
 from typing import Any
 
 from .paths import journal_path
+from .schema import journal_tag
 
 # --- how many notes to keep. The file is rewritten whole on each write, so
 # --- this is a real bound on its size rather than a display limit.
@@ -83,7 +84,15 @@ def _save(symbol: str, document: dict[str, Any]) -> None:
         temp.unlink(missing_ok=True)
 
 
-def note(symbol: str, ticket: int, text: str | None, *, tag: str = "") -> None:
+def note(
+    symbol: str,
+    ticket: int,
+    text: str | None,
+    *,
+    tag: str = "",
+    psych: str = "",
+    tags: list[str] | None = None,
+) -> None:
     """Attach ``text`` to ``ticket``, or to the unfiled queue when it is 0.
 
     A ticket of 0 is meaningful, not a mistake: an ``order_open`` is queued
@@ -91,15 +100,75 @@ def note(symbol: str, ticket: int, text: str | None, *, tag: str = "") -> None:
     a FIFO and :func:`rekey` claims it the moment the EA reports a real
     ticket. Refusing 0 would mean the journal could only ever record notes
     for trades that already existed.
+
+    ``psych`` and ``tags`` are the operator's own classification -- a
+    psychological state and a playbook label. They are recorded exactly as
+    given and never inferred: a dashboard that guesses why a trade was taken
+    is inventing an explanation, and the whole point of tagging is that the
+    human supplies it before hindsight rewrites the memory.
+
+    Writing an empty ``text`` with tags still stores an entry, because
+    classifying a trade without prose is a legitimate thing to do.
     """
-    if not text:
+    if not text and not psych and not tags:
         return
     document = _load_all(symbol)
+    entry = {
+        "note": text or "",
+        "tag": tag,
+        "psych": psych,
+        "tags": list(tags or []),
+    }
     if ticket <= 0:
-        document["unfiled"].append({"note": text, "tag": tag})
+        document["unfiled"].append(entry)
     else:
-        document["entries"][str(int(ticket))] = {"note": text, "tag": tag}
+        document["entries"][str(int(ticket))] = entry
     _save(symbol, document)
+
+
+def set_note(
+    symbol: str,
+    ticket: int,
+    text: str | None,
+    *,
+    psych: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create or replace the entry for an existing ``ticket``.
+
+    Unlike :func:`note` this refuses ticket 0: a note attached to a trade
+    that already closed has a real ticket, and silently queueing it on the
+    unfiled FIFO would hide it from the row the operator was looking at.
+
+    Returns the stored entry so the caller can echo it back rather than
+    assuming the write landed as requested.
+    """
+    if ticket <= 0:
+        raise ValueError("a journal write needs a real ticket; 0 queues an order instead")
+    document = _load_all(symbol)
+    entry = {
+        "note": text or "",
+        "tag": journal_tag(text),
+        "psych": psych,
+        "tags": list(tags or []),
+    }
+    document["entries"][str(int(ticket))] = entry
+    _save(symbol, document)
+    return {**entry, "ticket": int(ticket)}
+
+
+def delete_note(symbol: str, ticket: int) -> bool:
+    """Remove the entry for ``ticket``. ``False`` when there was none.
+
+    Reporting whether anything was removed is what lets the API answer
+    ``404`` for a ticket that was never annotated, instead of a cheerful
+    ``200`` that would make a mis-keyed ticket look successful.
+    """
+    document = _load_all(symbol)
+    if document["entries"].pop(str(int(ticket)), None) is None:
+        return False
+    _save(symbol, document)
+    return True
 
 
 def entries(symbol: str) -> dict[int, dict[str, Any]]:
@@ -122,6 +191,11 @@ def for_symbol(symbol: str) -> list[dict[str, Any]]:
             "ticket": ticket,
             "note": value.get("note"),
             "tag": value.get("tag", ""),
+            # --- operator classification. Omitted (not defaulted to a
+            # --- guess) when absent, so the UI can show "untagged" rather
+            # --- than an invented state.
+            "psych": value.get("psych", ""),
+            "tags": value.get("tags", []),
         }
         for ticket, value in entries(symbol).items()
     ]
@@ -154,4 +228,13 @@ def rekey(symbol: str, from_ticket: int, to_ticket: int) -> None:
     _save(symbol, document)
 
 
-__all__ = ["MAX_ENTRIES", "MAX_UNFILED", "entries", "for_symbol", "note", "rekey"]
+__all__ = [
+    "MAX_ENTRIES",
+    "MAX_UNFILED",
+    "delete_note",
+    "entries",
+    "for_symbol",
+    "note",
+    "rekey",
+    "set_note",
+]
