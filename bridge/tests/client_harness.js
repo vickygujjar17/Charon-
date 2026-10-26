@@ -331,6 +331,11 @@ const snapshot = {
   ],
 };
 
+// --- a mutable hook so a test can change the catalogue between polls: the
+// --- picker is repainted on a timer, and a repaint that moved the keyboard
+// --- cursor would make Enter send an instrument nobody looked at.
+let symbolsPrepend = [];
+
 function fetchStub(url) {
   calls.push(url);
   let body;
@@ -354,7 +359,7 @@ function fetchStub(url) {
     // --- The classes are deliberately mixed so the grouping and the badge map
     // --- are exercised rather than assumed.
     body = {
-      symbols: [
+      symbols: symbolsPrepend.concat([
         { symbol: "GBPUSD", label: "GBPUSD", sources: ["chart"], asset_class: "forex" },
         {
           symbol: "EURUSD.a",
@@ -370,7 +375,7 @@ function fetchStub(url) {
           asset_class: "metals",
         },
         { symbol: "US30.cash", label: "US30", sources: ["broker"], asset_class: "indices" },
-      ],
+      ]),
       asset_classes: ["forex", "metals", "indices", "energy", "commodities", "crypto",
         "stocks", "other"],
       charts: ["GBPUSD", "EURUSD.a"],
@@ -486,7 +491,7 @@ vm.runInContext(source, context, { filename: "app.js" });
 
 
 // --- let the promise chain from boot() settle
-setTimeout(() => {
+setTimeout(async () => {
   const problems = [];
 
   if (!calls.some((url) => url.includes("/api/status"))) {
@@ -787,6 +792,59 @@ setTimeout(() => {
       "the spread was labelled in pips, which is wrong on 3-digit JPY and cash indices"
     );
   }
+
+  // --- a background repaint must not move the keyboard cursor. /api/symbols is
+  // --- polled every 10 s and the client repaints the open list, so an operator
+  // --- browsing with the arrow keys would otherwise have the highlight yanked
+  // --- back to the top match under their hands -- and the next Enter would send
+  // --- an instrument they never looked at. The rows are SHIFTED between polls
+  // --- (a new chart sorts above them) so holding the cursor by index cannot
+  // --- pass this: only holding it by symbol can.
+  fire(trigger, "click");
+  search.value = "";
+  fire(search, "input");
+  fire(search, "keydown", { key: "ArrowDown" });
+  const browsing = list.children.filter((n) => n.getAttribute("role") === "option");
+  const heldRow = browsing.find((n) => n.dataset.active === "true");
+  if (!heldRow) {
+    problems.push("no row was highlighted after arrowing through the list");
+  } else {
+    const heldSymbol = heldRow.dataset.symbol;
+    const heldIndex = heldRow.dataset.index;
+    symbolsPrepend = [
+      { symbol: "NZDUSD", label: "NZDUSD", sources: ["chart"], asset_class: "forex" },
+    ];
+    await context.loadSymbols();
+    const after = list.children
+      .filter((n) => n.getAttribute("role") === "option")
+      .find((n) => n.dataset.active === "true");
+    if (!after || after.dataset.symbol !== heldSymbol) {
+      problems.push(
+        `a background repaint moved the cursor from ${JSON.stringify(
+          heldSymbol
+        )} to ${JSON.stringify(after && after.dataset.symbol)}`
+      );
+    }
+    if (!after || after.dataset.index === heldIndex) {
+      problems.push(
+        "the stub did not shift the rows, so the repaint proved nothing"
+      );
+    }
+    if (search.getAttribute("aria-activedescendant") !== (after && after.id)) {
+      problems.push("a background repaint left aria-activedescendant elsewhere");
+    }
+    // --- the highlight is only the promise. Enter is what posts to /api/order,
+    // --- so that is what has to agree with what the operator was looking at.
+    fire(search, "keydown", { key: "Enter" });
+    if (registry.get("orderSymbol").value !== heldSymbol) {
+      problems.push(
+        `after a repaint Enter sent ${JSON.stringify(
+          registry.get("orderSymbol").value
+        )}, but the operator was looking at ${JSON.stringify(heldSymbol)}`
+      );
+    }
+  }
+  symbolsPrepend = [];
 
   // --- the price boxes are stepped to the instrument's digits, so a 5-digit
   // --- pair takes 0.00001 increments -- and no price is ever written into them

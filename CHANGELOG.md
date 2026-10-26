@@ -9,6 +9,23 @@ Every commit subject starts with the version it ships, for example
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-10-26
+
+A dashboard-only follow-up to 1.6.1. **No EA change, no schema change:** `SCHEMA_VERSION` stays
+`4` and `/api/order` is untouched.
+
+### Fixed
+
+- **A background catalogue refresh no longer moves the keyboard cursor in the symbol picker.**
+  `/api/symbols` is polled every 10 s and the open list is repainted from it, and every repaint
+  snapped the highlight back to the top row. An operator arrowing through the list therefore had
+  the cursor yanked out from under them, and the next `Enter` sent an instrument they had never
+  looked at. The cursor is now held across a repaint **by symbol, not by index**, so rows shifting
+  (a chart attaching above them) cannot silently change what `Enter` will send. A changed query or
+  a fresh open still anchors on the top match.
+  `client_harness.js` asserts this by shifting the catalogue between polls and then pressing
+  `Enter`, so a future edit that re-derives the cursor from the top of the list fails.
+
 ## [1.6.1] - 2026-10-26
 
 A dashboard-only patch. **No EA change, no schema change:** `SCHEMA_VERSION` stays `4`, the

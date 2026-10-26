@@ -1398,6 +1398,11 @@ let symbolClasses = [];
 let symbolFiltered = [];
 let symbolActive = -1;
 let symbolOpen = false;
+// --- the query ``symbolFiltered`` was built from. A background repaint can then
+// --- tell "the same list, rebuilt" from "a different list", which is the
+// --- difference between keeping the cursor where the operator put it and
+// --- resetting it to the top match.
+let symbolRowQuery = null;
 
 // --- What the bridge last published as a quote, and for which symbol. Only the
 // --- chart being polled publishes a tick, so this is the one honest source for
@@ -1548,7 +1553,20 @@ function setComboActive(index) {
 
 function paintComboRows() {
   const built = symbolRows();
+  const query = $("symbolSearch").value.trim();
+  // --- Same query as the list already on screen: this is a background repaint
+  // --- (/api/symbols polls every 10 s and a chart may have attached). The rows
+  // --- may have shifted, so hold the cursor by SYMBOL rather than by index --
+  // --- otherwise the highlight snaps back to the top match and the next Enter
+  // --- sends an instrument the operator never looked at.
+  const rebuilding = symbolRowQuery === query && symbolActive >= 0;
+  const held =
+    rebuilding && symbolActive < symbolFiltered.length
+      ? symbolFiltered[symbolActive]
+      : null;
+
   symbolFiltered = built.rows;
+  symbolRowQuery = query;
 
   const nodes = [];
   for (let index = 0; index < symbolFiltered.length; index += 1) {
@@ -1584,9 +1602,19 @@ function paintComboRows() {
   $("symbolList").replaceChildren(...nodes);
   $("symbolListFoot").textContent = comboFootText(built);
 
-  // --- the first option is active on open and after every keystroke, so Enter
-  // --- always has an answer and the operator can see what it will be.
+  // --- a genuine re-query (or a fresh open) puts the cursor on the top match,
+  // --- so Enter always has an answer and the operator can see what it will be.
   const options = comboOptionIndexes();
+  const keep =
+    held && held.kind === "option"
+      ? symbolFiltered.findIndex(
+          (row) => row.kind === "option" && row.symbol === held.symbol
+        )
+      : -1;
+  if (keep !== -1) {
+    setComboActive(keep);
+    return;
+  }
   setComboActive(options.length ? options[0] : -1);
 }
 
