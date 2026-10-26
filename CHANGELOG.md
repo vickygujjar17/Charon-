@@ -9,6 +9,75 @@ Every commit subject starts with the version it ships, for example
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-10-26
+
+A bridge and dashboard patch. **No EA change, no schema change:** `SCHEMA_VERSION` stays `4`,
+no `.mqh` logic changed (only the version string), and the command file format is untouched.
+
+The release exists because a feature that was written and tested had never been connected to
+anything. `charon_bridge/symbols.py` has shipped `resolve()` and `matches()` since v1.4.0 —
+four cases, one of them pinning the `CL`/`CLP` hazard — and **no production code called
+either one**. `POST /api/order` went through `_symbol_or_404`, which called
+`paths.sanitize_symbol` and stopped there. So the documented promise that broker naming
+variants "resolve cleanly" was, in the running system, false.
+
+### Fixed
+
+- **`/api/order` now resolves a broker name variant to the chart that is actually live.**
+  An operator whose terminal publishes `EURUSD.a` got `422 no live Charon snapshot for
+  'EURUSD'` for a chart that was publishing, with nothing in the message to suggest the
+  suffix was the problem. A symbol with no snapshot of its own is now matched against
+  `discover_symbols()` — the names the EA is *actually* publishing — and a unique hit is
+  used. The response gains `resolved_from` / `resolved_to` (absent when nothing was
+  rewritten, so the common case is unchanged) and the rename is logged.
+
+  Four limits, each of which is a test:
+
+  - **the exact name always wins when it exists**, including the *stale* case — a chart that
+    stopped publishing is a dead chart, not a typo, and retargeting it to `EURUSD.a` would
+    send an order to an instrument the operator never chose;
+  - candidates are **live charts, never the broker's listing**: a broker-only symbol has no
+    chart to drain the command, so resolving to it would turn one clear refusal into a
+    vaguer one;
+  - an **ambiguous** hint (`mEURUSD.a` and `EURUSD.a` both collapsing to `EURUSD`) is
+    refused with both names, rather than picking whichever sorted first;
+  - the answer is always a member of the published set, so this cannot invent a symbol.
+
+- **The resolution needs no configuration.** `canonical()` deliberately strips nothing
+  unless `CHARON_SYMBOL_SUFFIX` says what to strip — a blanket "everything after a dot" rule
+  turns `US30.cash` into `US30` and then fails to match the real chart. That is right for a
+  label and useless for a lookup, so the rule is inverted: each *known* name is asked whether
+  it is the hint plus a short, punctuation-anchored tag (`.a`, `.pro`, `.raw`, `_m`, `#`).
+  Nothing is stripped from the hint, so `CL` still does not resolve to `CLPUSD` — the
+  remainder `PUSD` carries no separator and is therefore not a tag. A `resolve()` that only
+  worked for operators who had already set the env var would have been a feature for the
+  people who did not need it.
+
+### Added
+
+- **The symbol classifier recognises the tickers a broker lists instead of a word.** Copper
+  (`HG`, and `COPPER`), RBOB gasoline (`RB`), the grains (`ZC ZW ZS ZM ZL`), the softs
+  (`SB KC CT CC OJ`) and livestock (`LE GF HE`) all landed under **Other** beside genuine
+  unknowns like `AAPL`, because only the spelled-out forms (`CORN`, `CATTLE`) were matched.
+  The two-letter tickers are matched **whole and never as a prefix**, reusing the
+  `_ENERGY_EXACT` pattern that exists for exactly this: `LE` would otherwise claim `LEU…`,
+  `HE` would claim `HEL…`, and `HG` would claim `HGD…`. Filing an unrelated instrument under
+  Metals is worse than filing it under Other, which is at least honest about not knowing.
+
+- **A trader's nickname finds the instrument, in the picker and at the order boundary.** The
+  bridge publishes a small `alias` per instrument — `Fiber`, `Cable`, `Gopher`, `Aussie`,
+  `Loonie`, `Swissie`, `Kiwi`, `Gold`, `Silver`, `Platinum`, `Palladium`, `WTI`, `Brent`,
+  and the softs by their full names — so typing `gold` finds `XAUUSD` without the client
+  keeping a second copy of the table. A row reads `XAUUSD · Gold`; the hint under the field
+  repeats the nickname once the row is chosen.
+
+  The alias is **never a command argument**, and the tests say so three ways: the catalogue's
+  `symbol` is still the broker name, `matches()` reads the table backwards and can only
+  return a member of the list it was given, and `client_harness.js` asserts that choosing by
+  nickname posts `XAUUSD`. An exact symbol beats a nickname (`GOLD` stays `GOLD`), and two
+  charts sharing one nickname stay **ambiguous** rather than one being chosen —
+  `USOIL`/`XTIUSD` are both "WTI", which is exactly the case `resolve()` refuses to break.
+
 ## [1.6.2] - 2026-10-26
 
 A dashboard-only follow-up to 1.6.1. **No EA change, no schema change:** `SCHEMA_VERSION` stays

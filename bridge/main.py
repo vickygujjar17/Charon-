@@ -161,27 +161,73 @@ def require_token(x_charon_token: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="missing or invalid X-Charon-Token")
 
 
-def _symbol_or_404(symbol: str | None) -> str:
-    """Resolve an explicit symbol, or the only one available."""
-    if symbol:
-        return paths.sanitize_symbol(symbol)
-    found = state.discover_symbols()
-    if not found:
-        # --- Name the directory that was searched. "no snapshot found" sends
-        # --- an operator looking at the chart; "no snapshot in <path>" sends
-        # --- them at the one thing that is usually wrong -- the path, or the
-        # --- fact that the terminal is on a different machine entirely.
-        where = state.locate()
+def _resolve_symbol(symbol: str | None) -> tuple[str, str | None]:
+    """``(name to act on, the name that had to be changed or None)``.
+
+    A broker rarely names a pair the way a trader says it: the same EURUSD may
+    be ``EURUSD``, ``EURUSD.a``, ``EURUSD.pro`` or ``mEURUSD``. Before v1.6.3
+    the ticket's symbol went to the filesystem as typed, so an operator whose
+    broker suffixes its names got "no live snapshot" for a chart that was in
+    fact publishing -- and the lookup machinery that knew how to fix it
+    (:func:`charon_bridge.symbols.resolve`) was never called from here.
+
+    The rename is deliberately narrow, because a wrong-but-plausible name is
+    the quiet failure this whole module guards against:
+
+    * only a name with **no snapshot of its own** is looked up. If the exact
+      name is already publishing, nothing is rewritten -- including the stale
+      case, which keeps reporting "stale" rather than silently retargeting;
+    * the candidates are the symbols the EA is **actually publishing**
+      (:func:`state.discover_symbols`), never the broker's listing. A name
+      that only appears in the terminal has no chart to receive a command, so
+      resolving to it would turn a clear refusal into a confusing one;
+    * the answer is always one of those names, so this cannot invent a symbol;
+    * an ambiguous hint is refused with both candidates named, rather than
+      picking whichever chart sorted first.
+    """
+    if not symbol:
+        found = state.discover_symbols()
+        if not found:
+            # --- Name the directory that was searched. "no snapshot found" sends
+            # --- an operator looking at the chart; "no snapshot in <path>" sends
+            # --- them at the one thing that is usually wrong -- the path, or the
+            # --- fact that the terminal is on a different machine entirely.
+            where = state.locate()
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"no Charon snapshot found in {where['bridge_root']} "
+                    f"(common files {where['common_exists']}). "
+                    "Enable InpBridgeEnable on the chart, "
+                    f"or set {paths.ENV_OVERRIDE} to the terminal's Common\\Files folder."
+                ),
+            )
+        return found[0], None
+
+    asked = paths.sanitize_symbol(symbol)
+    charts = state.discover_symbols()
+    if asked in charts:
+        return asked, None
+
+    candidates = symbols.matches(symbol.strip(), charts)
+    if len(candidates) == 1:
+        return candidates[0], asked
+    if len(candidates) > 1:
+        # --- Naming both is the whole point: the operator picks, this does not.
         raise HTTPException(
-            status_code=503,
+            status_code=422,
             detail=(
-                f"no Charon snapshot found in {where['bridge_root']} "
-                f"(common files {where['common_exists']}). "
-                "Enable InpBridgeEnable on the chart, "
-                f"or set {paths.ENV_OVERRIDE} to the terminal's Common\\Files folder."
+                f"{symbol.strip()!r} matches {len(candidates)} live charts "
+                f"({', '.join(candidates)}). A command carries the exact broker "
+                "name, so it must be unambiguous -- name the chart you mean."
             ),
         )
-    return found[0]
+    return asked, None
+
+
+def _symbol_or_404(symbol: str | None) -> str:
+    """Resolve an explicit symbol, or the only one available."""
+    return _resolve_symbol(symbol)[0]
 
 
 #+------------------------------------------------------------------+
@@ -973,7 +1019,7 @@ def place_order(ticket: "OrderTicket") -> dict[str, Any]:
     than queued into silence. Anything about money or market state is the
     EA's answer.
     """
-    resolved = _symbol_or_404(ticket.symbol)
+    resolved, asked = _resolve_symbol(ticket.symbol)
     try:
         intent = _intent_from(ticket)
         # --- shape first, liveness second: a malformed ticket is wrong
@@ -1016,6 +1062,17 @@ def place_order(ticket: "OrderTicket") -> dict[str, Any]:
             "Queued for the EA. The EA decides sizing and the stop."
         ),
     }
+    # --- v1.6.3: say when the ticket's symbol was not the name that was used.
+    # --- A silent rename would leave the operator believing they had aimed at
+    # --- "EURUSD" when the chart being driven is "EURUSD.a". Absent when the
+    # --- name was taken as given, so the common case gains no field.
+    if asked is not None:
+        response["resolved_from"] = asked
+        response["resolved_to"] = resolved
+        LOG.info(
+            f"resolved {asked!r} to the live chart {resolved!r} "
+            "(the exact name publishes no snapshot)"
+        )
     if intent.is_watch:
         # --- the UI shows the target rather than making the operator re-read
         # --- the ticket they just sent. ``watching`` is the flag it keys on.

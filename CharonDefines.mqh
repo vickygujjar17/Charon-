@@ -24,7 +24,7 @@
 //| _tools/bump_version.py rewrites this literal and every other     |
 //| version string in the repository in one pass.                    |
 //+------------------------------------------------------------------+
-#define CHARON_VERSION        "1.6.2"
+#define CHARON_VERSION        "1.6.3"
 #define CHARON_NAME           "Charon"
 #define CHARON_REPO           "https://github.com/vickygujjar17/Charon-.git"
 

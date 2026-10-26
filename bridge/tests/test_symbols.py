@@ -146,6 +146,9 @@ def test_catalogue_carries_both_the_exact_name_and_the_label(
         # --- v1.4.0: a grouping heading for the picker, derived from the
         # --- canonical name. Advisory only -- see symbols.asset_class.
         "asset_class": symbols.ASSET_FOREX,
+        # --- v1.6.3: the trader's word for the instrument, for search only.
+        # --- Never a command argument -- see symbols.alias_for.
+        "alias": "Fiber",
     }
 
 
@@ -194,6 +197,25 @@ def test_catalogue_of_nothing_is_empty() -> None:
         ("ORANGE", symbols.ASSET_COMMODITIES),
         ("BTCUSD", symbols.ASSET_CRYPTO),
         ("ETH/USD", symbols.ASSET_CRYPTO),
+        # --- v1.6.3: the ticker a broker actually lists, when there is no
+        # --- word in the name at all. Everything below used to land under
+        # --- Other beside genuine unknowns like AAPL.
+        ("HG", symbols.ASSET_METALS),
+        ("COPPER", symbols.ASSET_METALS),
+        ("RB", symbols.ASSET_ENERGY),
+        ("ZC", symbols.ASSET_COMMODITIES),
+        ("ZW", symbols.ASSET_COMMODITIES),
+        ("ZS", symbols.ASSET_COMMODITIES),
+        ("ZM", symbols.ASSET_COMMODITIES),
+        ("ZL", symbols.ASSET_COMMODITIES),
+        ("SB", symbols.ASSET_COMMODITIES),
+        ("KC", symbols.ASSET_COMMODITIES),
+        ("CT", symbols.ASSET_COMMODITIES),
+        ("CC", symbols.ASSET_COMMODITIES),
+        ("OJ", symbols.ASSET_COMMODITIES),
+        ("LE", symbols.ASSET_COMMODITIES),
+        ("GF", symbols.ASSET_COMMODITIES),
+        ("HE", symbols.ASSET_COMMODITIES),
     ],
 )
 def test_asset_class_recognises_the_common_names(name: str, expected: str) -> None:
@@ -223,6 +245,44 @@ def test_a_crude_ticker_never_reaches_the_pair_test() -> None:
     """
     assert symbols.asset_class("XTIUSD") == symbols.ASSET_ENERGY
     assert symbols.asset_class("XBRUSD") == symbols.ASSET_ENERGY
+
+
+def test_short_tickers_are_matched_whole_not_as_a_prefix() -> None:
+    """Every two-letter ticker added in v1.6.3 must stay exact-match only.
+
+    The hazard is not hypothetical and it is not confined to ``CL``/``CLP``.
+    ``LE`` (live cattle) would claim ``LEU...``; ``HE`` would claim
+    ``HEL...``; ``HG`` would claim ``HGD...``. A picker that files an
+    unrelated instrument under Metals or Commodities is worse than one that
+    files it under Other, because Other is *honest* about not knowing. So the
+    assertion is one-directional on purpose: ``LEUUSD`` is allowed to be
+    Other or Forex, but it must never be a commodity.
+    """
+    # --- metals: HG is copper's ticker, HGD is not copper
+    assert symbols.asset_class("HG") == symbols.ASSET_METALS
+    assert symbols.asset_class("HGDUSD") != symbols.ASSET_METALS
+    assert symbols.asset_class("HGX") != symbols.ASSET_METALS
+    # --- energy: RB is RBOB gasoline, RBXYZ is not gasoline
+    assert symbols.asset_class("RB") == symbols.ASSET_ENERGY
+    assert symbols.asset_class("RBXYZ") != symbols.ASSET_ENERGY
+    # --- commodities: the 2-letter grain/soft/livestock tickers
+    for ticker in ("LE", "HE", "ZC", "ZW", "ZS", "ZM", "ZL", "SB", "KC", "CT",
+                   "CC", "OJ", "GF"):
+        assert symbols.asset_class(ticker) == symbols.ASSET_COMMODITIES, ticker
+    for name in ("LEUUSD", "HELUSD", "ZCX", "ZWD", "SBUX", "KCASH", "CTRY",
+                 "OIL", "GFX"):
+        assert symbols.asset_class(name) != symbols.ASSET_COMMODITIES, name
+
+
+def test_a_two_letter_metal_ticker_does_not_swallow_a_currency_pair() -> None:
+    """``HG`` is copper, but the classifier must not read ``HG`` as a prefix.
+
+    ``ZAR`` and ``MXN`` are in ``_CURRENCIES``; a prefix rule on ``HG`` would
+    turn any pair starting with it into a metal. Asserting the pair survives
+    keeps the exact-match rule pinned from the other direction.
+    """
+    assert symbols.asset_class("USDZAR") == symbols.ASSET_FOREX
+    assert symbols.asset_class("USDMXN") == symbols.ASSET_FOREX
 
 
 def test_a_commodity_token_is_matched_whole_not_as_a_prefix() -> None:
@@ -262,3 +322,169 @@ def test_asset_class_never_rejects_an_unknown_name(name: str) -> None:
 def test_asset_class_is_purely_derived_from_the_name() -> None:
     """Two calls with the same input must agree -- it is a label, not state."""
     assert symbols.asset_class("EURUSD") == symbols.asset_class("EURUSD")
+
+
+#+------------------------------------------------------------------+
+#| alias_for() -- the trader's word, for search only                 |
+#+------------------------------------------------------------------+
+@pytest.mark.parametrize(
+    ("name", "alias"),
+    [
+        ("EURUSD", "Fiber"),
+        ("GBPUSD", "Cable"),
+        ("USDJPY", "Gopher"),
+        ("AUDUSD", "Aussie"),
+        ("USDCAD", "Loonie"),
+        ("USDCHF", "Swissie"),
+        ("NZDUSD", "Kiwi"),
+        ("XAUUSD", "Gold"),
+        ("XAGUSD", "Silver"),
+        ("XPTUSD", "Platinum"),
+        ("XPDUSD", "Palladium"),
+        ("USOIL", "WTI"),
+    ],
+)
+def test_alias_names_the_instrument_the_way_a_trader_does(name: str, alias: str) -> None:
+    assert symbols.alias_for(name) == alias
+
+
+def test_alias_is_empty_for_something_it_does_not_know() -> None:
+    """No alias is the correct answer -- inventing one would be a lie."""
+    assert symbols.alias_for("FOOBAR") == ""
+    assert symbols.alias_for("") == ""
+    assert symbols.alias_for("AAPL") == ""
+
+
+def test_alias_survives_a_configured_broker_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``XAUUSD.m`` is still gold: the alias is keyed on the canonical name."""
+    monkeypatch.setenv(symbols.SUFFIX_ENV, ".m")
+    assert symbols.alias_for("XAUUSD.m") == "Gold"
+    entry = symbols.catalogue(broker=["XAUUSD.m"])[0]
+    assert entry.name == "XAUUSD.m", "the alias must never become the symbol"
+    assert entry.as_dict()["alias"] == "Gold"
+
+
+def test_alias_is_never_a_command_argument() -> None:
+    """The catalogue's ``symbol`` is the broker name even when an alias exists.
+
+    This is the invariant the whole module exists for, restated for the new
+    field: a row that displays "Gold" must still send ``XAUUSD``.
+    """
+    entry = symbols.catalogue(chart=["XAUUSD"])[0]
+    body = entry.as_dict()
+    assert body["symbol"] == "XAUUSD"
+    assert body["alias"] == "Gold"
+    assert body["symbol"] != body["alias"]
+
+
+def test_every_reference_alias_key_is_a_canonical_name() -> None:
+    """Alias keys are matched against ``canonical``, so they must be upper case.
+
+    A lower-case key would silently never match, which is the kind of typo
+    that reads as "that instrument has no nickname".
+    """
+    for key in symbols.REFERENCE_ALIASES:
+        assert key == key.upper(), key
+        assert key == symbols.canonical(key), key
+    assert len(set(symbols.REFERENCE_ALIASES.values())) <= len(symbols.REFERENCE_ALIASES)
+
+
+#+------------------------------------------------------------------+
+#| A broker tag with no configured suffix                            |
+#+------------------------------------------------------------------+
+def test_an_unconfigured_deployment_still_resolves_a_tagged_name() -> None:
+    """``EURUSD`` -> ``EURUSD.a`` with no ``CHARON_SYMBOL_SUFFIX`` set.
+
+    ``canonical`` refuses to strip a guessed affix, and rightly so -- but that
+    left the common case unresolvable: an operator who never set the env var
+    could not reach a chart the terminal insists on calling ``EURUSD.a``. The
+    tag is recognised on the *known* name, which is a structural test rather
+    than a guess about one broker's convention.
+    """
+    assert symbols.resolve("EURUSD", ["EURUSD.a", "GBPUSD.a"]) == "EURUSD.a"
+    assert symbols.resolve("EURUSD", ["EURUSD.pro"]) == "EURUSD.pro"
+    assert symbols.resolve("EURUSD", ["EURUSD.raw"]) == "EURUSD.raw"
+    assert symbols.resolve("EURUSD", ["EURUSD_m"]) == "EURUSD_m"
+    assert symbols.resolve("US30", ["US30.cash"]) == "US30.cash"
+    # --- a trailing separator with no tag after it is still a listing style
+    assert symbols.resolve("EURUSD", ["EURUSD#"]) == "EURUSD#"
+
+
+def test_a_tagged_lookup_stays_ambiguous_with_two_candidates() -> None:
+    """``EURUSD.a`` and ``EURUSD.pro`` are two charts, not one."""
+    known = ["EURUSD.a", "EURUSD.pro"]
+    assert symbols.resolve("EURUSD", known) is None
+    assert symbols.matches("EURUSD", known) == ["EURUSD.a", "EURUSD.pro"]
+
+
+def test_a_prefix_must_not_be_mistaken_for_a_tag() -> None:
+    """The whole safety argument: no separator means no tag.
+
+    ``CLPUSD`` starts with ``CL`` and ``BTCUSD`` starts with ``BTC``. Reading
+    the remainder as a broker tag would resolve crude's ticker to the Chilean
+    peso -- a rename that lands on a real chart publishing a different
+    instrument, which is the worst outcome this module can produce.
+    """
+    assert symbols.matches("CL", ["CLPUSD"]) == []
+    assert symbols.matches("BTC", ["BTCUSD"]) == []
+    assert symbols.matches("USD", ["USDJPY"]) == []
+    assert symbols.matches("EUR", ["EURUSD"]) == []
+
+
+def test_a_long_remainder_is_not_a_tag() -> None:
+    """A suffix is a short deployment marker, not the rest of a name."""
+    assert symbols.matches("EUR", ["EURUSDT"]) == []
+    assert symbols.resolve("XAU", ["XAUUSDT"]) is None
+
+
+def test_a_tag_never_outranks_an_exact_name() -> None:
+    """A terminal listing both ``EURUSD`` and ``EURUSD.a`` keeps the exact one."""
+    assert symbols.resolve("EURUSD", ["EURUSD", "EURUSD.a"]) == "EURUSD"
+
+
+def test_the_tag_pass_does_not_fire_when_a_suffix_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configuration is more specific than the structural rule, and still wins."""
+    monkeypatch.setenv(symbols.SUFFIX_ENV, ".a")
+    known = ["EURUSD.a", "GBPUSD.a"]
+    assert symbols.resolve("eurusd", known) == "EURUSD.a"
+    assert symbols.matches("EURUSD", known) == ["EURUSD.a"]
+
+
+#+------------------------------------------------------------------+
+#| The alias pass in matches() -- a trader's word, not a symbol      |
+#+------------------------------------------------------------------+
+def test_a_nickname_resolves_to_a_known_name() -> None:
+    """``gold`` reaching ``XAUUSD`` is what makes the alias list worth having.
+
+    The value returned is always a member of ``known``: a nickname is an
+    input, never an output, or the picker would start sending "Gold".
+    """
+    assert symbols.resolve("gold", ["XAUUSD", "EURUSD"]) == "XAUUSD"
+    assert symbols.resolve("cable", ["GBPUSD"]) == "GBPUSD"
+    assert symbols.resolve("GOLD", ["XAUUSD"]) == "XAUUSD"
+
+
+def test_an_exact_name_still_beats_a_nickname() -> None:
+    """A broker with a literal ``GOLD`` symbol keeps it over ``XAUUSD``'s alias.
+
+    Passes run cheapest-and-most-specific first, so adding the alias pass
+    must not have demoted the exact one.
+    """
+    assert symbols.resolve("GOLD", ["XAUUSD", "GOLD"]) == "GOLD"
+    assert symbols.resolve("gold", ["XAUUSD"]) == "XAUUSD"
+
+
+def test_a_nickname_for_an_unknown_instrument_matches_nothing() -> None:
+    """The alias table is a hint list, not a catalogue."""
+    assert symbols.resolve("gold", ["EURUSD"]) is None
+    assert symbols.matches("platinum", []) == []
+
+
+def test_an_ambiguous_nickname_is_still_ambiguous() -> None:
+    """Two charts for one trader word must not be chosen between."""
+    # --- USOIL and XTIUSD are both "WTI" as far as a trader is concerned
+    known = ["USOIL", "XTIUSD"]
+    assert symbols.resolve("WTI", known) is None
+    assert symbols.matches("WTI", known) == ["USOIL", "XTIUSD"]

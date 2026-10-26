@@ -110,7 +110,13 @@ ASSET_CLASSES: tuple[str, ...] = (
 # --- picker, and a wrong guess here must never cost an operator a symbol.
 _METAL_TOKENS = frozenset({
     "XAU", "XAG", "XPT", "XPD", "GOLD", "SILVER", "PLATINUM", "PALLADIUM",
+    # --- v1.6.3: copper is a metal a retail broker lists, usually spelled out
+    "COPPER",
 })
+# --- metals named by a two-letter ticker. Exact only, for the same reason as
+# --- ``_ENERGY_EXACT``: a prefix test on ``HG`` would claim every ``HGD...``
+# --- name, and a short ticker is exactly where a prefix rule goes wrong.
+_METAL_EXACT = frozenset({"HG"})  # --- COMEX copper
 _INDEX_TOKENS = frozenset({
     "US30", "US500", "US100", "NAS100", "SPX500", "GER30", "GER40", "UK100",
     "JP225", "AUS200", "FRA40", "HK50", "DE30", "DE40", "EU50", "US2000",
@@ -123,13 +129,25 @@ _ENERGY_TOKENS = frozenset({
 })
 # --- tokens that are only ever the whole instrument name. ``CL`` is crude's
 # --- ticker, but as a *prefix* it would read every ``CLP...`` symbol as energy,
-# --- so it is matched exactly and never prefixed.
-_ENERGY_EXACT = frozenset({"CL"})
+# --- so it is matched exactly and never prefixed. ``RB`` is RBOB gasoline --
+# --- the CME contract -- and is the same shape of problem.
+_ENERGY_EXACT = frozenset({"CL", "RB"})
 # --- softs and grains. Exact whole-token matches for the same reason: a prefix
 # --- test would claim unrelated names that merely start with the same letters.
+# --- v1.6.3 adds the exchange tickers, because a broker that lists ``ZC`` does
+# --- not also give it the word "CORN" to match on. Every two-letter entry here
+# --- is load-bearing as an *exact* match: ``LE`` would otherwise claim
+# --- ``LEU...`` and ``HE`` would claim ``HEL...``.
 _COMMODITY_TOKENS = frozenset({
+    # --- spelled out
     "WHEAT", "CORN", "SOYBEAN", "SOY", "COFFEE", "COCOA", "SUGAR", "COTTON",
     "ORANGE", "RICE", "OATS", "LUMBER", "CATTLE", "HOG",
+    # --- grains (CBOT)
+    "ZC", "ZW", "ZS", "ZM", "ZL",
+    # --- softs (ICE)
+    "SB", "KC", "CT", "CC", "OJ",
+    # --- livestock (CME)
+    "LE", "GF", "HE",
 })
 _CRYPTO_TOKENS = frozenset({
     "BTC", "ETH", "XRP", "LTC", "BCH", "ADA", "SOL", "DOGE", "DOT", "AVAX",
@@ -142,6 +160,145 @@ _CURRENCIES = frozenset({
     "DKK", "SGD", "HKD", "ZAR", "MXN", "TRY", "PLN", "CZK", "HUF", "CNH",
     "RMB", "INR", "RUB", "BRL", "THB", "KRW",
 })
+
+# --- what a trader calls the thing, keyed by the *canonical* name. This is the
+# --- one piece of naming knowledge in this module that is not derived from the
+# --- symbol itself, and it is deliberately written as data rather than as a
+# --- heuristic: "cable" has no relationship to the letters G-B-P that a rule
+# --- could discover, and guessing would put a label on the wrong instrument.
+# ---
+# --- What this table is for: search. An operator types what they say out loud,
+# --- and "gold" having to become "XAUUSD" before the picker will find it is a
+# --- lookup the client should not be doing itself. What it is **not** for: a
+# --- command argument. Nothing here is ever sent -- see alias_for().
+# ---
+# --- Two keys may share a value on purpose. USOIL and XTIUSD are both "WTI" to
+# --- a trader, which is exactly the ambiguity :func:`resolve` refuses to break
+# --- by itself.
+REFERENCE_ALIASES: dict[str, str] = {
+    # --- the majors, by their desk nicknames
+    "EURUSD": "Fiber",
+    "GBPUSD": "Cable",
+    "USDJPY": "Gopher",
+    "AUDUSD": "Aussie",
+    "USDCAD": "Loonie",
+    "USDCHF": "Swissie",
+    "NZDUSD": "Kiwi",
+    # --- metals
+    "XAUUSD": "Gold",
+    "XAGUSD": "Silver",
+    "XPTUSD": "Platinum",
+    "XPDUSD": "Palladium",
+    "HG": "Copper",
+    # --- energy
+    "CL": "Crude",
+    "USOIL": "WTI",
+    "XTIUSD": "WTI",
+    "UKOIL": "Brent",
+    "XBRUSD": "Brent",
+    "NGAS": "Natural gas",
+    "NATGAS": "Natural gas",
+    # --- grains, softs and livestock, whose tickers say nothing to a newcomer
+    "ZC": "Corn",
+    "ZW": "Wheat",
+    "ZS": "Soybean",
+    "ZM": "Soybean meal",
+    "ZL": "Soybean oil",
+    "SB": "Sugar",
+    "KC": "Coffee",
+    "CT": "Cotton",
+    "CC": "Cocoa",
+    "OJ": "Orange juice",
+    "LE": "Live cattle",
+    "GF": "Feeder cattle",
+    "HE": "Lean hogs",
+}
+
+
+def _alias_index() -> dict[str, tuple[str, ...]]:
+    """:data:`REFERENCE_ALIASES` read backwards, casefolded for lookup.
+
+    Built per call rather than cached at import for the same reason the affixes
+    are: a module-level cache would be one more thing a test has to reset, and
+    the table is small enough that rebuilding it costs nothing.
+    """
+    index: dict[str, list[str]] = {}
+    for key, alias in REFERENCE_ALIASES.items():
+        index.setdefault(alias.casefold(), []).append(key)
+    return {alias: tuple(keys) for alias, keys in index.items()}
+
+
+def alias_for(name: str) -> str:
+    """The trader's word for ``name``, or ``""`` when there is none.
+
+    Display and search only. **Never** a command argument: the module's rule is
+    that a command carries the broker's exact name, and "Gold" is not a symbol
+    any EA can compare against its own ``_Symbol``.
+
+    Keyed on :func:`canonical`, so a deployment's ``XAUUSD.m`` still answers
+    "Gold" without the table having to know about every suffix.
+    """
+    return REFERENCE_ALIASES.get(canonical(name), "")
+
+
+# --- how long a broker tag may be before it stops looking like a tag. A
+# --- suffix is a short deployment marker -- ``.a``, ``.pro``, ``.raw``,
+# --- ``.cash``, ``#`` -- and the cap is what keeps this rule from reading a
+# --- whole different instrument's name as one.
+_TAG_MAX = 8
+# --- the characters brokers actually introduce a tag with. Requiring a
+# --- separator is the entire safety argument for the pass below: it is a
+# --- *structural* claim, not a guess about a particular broker's convention.
+_TAG_LEADS = "._-#"
+
+
+def _broker_tag(text: str) -> str:
+    """The trailing tag on ``text``, or ``""`` if it does not carry one.
+
+    ``".a"``, ``".cash"`` and a bare ``"#"`` are tags. ``"PUSD"`` -- what
+    follows ``CL`` in ``CLPUSD`` -- is **not**, because it does not start with
+    a separator, and that single distinction is what stops this from filing
+    the Chilean peso under crude.
+    """
+    stripped = text.strip()
+    if not stripped or stripped[0] not in _TAG_LEADS:
+        return ""
+    if len(stripped) > _TAG_MAX:
+        return ""
+    # --- a bare separator is still a tag (``EURUSD#`` is a real listing); a
+    # --- separator plus *anything that is not a short word* is not.
+    rest = stripped[1:]
+    if rest and not rest.isalnum():
+        return ""
+    return stripped
+
+
+def _suffixed_matches(hint: str, names: Sequence[str]) -> list[str]:
+    """Known names that are ``hint`` followed by a punctuation-anchored tag.
+
+    The gap this closes: :func:`canonical` deliberately strips **nothing**
+    unless ``CHARON_SYMBOL_SUFFIX`` says what to strip, because a blanket
+    "everything after a dot" rule turns ``US30.cash`` into ``US30`` and then
+    fails to match the real chart. That is right for a display label, and
+    useless for a lookup -- an unconfigured deployment can then never resolve
+    "EURUSD" to "EURUSD.a" at all.
+
+    So the rule is inverted here. Instead of stripping a *guessed* affix off
+    the hint, each known name is asked whether it is the hint plus something
+    that is structurally a broker tag. Nothing is stripped from anything, the
+    answer is still a member of ``names``, and two candidates stay ambiguous.
+    """
+    if len(hint) < 2:
+        return []
+    lowered = hint.casefold()
+    found: list[str] = []
+    for name in names:
+        folded = name.casefold()
+        if folded == lowered or not folded.startswith(lowered):
+            continue
+        if _broker_tag(folded[len(lowered):]):
+            found.append(name)
+    return found
 
 
 def asset_class(name: str) -> str:
@@ -186,6 +343,8 @@ def _classify_token(token: str) -> str:
     """
     if not token:
         return ASSET_OTHER
+    if token in _METAL_EXACT:
+        return ASSET_METALS
     for prefix in _METAL_TOKENS:
         if token.startswith(prefix):
             return ASSET_METALS
@@ -223,6 +382,14 @@ class Entry:
     sources: tuple[str, ...]
     """``SOURCE_CHART`` and/or ``SOURCE_BROKER``, chart first."""
 
+    alias: str = ""
+    """The trader's word for it, or ``""``. Display and search only.
+
+    Defaulted rather than required so every existing construction -- including
+    the ones in tests -- keeps meaning what it said, and an instrument with no
+    nickname is stated as an empty string rather than a guess.
+    """
+
     def as_dict(self) -> dict[str, object]:
         return {
             "symbol": self.name,
@@ -230,6 +397,10 @@ class Entry:
             "sources": list(self.sources),
             # --- a heading for the picker, never a filter. See asset_class().
             "asset_class": asset_class(self.name),
+            # --- v1.6.3: what a trader calls it, so "gold" finds XAUUSD. The
+            # --- client adds this to its search text and shows it beside the
+            # --- label; it is never posted. See alias_for().
+            "alias": self.alias,
         }
 
 
@@ -279,7 +450,12 @@ def catalogue(
                 sources[name].append(source)
 
     return [
-        Entry(name=name, canonical=canonical(name), sources=tuple(sources[name]))
+        Entry(
+            name=name,
+            canonical=canonical(name),
+            sources=tuple(sources[name]),
+            alias=alias_for(name),
+        )
         for name in order
     ]
 
@@ -287,16 +463,29 @@ def catalogue(
 def matches(hint: str, known: Sequence[str]) -> list[str]:
     """Every known name ``hint`` could mean, most specific first.
 
-    Three passes, stopping at the first that finds anything:
+    Four passes, stopping at the first that finds anything:
 
     1. exact match -- the operator pasted the broker's own name;
     2. case-insensitive exact -- ``eurusd.a`` for ``EURUSD.a``;
-    3. canonical match -- ``EURUSD`` for ``EURUSD.a``.
+    3. canonical match -- ``EURUSD`` for ``EURUSD.a``;
+    4. a punctuation-anchored broker tag -- ``EURUSD`` for ``EURUSD.a`` even
+       when ``CHARON_SYMBOL_SUFFIX`` is unset (v1.6.3);
+    5. nickname match -- ``gold`` for ``XAUUSD`` (v1.6.3).
 
     Each pass is scored against ``known`` only, so an unknown hint yields an
     empty list and an ambiguous one yields several names. That is precisely
     the information the caller needs in order to ask a better question
     instead of picking one at random.
+
+    The order is the rule that keeps this safe. A broker that really lists a
+    symbol called ``GOLD`` answers with it, and the nickname on ``XAUUSD`` is
+    only consulted when no such symbol exists -- so learning a nickname can
+    never displace a real instrument.
+
+    The nickname pass reads ``known`` **through** :data:`REFERENCE_ALIASES`
+    rather than the other way round: the table says which names are called
+    what, and the answer is still always a member of ``known``. There is no
+    path here that returns a nickname.
     """
     wanted = hint.strip() if isinstance(hint, str) else ""
     if not wanted:
@@ -314,7 +503,24 @@ def matches(hint: str, known: Sequence[str]) -> list[str]:
     target = canonical(wanted)
     if not target:
         return []
-    return [name for name in names if canonical(name) == target]
+    canonical_hits = [name for name in names if canonical(name) == target]
+    if canonical_hits:
+        return canonical_hits
+
+    # --- an unconfigured deployment still gets ``EURUSD`` -> ``EURUSD.a``,
+    # --- because the tag is recognised *on the known name* rather than
+    # --- guessed off the hint. See _suffixed_matches.
+    suffixed = _suffixed_matches(wanted, names)
+    if suffixed:
+        return suffixed
+
+    # --- the nickname pass. ``known`` first, so two charts nicknamed the same
+    # --- thing both come back and the caller can see the ambiguity.
+    return [
+        name
+        for name in names
+        if alias_for(name).casefold() == target.casefold()
+    ]
 
 
 def resolve(hint: str, known: Sequence[str]) -> str | None:
@@ -341,10 +547,12 @@ __all__ = [
     "ASSET_OTHER",
     "ASSET_STOCK",
     "PREFIX_ENV",
+    "REFERENCE_ALIASES",
     "SOURCE_BROKER",
     "SOURCE_CHART",
     "SUFFIX_ENV",
     "Entry",
+    "alias_for",
     "asset_class",
     "canonical",
     "catalogue",

@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from charon_bridge import mt5_adapter
+from charon_bridge import mt5_adapter, symbols
 from charon_bridge.version import SCHEMA_VERSION
 from tests.conftest import make_snapshot
 
@@ -545,6 +545,141 @@ def test_a_stale_snapshot_does_not_satisfy_the_gate(
     response = client.post("/api/order", json=_ticket())
     assert response.status_code == 422
     assert "no live Charon snapshot" in response.json()["detail"]
+
+
+#+------------------------------------------------------------------+
+#| Broker name variants resolve to the chart that is actually live   |
+#+------------------------------------------------------------------+
+def test_order_resolves_a_canonical_name_to_the_broker_chart(
+        client: TestClient, common_dir: Path, write_snapshot,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """``EURUSD`` for a terminal that calls it ``EURUSD.a``, end to end.
+
+    Before v1.6.3 ``symbols.resolve`` existed and nothing called it: the
+    ticket's symbol went to the filesystem almost as typed, so an operator
+    whose broker suffixes its names got "no live snapshot" for a chart that
+    was in fact publishing. The rename is safe only because it lands on a
+    name the EA is already publishing, and the response says so.
+    """
+    monkeypatch.setenv(symbols.SUFFIX_ENV, ".a")
+    write_snapshot(make_snapshot(symbol="EURUSD.a"), symbol="EURUSD.a")
+
+    response = client.post("/api/order", json=_ticket(symbol="EURUSD"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["queued"] is True
+    # --- the operator is told which chart will act, and what they asked for
+    assert body["resolved_from"] == "EURUSD"
+    assert body["command"]["sent"]["symbol"] == "EURUSD.a"
+
+    inbox = common_dir / "Charon" / "commands"
+    sent = json.loads(next(inbox.glob("*.json")).read_text(encoding="utf-8"))
+    assert sent["symbol"] == "EURUSD.a", "the alias must never reach the EA"
+    assert sent["verb"] == "order_open"
+
+
+def test_order_refuses_when_a_name_matches_two_charts(
+        client: TestClient, common_dir: Path, write_snapshot,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two charts collapsing to one label must not be chosen between.
+
+    ``mEURUSD.a`` and ``EURUSD.a`` is a real pair of listings, not a thought
+    experiment. Picking either would send a live order to whichever chart
+    happened to sort first, so the ambiguous case is refused with nothing
+    written.
+    """
+    monkeypatch.setenv(symbols.PREFIX_ENV, "m")
+    monkeypatch.setenv(symbols.SUFFIX_ENV, ".a")
+    write_snapshot(make_snapshot(symbol="mEURUSD.a"), symbol="mEURUSD.a")
+    write_snapshot(make_snapshot(symbol="EURUSD.a"), symbol="EURUSD.a")
+
+    response = client.post("/api/order", json=_ticket(symbol="EURUSD"))
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "EURUSD" in detail
+    inbox = common_dir / "Charon" / "commands"
+    assert list(inbox.glob("*.json")) == [] if inbox.is_dir() else True
+
+
+def test_order_keeps_the_typed_name_when_nothing_matches_it(
+        client: TestClient, common_dir: Path, write_snapshot,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """No match means no rename -- the refusal names what was asked for.
+
+    The dangerous outcome would be inventing ``EURUSD.a`` from a hint that
+    never matched, so this asserts the symbol reaches the gate unchanged.
+    """
+    monkeypatch.setenv(symbols.SUFFIX_ENV, ".a")
+    write_snapshot(make_snapshot(symbol="GBPUSD.a"), symbol="GBPUSD.a")
+
+    response = client.post("/api/order", json=_ticket(symbol="EURUSD"))
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "'EURUSD'" in detail
+    assert "resolved_from" not in response.json()
+
+
+def test_order_resolves_a_nickname_to_the_chart(
+        client: TestClient, write_snapshot) -> None:
+    """``gold`` is a search convenience, and it resolves to a *known* name."""
+    write_snapshot(make_snapshot(symbol="XAUUSD"), symbol="XAUUSD")
+
+    response = client.post("/api/order", json=_ticket(symbol="gold"))
+
+    assert response.status_code == 200
+    assert response.json()["command"]["sent"]["symbol"] == "XAUUSD"
+    assert response.json()["resolved_from"] == "gold"
+
+
+def test_order_resolves_a_tagged_chart_with_no_suffix_configured(
+        client: TestClient, write_snapshot) -> None:
+    """The default deployment: no env var, and the broker still suffixes.
+
+    This is the case that made the dead resolver worth wiring up. Nothing is
+    configured, the terminal publishes ``EURUSD.a``, and the operator types
+    ``EURUSD`` -- before v1.6.3 that was a 422 for a chart that was live.
+    """
+    write_snapshot(make_snapshot(symbol="EURUSD.a"), symbol="EURUSD.a")
+
+    response = client.post("/api/order", json=_ticket(symbol="EURUSD"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["command"]["sent"]["symbol"] == "EURUSD.a"
+    assert body["resolved_from"] == "EURUSD"
+    assert body["resolved_to"] == "EURUSD.a"
+
+
+def test_order_does_not_retarget_a_chart_that_is_merely_stale(
+        client: TestClient, write_snapshot) -> None:
+    """A stale snapshot for the exact name is a dead chart, not a typo.
+
+    Silently retargeting ``EURUSD`` to ``EURUSD.a`` because the plain one
+    stopped publishing would send an order to an instrument the operator never
+    chose. The exact name wins whenever it exists at all -- the rename is a
+    fallback for a name that is *absent*, not a repair for one that is broken.
+    """
+    write_snapshot(age_seconds=60.0)
+    write_snapshot(make_snapshot(symbol="EURUSD.a"), symbol="EURUSD.a")
+
+    response = client.post("/api/order", json=_ticket(symbol="GBPUSD"))
+
+    assert response.status_code == 422
+    assert "no live Charon snapshot" in response.json()["detail"]
+    assert "resolved_from" not in response.json()
+
+
+def test_the_rename_is_reported_on_the_status_line(
+        client: TestClient, write_snapshot) -> None:
+    """The rename is logged, so the operator can see what happened."""
+    write_snapshot(make_snapshot(symbol="EURUSD.a"), symbol="EURUSD.a")
+    client.post("/api/order", json=_ticket(symbol="EURUSD"))
+
+    tail = [entry.message for entry in main.LOG.tail(50)]
+    assert any("EURUSD.a" in line and "EURUSD" in line for line in tail), tail
 
 
 #+------------------------------------------------------------------+

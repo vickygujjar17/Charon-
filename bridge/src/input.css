@@ -275,6 +275,16 @@
   .combo-option[aria-selected="true"] {
     @apply text-brand;
   }
+  /* --- v1.6.3: the trader's word beside the broker's name. Muted and
+     --- separated on purpose -- it is a search aid, not the name that will
+     --- be sent, and it must not read as part of the symbol. */
+  .combo-alias {
+    @apply ml-2 font-mono text-num-sm text-tertiary;
+  }
+  .combo-alias::before {
+    content: "\00b7";
+    @apply mr-1.5;
+  }
   .combo-foot {
     @apply shrink-0 border-t border-borderline bg-surface-low px-2 py-1
            font-mono text-num-sm text-tertiary;

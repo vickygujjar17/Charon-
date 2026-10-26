@@ -8,7 +8,7 @@ arithmetic and the discipline: a strict stop that is always there, a trailing en
 that only ever tightens, explicit reward:risk targets, position sizing that respects a
 hard risk budget, and an optional pyramiding ladder with a basket-level ceiling.
 
-Current release: **v1.6.2**
+Current release: **v1.6.3**
 
 ---
 
@@ -496,14 +496,46 @@ EA is not publishing. `CHARON_SYMBOL_PREFIX` / `CHARON_SYMBOL_SUFFIX` (see
 `bridge\.env.example`) tell the picker which part of a name is decoration; they affect
 **display only**, so a wrong value makes labels noisy, never wrong-targeted.
 
+**Broker variants resolve to the chart that is actually live (v1.6.3).** Before this,
+`/api/order` passed the ticket's symbol straight through, so an operator whose terminal
+publishes `EURUSD.a` got "no live snapshot" for a chart that was publishing — the
+lookup code existed and was never called. A symbol that has **no snapshot of its own**
+is now matched against the symbols the EA is *actually publishing*, and a unique hit is
+used, with `resolved_from` / `resolved_to` reported in the response and the rename
+logged. Three deliberate limits, because a wrong-but-plausible name is the quiet
+failure:
+
+- the exact name always wins when it exists — including the **stale** case, which keeps
+  reporting "stale" instead of silently retargeting to a different instrument;
+- the candidates are live charts, never the broker's listing: a symbol with no chart
+  cannot receive a command, so resolving to it would only make the refusal vaguer;
+- an ambiguous hint (`mEURUSD.a` and `EURUSD.a` both collapsing to `EURUSD`) is
+  **refused** with both names, rather than sending an order to whichever sorted first.
+
+Nothing has to be configured for this. `canonical` refuses to strip a guessed affix —
+rightly, since a blanket "everything after a dot" rule turns `US30.cash` into `US30` —
+so the tag is recognised *on the known name* instead: a short, punctuation-anchored
+remainder (`.a`, `.pro`, `.raw`, `_m`, `#`) is a broker tag, and `PUSD` after `CL` is
+not. That distinction is what stops a crude ticker resolving to the Chilean peso.
+
+**The picker also knows what traders call things.** The bridge ships a small alias table
+(`Fiber`, `Cable`, `Gold`, `WTI`, `Corn`, …) in `GET /api/symbols`, so `gold` finds
+`XAUUSD` without the client keeping a second copy. The alias is display and search only:
+a row reads `XAUUSD · Gold`, and the exact broker name is what gets posted. The classifier
+that groups the list now also recognises the exchange tickers a broker lists instead of
+a word — `HG` (copper), `RB` (RBOB), `ZC/ZW/ZS/ZM/ZL`, `SB/KC/CT/CC/OJ`, `LE/GF/HE` —
+matched **whole**, never as a prefix, so `LE` does not claim `LEU…` and `HG` does not
+claim `HGD…`.
+
 `POST /api/order` pre-flight refuses (`422`) a ticket for a symbol with no live snapshot.
 Sending one would queue a file that no chart could ever drain — the operator would see
 "queued" and believe something was about to happen.
 
 **The ticket's symbol field is a searchable combobox (v1.6.1).** The collapsed control shows
 the display label; the value it posts lives in a hidden `#orderSymbol` and is always the exact
-broker name. Typing filters on the broker name, the label and the asset class, so `eur`, the
-suffix `eurusd.a` and the heading `forex` all find the same instrument. Rows are grouped under
+broker name. Typing filters on the broker name, the label, the trader's nickname and the
+asset class, so `eur`, the suffix `eurusd.a`, `cable` and the heading `forex` all find the
+same instrument. Rows are grouped under
 their class with a short badge (`FX`, `MET`, `IDX`, …), and the list is capped at 50 painted
 rows with an honest footer — a full MT5 install lists thousands, and a list nobody can scan is
 not more helpful than a filtered one.

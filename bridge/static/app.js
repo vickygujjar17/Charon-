@@ -1418,14 +1418,22 @@ function symbolEntryFor(name) {
   return null;
 }
 
-// --- the searchable text of an entry: the broker name, the display label and
-// --- the class heading, so "eur", "eurusd.a" and "forex" all find it.
+// --- the searchable text of an entry: the broker name, the display label, the
+// --- trader's word for it and the class heading, so "eur", "eurusd.a",
+// --- "cable" and "forex" all find it. The alias is v1.6.3 and comes from the
+// --- bridge, so this client keeps no nickname table of its own.
 function symbolMatches(needle) {
   if (!needle) return symbolAll.slice();
   const lower = String(needle).toLowerCase();
   return symbolAll.filter((entry) => {
     const haystack =
-      (entry.symbol || "") + " " + (entry.label || "") + " " + assetLabel(entry.asset_class);
+      (entry.symbol || "") +
+      " " +
+      (entry.label || "") +
+      " " +
+      (entry.alias || "") +
+      " " +
+      assetLabel(entry.asset_class);
     return haystack.toLowerCase().indexOf(lower) !== -1;
   });
 }
@@ -1459,6 +1467,12 @@ function symbolRows() {
         kind: "option",
         symbol: entry.symbol,
         label: entry.label || entry.symbol,
+        // --- v1.6.3: the trader's word, shown beside the label when the
+        // --- bridge supplied one. A row reads "XAUUSD - Gold": the exact
+        // --- name stays the primary text (it is what gets sent), and the
+        // --- nickname is the secondary hint a search matched on. Empty for
+        // --- an instrument with no nickname, so nothing is invented.
+        alias: entry.alias || "",
         badge: symbolBadge(key),
         selected: String(entry.symbol || "").toLowerCase() === chosen,
         chart: (entry.sources || []).indexOf("chart") !== -1,
@@ -1591,6 +1605,15 @@ function paintComboRows() {
     const name = document.createElement("span");
     name.className = "truncate";
     name.textContent = row.label;
+    if (row.alias) {
+      // --- the nickname rides inside the label span, so the row still has
+      // --- exactly two children (name, badge) and a click on either selects
+      // --- the symbol. Muted on purpose: it is a search aid, not the name.
+      const nick = document.createElement("span");
+      nick.className = "combo-alias";
+      nick.textContent = row.alias;
+      name.append(nick);
+    }
 
     const badge = document.createElement("span");
     badge.className = "tag";
@@ -1643,6 +1666,10 @@ function paintSymbolHint() {
   hint.textContent =
     "sends " +
     entry.symbol +
+    // --- v1.6.3: the nickname the operator may have searched by, so a row
+    // --- found via "gold" still reads as gold once it is chosen. Never part
+    // --- of what is sent -- the symbol above is.
+    (entry.alias ? " (" + entry.alias + ")" : "") +
     " \u00b7 " +
     assetLabel(entry.asset_class) +
     (live

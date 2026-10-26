@@ -360,19 +360,25 @@ function fetchStub(url) {
     // --- are exercised rather than assumed.
     body = {
       symbols: symbolsPrepend.concat([
-        { symbol: "GBPUSD", label: "GBPUSD", sources: ["chart"], asset_class: "forex" },
+        { symbol: "GBPUSD", label: "GBPUSD", sources: ["chart"], asset_class: "forex",
+          alias: "Cable" },
         {
           symbol: "EURUSD.a",
           label: "EURUSD",
           sources: ["chart", "broker"],
           asset_class: "forex",
+          alias: "Fiber",
         },
-        { symbol: "AUDUSD", label: "AUDUSD", sources: ["broker"], asset_class: "forex" },
+        { symbol: "AUDUSD", label: "AUDUSD", sources: ["broker"], asset_class: "forex",
+          alias: "Aussie" },
         {
           symbol: "XAUUSD",
           label: "XAUUSD",
           sources: ["broker"],
           asset_class: "metals",
+          // --- v1.6.3: a nickname the search text has to reach, and the one
+          // --- entry below with no alias at all, so both branches are real.
+          alias: "Gold",
         },
         { symbol: "US30.cash", label: "US30", sources: ["broker"], asset_class: "indices" },
       ]),
@@ -634,6 +640,24 @@ setTimeout(async () => {
   if (!eur || eur.children[0].textContent !== "EURUSD") {
     problems.push("a broker suffix bled into the displayed label");
   }
+  // --- v1.6.3: the trader's word renders beside the name, and an instrument
+  // --- with no nickname grows no empty element.
+  const gold = options.find((n) => n.dataset.symbol === "XAUUSD");
+  const goldName = gold && gold.children[0];
+  const goldKids = goldName ? goldName.children : [];
+  if (!goldName || goldKids.length !== 1) {
+    problems.push(
+      `the XAUUSD row rendered ${goldKids.length} label children, expected 1 (the alias)`
+    );
+  } else if (goldKids[0].textContent !== "Gold") {
+    problems.push(
+      `the alias chip read ${JSON.stringify(goldKids[0].textContent)}, expected Gold`
+    );
+  }
+  const us30Name = us30 && us30.children[0];
+  if (us30Name && us30Name.children.length !== 0) {
+    problems.push("a row with no alias rendered an empty nickname element anyway");
+  }
   if (search.getAttribute("aria-activedescendant") !== "symbolOption1") {
     problems.push(
       `aria-activedescendant was ${JSON.stringify(
@@ -674,6 +698,47 @@ setTimeout(async () => {
       )})`
     );
   }
+
+  // --- v1.6.3: a nickname finds the instrument, and the row still sends the
+  // --- exact broker name. "gold" matches no symbol, no label and no class --
+  // --- only XAUUSD's alias -- so this cannot pass on a substring accident.
+  // --- The trailing "as typed" escape-hatch row is deliberate and expected;
+  // --- what matters is that the FIRST row is the real instrument, because
+  // --- that is the one Enter takes.
+  search.value = "gold";
+  fire(search, "input");
+  const goldMatch = list.children.filter((n) => n.getAttribute("role") === "option");
+  if (!goldMatch.length || goldMatch[0].dataset.symbol !== "XAUUSD") {
+    problems.push(
+      `typing "gold" offered ${JSON.stringify(
+        goldMatch.map((n) => n.dataset.symbol)
+      )} first, expected XAUUSD via its alias`
+    );
+  }
+  fire(search, "keydown", { key: "Enter" });
+  if (registry.get("orderSymbol").value !== "XAUUSD") {
+    problems.push(
+      `choosing by nickname sent ${JSON.stringify(
+        registry.get("orderSymbol").value
+      )}, expected the broker name XAUUSD`
+    );
+  }
+  if (!String(registry.get("orderSymbolHint").textContent).includes("Gold")) {
+    problems.push(
+      `the hint dropped the nickname (got ${JSON.stringify(
+        registry.get("orderSymbolHint").textContent
+      )})`
+    );
+  }
+  // --- and the nickname itself must never become the command argument
+  if (registry.get("orderSymbol").value === "Gold") {
+    problems.push("the alias itself was posted as the symbol");
+  }
+
+  // --- restore a plain filter for the escape-hatch assertions below
+  fire(trigger, "click");
+  search.value = "metal";
+  fire(search, "input");
   // --- and the escape hatch must be REACHABLE, not merely present: arrowing to
   // --- the bottom of a filtered list is how an operator sends a name the bridge
   // --- has never heard of even while other rows match. A raw row that exists
